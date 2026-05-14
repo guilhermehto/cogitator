@@ -31,9 +31,9 @@ go run ./cmd/opencode-monitor
 
 ## What you'll see
 
-Two panes, split horizontally:
+One pane:
 
-- **Sessions** (left): grouped by instance.
+- **Sessions**: grouped by instance (separated by blank lines, no host/port labels).
   - **Live** rows (bright): observed via SSE during this monitor run.
     `active` means the session is currently doing work (`busy`/`generating`).
     Non-busy top-level sessions render as `inactive`.
@@ -43,8 +43,6 @@ Two panes, split horizontally:
   - **Recent** rows (dim, italic `recent` label): pulled from each instance's
     project session list, filtered to those updated in the last 30 minutes.
     Promoted to "live" the moment any event arrives for them.
-- **Needs attention** (right): subset of the above with a pending permission
-  request, pending question, or an unresolved error. Sorted by urgency.
 
 ## How it works
 
@@ -90,7 +88,7 @@ it and the recency import refills its rows.
 ## Why throwaway
 
 The goal is to validate the pipeline (mDNS → `/global/event` + `/session`
-recency → classifier → TUI) and the two-pane UX. A real version would
+recency → classifier → TUI) and the sessions-focused UX. A real version would
 replace the ad-hoc HTTP types with a generated client, add interactivity
 (approve permissions, jump into a session), and likely surface opencode's
 TUI-current-session out of band (a small opencode plugin could broadcast

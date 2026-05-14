@@ -1,7 +1,9 @@
 package main
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/goliveira/opencode-monitor/internal/state"
 )
@@ -77,4 +79,83 @@ func TestVisibleSessionsReparentsAcrossHiddenAncestor(t *testing.T) {
 		}
 	}
 	t.Fatalf("leaf-busy row not visible")
+}
+
+func TestFormatRowAgentBeforeTitleAndDedupesAgentSuffix(t *testing.T) {
+	sv := state.SessionView{
+		SessionID:  "s1",
+		Title:      "refactor parser (scribe)",
+		Agent:      "scribe",
+		StatusType: "busy",
+		Attention:  state.AttnActive,
+		Source:     state.SourceLive,
+	}
+
+	row := formatRow(sv, 120, false)
+	if !strings.Contains(row, "@scribe refactor parser") {
+		t.Fatalf("row = %q, want agent before title", row)
+	}
+	if strings.Contains(row, "(scribe)") {
+		t.Fatalf("row = %q, want duplicate agent suffix removed", row)
+	}
+}
+
+func TestRenderAllSessionsRedactsInstanceHostPort(t *testing.T) {
+	m := model{}
+	rows := []state.SessionView{
+		{
+			InstanceID:   "a",
+			InstanceName: "10.0.0.1:1234",
+			SessionID:    "s1",
+			Title:        "alpha",
+			StatusType:   "idle",
+			Attention:    state.AttnInactive,
+			Source:       state.SourceLive,
+		},
+		{
+			InstanceID:   "b",
+			InstanceName: "10.0.0.2:5678",
+			SessionID:    "s2",
+			Title:        "beta",
+			StatusType:   "busy",
+			Attention:    state.AttnActive,
+			Source:       state.SourceLive,
+		},
+	}
+
+	rendered := m.renderAllSessions(120, rows)
+	if strings.Contains(rendered, "Instance 1") || strings.Contains(rendered, "Instance 2") {
+		t.Fatalf("rendered = %q, want instance labels removed", rendered)
+	}
+	if strings.Contains(rendered, "10.0.0.1:1234") || strings.Contains(rendered, "10.0.0.2:5678") {
+		t.Fatalf("rendered = %q, want host:port redacted", rendered)
+	}
+}
+
+func TestViewDoesNotRenderNeedsAttentionPane(t *testing.T) {
+	m := model{
+		width: 120,
+		snap: state.Snapshot{
+			UpdatedAt: time.Unix(0, 0),
+			Sessions: []state.SessionView{
+				{
+					InstanceID:   "a",
+					InstanceName: "inst-a",
+					SessionID:    "s1",
+					Title:        "alpha",
+					StatusType:   "busy",
+					Attention:    state.AttnPermissionPending,
+					Source:       state.SourceLive,
+				},
+			},
+		},
+	}
+
+	rendered := m.View()
+	if strings.Contains(rendered, "Needs attention") {
+		t.Fatalf("rendered = %q, want no needs-attention pane", rendered)
+	}
+	if !strings.Contains(rendered, "Sessions") {
+		t.Fatalf("rendered = %q, want sessions pane", rendered)
+	}
 }

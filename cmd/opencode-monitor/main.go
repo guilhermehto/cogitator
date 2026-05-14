@@ -283,16 +283,11 @@ func (m model) View() string {
 		return "loading..."
 	}
 	rows := visibleSessions(m.snap.Sessions)
-	colW := (m.width - 4) / 2
-	if colW < 30 {
-		colW = 30
+	paneW := m.width - 2
+	if paneW < 30 {
+		paneW = 30
 	}
-	left := m.renderAllSessions(colW, rows)
-	right := m.renderAttention(colW, rows)
-	body := lipgloss.JoinHorizontal(lipgloss.Top,
-		paneStyle.Width(colW).Render(left),
-		paneStyle.Width(colW).Render(right),
-	)
+	body := paneStyle.Width(paneW).Render(m.renderAllSessions(paneW, rows))
 	live, recent := 0, 0
 	for _, sv := range rows {
 		if sv.Source == state.SourceRecent {
@@ -323,8 +318,10 @@ func (m model) renderAllSessions(width int, rows []state.SessionView) string {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	for _, k := range keys {
-		b.WriteString("\n" + headerStyle.Render(k) + "\n")
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteString("\n")
+		}
 		b.WriteString(renderTree(groups[k], width-2))
 	}
 	return b.String()
@@ -372,34 +369,6 @@ func renderTree(rows []state.SessionView, width int) string {
 	return b.String()
 }
 
-func (m model) renderAttention(width int, sessions []state.SessionView) string {
-	var b strings.Builder
-	b.WriteString(headerStyle.Render("Needs attention") + "\n")
-	rows := make([]state.SessionView, 0, len(sessions))
-	for _, sv := range sessions {
-		if needsAttention(sv.Attention) {
-			rows = append(rows, sv)
-		}
-	}
-	if len(rows) == 0 {
-		b.WriteString("\n" + dimStyle.Render("All clear."))
-		return b.String()
-	}
-	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].Attention.Rank() != rows[j].Attention.Rank() {
-			return rows[i].Attention.Rank() < rows[j].Attention.Rank()
-		}
-		if rows[i].LastActivity.Equal(rows[j].LastActivity) {
-			return rows[i].SessionID < rows[j].SessionID
-		}
-		return rows[i].LastActivity.After(rows[j].LastActivity)
-	})
-	for _, sv := range rows {
-		b.WriteString("\n" + formatRow(sv, width-2, false))
-	}
-	return b.String()
-}
-
 func formatRow(sv state.SessionView, width int, child bool) string {
 	title := sv.Title
 	if title == "" {
@@ -408,25 +377,40 @@ func formatRow(sv state.SessionView, width int, child bool) string {
 	if title == "" {
 		title = sv.SessionID
 	}
+	title = trimAgentSuffix(title, sv.Agent)
 	prefix := ""
 	if child {
 		prefix = dimStyle.Render("  ↳ ")
 	}
 	agentTag := ""
 	if sv.Agent != "" {
-		agentTag = " " + agentStyle.Render("@"+sv.Agent)
+		agentTag = agentStyle.Render("@" + sv.Agent)
 	}
 	titleRender := title
 	if sv.Source == state.SourceRecent {
 		titleRender = dimStyle.Render(title)
 	}
-	left := fmt.Sprintf("%s%s  %s%s", prefix, attnLabel(sv.Attention, sv.Source), titleRender, agentTag)
+	left := fmt.Sprintf("%s%s  %s", prefix, attnLabel(sv.Attention, sv.Source), titleRender)
+	if agentTag != "" {
+		left = fmt.Sprintf("%s%s  %s %s", prefix, attnLabel(sv.Attention, sv.Source), agentTag, titleRender)
+	}
 	right := styledStatus(sv.StatusType)
 	pad := width - lipgloss.Width(left) - lipgloss.Width(right)
 	if pad < 1 {
 		pad = 1
 	}
 	return left + strings.Repeat(" ", pad) + right
+}
+
+func trimAgentSuffix(title, agent string) string {
+	if agent == "" {
+		return title
+	}
+	suffix := " (" + agent + ")"
+	if strings.HasSuffix(title, suffix) {
+		return strings.TrimSuffix(title, suffix)
+	}
+	return title
 }
 
 func main() {
