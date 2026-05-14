@@ -182,28 +182,28 @@ var (
 	recentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
 	paneStyle   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 
-	attnPermStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
-	attnErrStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
-	attnIdleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
-	attnActiveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
+	attnPermStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
+	attnErrStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+	attnInactiveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	attnActiveStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
 
 	statusBusyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 )
 
 func attnLabel(a state.Attention, source state.Source) string {
-	if a == state.AttnActive && source == state.SourceRecent {
-		return recentStyle.Render("recent    ")
-	}
 	switch a {
 	case state.AttnPermissionPending:
 		return attnPermStyle.Render("PERMISSION")
 	case state.AttnErrored:
 		return attnErrStyle.Render("ERROR     ")
-	case state.AttnIdleWaiting:
-		return attnIdleStyle.Render("IDLE-WAIT ")
-	default:
-		return attnActiveStyle.Render("active    ")
 	}
+	if source == state.SourceRecent {
+		return recentStyle.Render("recent    ")
+	}
+	if a == state.AttnInactive {
+		return attnInactiveStyle.Render("inactive  ")
+	}
+	return attnActiveStyle.Render("active    ")
 }
 
 func styledStatus(s string) string {
@@ -217,22 +217,81 @@ func styledStatus(s string) string {
 	}
 }
 
+type rowKey struct {
+	instanceID string
+	sessionID  string
+}
+
+func needsAttention(a state.Attention) bool {
+	return a == state.AttnPermissionPending || a == state.AttnErrored
+}
+
+func shouldHideSubagent(sv state.SessionView) bool {
+	if sv.ParentID == "" {
+		return false
+	}
+	if needsAttention(sv.Attention) {
+		return false
+	}
+	return sv.StatusType == "idle" || sv.StatusType == ""
+}
+
+func visibleSessions(all []state.SessionView) []state.SessionView {
+	byKey := make(map[rowKey]state.SessionView, len(all))
+	hidden := make(map[rowKey]bool, len(all))
+	for _, sv := range all {
+		k := rowKey{instanceID: sv.InstanceID, sessionID: sv.SessionID}
+		byKey[k] = sv
+		if shouldHideSubagent(sv) {
+			hidden[k] = true
+		}
+	}
+
+	out := make([]state.SessionView, 0, len(all))
+	for _, sv := range all {
+		k := rowKey{instanceID: sv.InstanceID, sessionID: sv.SessionID}
+		if hidden[k] {
+			continue
+		}
+		sv.ParentID = nearestVisibleParentID(sv, byKey, hidden)
+		out = append(out, sv)
+	}
+	return out
+}
+
+func nearestVisibleParentID(sv state.SessionView, byKey map[rowKey]state.SessionView, hidden map[rowKey]bool) string {
+	parentID := sv.ParentID
+	for hops := 0; parentID != "" && hops < 32; hops++ {
+		k := rowKey{instanceID: sv.InstanceID, sessionID: parentID}
+		parent, ok := byKey[k]
+		if !ok {
+			return ""
+		}
+		if !hidden[k] {
+			return parentID
+		}
+		parentID = parent.ParentID
+	}
+	return ""
+}
+
 func (m model) View() string {
 	if m.width == 0 {
 		return "loading..."
 	}
+	rows := visibleSessions(m.snap.Sessions)
 	colW := (m.width - 4) / 2
 	if colW < 30 {
 		colW = 30
 	}
-	left := m.renderAllSessions(colW)
-	right := m.renderAttention(colW)
+	left := m.renderAllSessions(colW, rows)
+	right := m.renderAttention(colW, rows)
 	body := lipgloss.JoinHorizontal(lipgloss.Top,
 		paneStyle.Width(colW).Render(left),
 		paneStyle.Width(colW).Render(right),
 	)
 	live, recent := 0, 0
-	for _, sv := range m.snap.Sessions {
+	for _, sv := range rows {
 		if sv.Source == state.SourceRecent {
 			recent++
 		} else {
@@ -245,15 +304,15 @@ func (m model) View() string {
 	return header + "\n" + body
 }
 
-func (m model) renderAllSessions(width int) string {
+func (m model) renderAllSessions(width int, rows []state.SessionView) string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Sessions") + "\n")
-	if len(m.snap.Sessions) == 0 {
+	if len(rows) == 0 {
 		b.WriteString(dimStyle.Render("(no live or recent sessions on discovered instances)"))
 		return b.String()
 	}
 	groups := map[string][]state.SessionView{}
-	for _, sv := range m.snap.Sessions {
+	for _, sv := range rows {
 		groups[sv.InstanceName] = append(groups[sv.InstanceName], sv)
 	}
 	keys := make([]string, 0, len(groups))
@@ -310,12 +369,12 @@ func renderTree(rows []state.SessionView, width int) string {
 	return b.String()
 }
 
-func (m model) renderAttention(width int) string {
+func (m model) renderAttention(width int, sessions []state.SessionView) string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Needs attention") + "\n")
-	rows := make([]state.SessionView, 0, len(m.snap.Sessions))
-	for _, sv := range m.snap.Sessions {
-		if sv.Attention != state.AttnActive {
+	rows := make([]state.SessionView, 0, len(sessions))
+	for _, sv := range sessions {
+		if needsAttention(sv.Attention) {
 			rows = append(rows, sv)
 		}
 	}

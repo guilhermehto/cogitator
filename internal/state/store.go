@@ -5,7 +5,7 @@
 //     this monitor run. These get the full attention classification.
 //   - "recent": imported from /session because they were touched
 //     within the recency window. Treated as discovery context only — they
-//     never trigger IDLE-WAIT attention on their own. Promoted to "live"
+//     are still discoverable even when not actively working. Promoted to "live"
 //     the moment any event arrives for them.
 package state
 
@@ -503,7 +503,7 @@ func (s *Store) snapshot() Snapshot {
 				Agent:        row.info.Agent,
 				StatusType:   row.status.Type,
 				Source:       row.source,
-				Attention:    classifyForSource(row, now),
+				Attention:    Classify(row.status.Type, row.hasPerm, row.lastError, row.lastActivity),
 				LastActivity: row.lastActivity,
 			})
 		}
@@ -518,15 +518,4 @@ func (s *Store) snapshot() Snapshot {
 		return rows[i].LastActivity.After(rows[j].LastActivity)
 	})
 	return Snapshot{Sessions: rows, UpdatedAt: now}
-}
-
-func classifyForSource(row *sessionRow, now time.Time) Attention {
-	a := Classify(row.status.Type, row.hasPerm, row.lastError, row.lastActivity, now)
-	// "recent" sessions weren't observed transitioning to idle by us; suppress
-	// IDLE-WAIT so the attention pane stays meaningful. Permission/error
-	// signals are real-time and still apply.
-	if row.source == SourceRecent && a == AttnIdleWaiting {
-		return AttnActive
-	}
-	return a
 }
