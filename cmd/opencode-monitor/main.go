@@ -139,10 +139,11 @@ func (s *supervisor) run(ctx context.Context, inst discovery.Instance) {
 type snapshotMsg state.Snapshot
 
 type model struct {
-	snap   state.Snapshot
-	width  int
-	height int
-	snaps  <-chan state.Snapshot
+	snap              state.Snapshot
+	width             int
+	height            int
+	snaps             <-chan state.Snapshot
+	inactiveCollapsed bool
 }
 
 func (m model) Init() tea.Cmd {
@@ -165,6 +166,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
+		case "a":
+			m.inactiveCollapsed = !m.inactiveCollapsed
+			return m, nil
 		}
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -301,7 +305,16 @@ func shouldHideSubagent(sv state.SessionView) bool {
 	return sv.StatusType == "idle" || sv.StatusType == ""
 }
 
-func visibleSessions(all []state.SessionView) []state.SessionView {
+// visibleSessions filters the snapshot rows for the sessions pane. It
+// always drops finished subagents (idle leaf nodes) and reparents
+// surviving children across hidden ancestors. When collapseInactive is
+// true it additionally drops top-level rows whose attention is
+// AttnInactive so the pane fills with sessions that actually need eyes.
+//
+// The second return value tracks how many inactive rows belong to each
+// instance (regardless of whether they were dropped) so the caller can
+// surface a `▸ N inactive` summary line per group.
+func visibleSessions(all []state.SessionView, collapseInactive bool) ([]state.SessionView, map[string]int) {
 	byKey := make(map[rowKey]state.SessionView, len(all))
 	hidden := make(map[rowKey]bool, len(all))
 	for _, sv := range all {
@@ -312,16 +325,23 @@ func visibleSessions(all []state.SessionView) []state.SessionView {
 		}
 	}
 
+	inactiveByInstance := make(map[string]int)
 	out := make([]state.SessionView, 0, len(all))
 	for _, sv := range all {
 		k := rowKey{instanceID: sv.InstanceID, sessionID: sv.SessionID}
 		if hidden[k] {
 			continue
 		}
+		if sv.Attention == state.AttnInactive {
+			inactiveByInstance[sv.InstanceName]++
+			if collapseInactive {
+				continue
+			}
+		}
 		sv.ParentID = nearestVisibleParentID(sv, byKey, hidden)
 		out = append(out, sv)
 	}
-	return out
+	return out, inactiveByInstance
 }
 
 func nearestVisibleParentID(sv state.SessionView, byKey map[rowKey]state.SessionView, hidden map[rowKey]bool) string {
@@ -344,12 +364,12 @@ func (m model) View() string {
 	if m.width == 0 {
 		return "loading..."
 	}
-	rows := visibleSessions(m.snap.Sessions)
+	rows, inactiveByInstance := visibleSessions(m.snap.Sessions, m.inactiveCollapsed)
 	paneW := m.width - 2
 	if paneW < 30 {
 		paneW = 30
 	}
-	body := paneStyle.Width(paneW).Render(m.renderAllSessions(paneW, rows))
+	body := paneStyle.Width(paneW).Render(m.renderAllSessions(paneW, rows, inactiveByInstance))
 	live, recent := 0, 0
 	for _, sv := range rows {
 		if sv.Source == state.SourceRecent {
@@ -359,15 +379,23 @@ func (m model) View() string {
 		}
 	}
 	header := titleStyle.Render("opencode-monitor") + dimStyle.Render(
-		fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  q to quit",
-			live, recent, int(recentWindow.Minutes()), m.snap.UpdatedAt.Format("15:04:05")))
+		fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s inactive  ·  q to quit",
+			live, recent, int(recentWindow.Minutes()), m.snap.UpdatedAt.Format("15:04:05"),
+			toggleVerb(m.inactiveCollapsed)))
 	return header + "\n" + body
 }
 
-func (m model) renderAllSessions(width int, rows []state.SessionView) string {
+func toggleVerb(collapsed bool) string {
+	if collapsed {
+		return "show"
+	}
+	return "hide"
+}
+
+func (m model) renderAllSessions(width int, rows []state.SessionView, inactiveByInstance map[string]int) string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Sessions") + "\n")
-	if len(rows) == 0 {
+	if len(rows) == 0 && len(inactiveByInstance) == 0 {
 		b.WriteString(dimStyle.Render("(no live or recent sessions on discovered instances)"))
 		return b.String()
 	}
@@ -380,8 +408,15 @@ func (m model) renderAllSessions(width int, rows []state.SessionView) string {
 	for _, sv := range rows {
 		groups[sv.InstanceName] = append(groups[sv.InstanceName], sv)
 	}
-	keys := make([]string, 0, len(groups))
+	keySet := map[string]struct{}{}
 	for k := range groups {
+		keySet[k] = struct{}{}
+	}
+	for k := range inactiveByInstance {
+		keySet[k] = struct{}{}
+	}
+	keys := make([]string, 0, len(keySet))
+	for k := range keySet {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
@@ -389,7 +424,16 @@ func (m model) renderAllSessions(width int, rows []state.SessionView) string {
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		b.WriteString(renderTree(now, groups[k], width-2))
+		if rows := groups[k]; len(rows) > 0 {
+			b.WriteString(renderTree(now, rows, width-2))
+		}
+		if n := inactiveByInstance[k]; n > 0 {
+			marker := "▸"
+			if !m.inactiveCollapsed {
+				marker = "▾"
+			}
+			b.WriteString(dimStyle.Render(fmt.Sprintf("%s %d inactive", marker, n)) + "\n")
+		}
 	}
 	return b.String()
 }
@@ -529,7 +573,7 @@ func main() {
 		}
 	}()
 
-	m := model{snaps: store.Subscribe()}
+	m := model{snaps: store.Subscribe(), inactiveCollapsed: true}
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

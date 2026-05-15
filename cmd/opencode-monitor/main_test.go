@@ -27,7 +27,7 @@ func TestVisibleSessionsHidesFinishedSubagents(t *testing.T) {
 		makeSessionView("child-busy", "root", "busy", state.AttnActive),
 	}
 
-	visible := visibleSessions(rows)
+	visible, _ := visibleSessions(rows, false)
 	if len(visible) != 2 {
 		t.Fatalf("visible count = %d, want 2", len(visible))
 	}
@@ -52,7 +52,7 @@ func TestVisibleSessionsKeepsUrgentSubagentsVisible(t *testing.T) {
 		makeSessionView("child-err", "root", "", state.AttnErrored),
 	}
 
-	visible := visibleSessions(rows)
+	visible, _ := visibleSessions(rows, false)
 	ids := map[string]bool{}
 	for _, sv := range visible {
 		ids[sv.SessionID] = true
@@ -69,7 +69,7 @@ func TestVisibleSessionsReparentsAcrossHiddenAncestor(t *testing.T) {
 		makeSessionView("leaf-busy", "mid-idle", "busy", state.AttnActive),
 	}
 
-	visible := visibleSessions(rows)
+	visible, _ := visibleSessions(rows, false)
 	for _, sv := range visible {
 		if sv.SessionID == "leaf-busy" {
 			if sv.ParentID != "root" {
@@ -123,7 +123,7 @@ func TestRenderAllSessionsRedactsInstanceHostPort(t *testing.T) {
 		},
 	}
 
-	rendered := m.renderAllSessions(120, rows)
+	rendered := m.renderAllSessions(120, rows, nil)
 	if strings.Contains(rendered, "Instance 1") || strings.Contains(rendered, "Instance 2") {
 		t.Fatalf("rendered = %q, want instance labels removed", rendered)
 	}
