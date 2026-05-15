@@ -191,30 +191,46 @@ var (
 	statusBusyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 )
 
+// Single-cell mdi glyphs that replace the padded state label. Each glyph
+// is paired with the existing attention colour so an attention row visibly
+// dominates an inactive one without reading the label.
+const (
+	glyphActive     = "\U000f09de" // 󰧞
+	glyphInactive   = "\U000f0764" // 󰝤
+	glyphRecent     = "\U000f02da" // 󰋚
+	glyphQuestion   = "\U000f0625" // 󰘥
+	glyphPermission = "\U000f033e" // 󰌾
+	glyphError      = "\U000f0026" // 󰀦
+)
+
+// attnLabel returns a single coloured glyph plus a trailing space so the
+// STATE column occupies a stable 2-cell footprint regardless of state.
 func attnLabel(a state.Attention, source state.Source) string {
 	switch a {
 	case state.AttnPermissionPending:
-		return attnPermStyle.Render("PERMISSION")
+		return attnPermStyle.Render(glyphPermission) + " "
 	case state.AttnQuestionPending:
-		return attnQuestionStyle.Render("QUESTION  ")
+		return attnQuestionStyle.Render(glyphQuestion) + " "
 	case state.AttnErrored:
-		return attnErrStyle.Render("ERROR     ")
+		return attnErrStyle.Render(glyphError) + " "
 	}
 	if source == state.SourceRecent {
-		return recentStyle.Render("recent    ")
+		return recentStyle.Render(glyphRecent) + " "
 	}
 	if a == state.AttnInactive {
-		return attnInactiveStyle.Render("inactive  ")
+		return attnInactiveStyle.Render(glyphInactive) + " "
 	}
-	return attnActiveStyle.Render("active    ")
+	return attnActiveStyle.Render(glyphActive) + " "
 }
 
 func styledStatus(s string) string {
 	switch s {
 	case "busy", "generating":
 		return statusBusyStyle.Render(s)
-	case "":
-		return dimStyle.Render("·")
+	case "", "idle":
+		// idle is the default state; collapsing it removes visual noise
+		// so the eye lands on rows that actually need attention.
+		return ""
 	default:
 		return dimStyle.Render(s)
 	}
