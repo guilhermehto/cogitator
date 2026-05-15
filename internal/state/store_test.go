@@ -146,3 +146,78 @@ func TestApplyEventQuestionPendingLifecycle(t *testing.T) {
 	applyQuestion("call-2", "error")
 	assertAttention(AttnInactive)
 }
+func TestSnapshotDedupesSessionAcrossInstances(t *testing.T) {
+	ctx := context.Background()
+	s := New(ctx)
+	instA := discovery.Instance{ID: "127.0.0.1:1111", Host: "127.0.0.1", Port: 1111}
+	instB := discovery.Instance{ID: "127.0.0.1:2222", Host: "127.0.0.1", Port: 2222}
+	s.AddInstance(instA)
+	s.AddInstance(instB)
+
+	// Both processes serve the same project, so /session returns the same
+	// session ID on each. Each instance therefore lands a SourceRecent row.
+	shared := []oc.Session{makeSession("ses_dup", 1_000)}
+	s.SyncRecent(instA.ID, shared)
+	s.SyncRecent(instB.ID, shared)
+
+	// Only one process holds the user's TUI session, so only one SSE
+	// event arrives — that instance's row gets promoted to SourceLive.
+	s.ApplyEvent(instB.ID, oc.Event{
+		Type:       "session.status",
+		Properties: mustJSON(t, oc.SessionStatusEvt{SessionID: "ses_dup", Status: oc.Status{Type: "busy"}}),
+	})
+
+	snap := s.snapshot()
+	count := 0
+	var winner SessionView
+	for _, sv := range snap.Sessions {
+		if sv.SessionID == "ses_dup" {
+			count++
+			winner = sv
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 row for ses_dup after dedupe, got %d", count)
+	}
+	if winner.Source != SourceLive {
+		t.Fatalf("expected live row to win dedupe, got source %q", winner.Source)
+	}
+	if winner.InstanceID != instB.ID {
+		t.Fatalf("expected live instance %q to win, got %q", instB.ID, winner.InstanceID)
+	}
+}
+
+func TestSnapshotDedupePicksMostRecentWhenSameSource(t *testing.T) {
+	ctx := context.Background()
+	s := New(ctx)
+	instA := discovery.Instance{ID: "127.0.0.1:1111", Host: "127.0.0.1", Port: 1111}
+	instB := discovery.Instance{ID: "127.0.0.1:2222", Host: "127.0.0.1", Port: 2222}
+	s.AddInstance(instA)
+	s.AddInstance(instB)
+
+	// Both rows are SourceRecent (no SSE event for either) but instB's
+	// /session response carried a fresher Time.Updated. The dedupe should
+	// pick the row with the more recent LastActivity within the same source.
+	s.SyncRecent(instA.ID, []oc.Session{makeSession("ses_dup", 1_000)})
+	s.SyncRecent(instB.ID, []oc.Session{makeSession("ses_dup", 5_000)})
+
+	snap := s.snapshot()
+	count := 0
+	var winner SessionView
+	for _, sv := range snap.Sessions {
+		if sv.SessionID == "ses_dup" {
+			count++
+			winner = sv
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 row for ses_dup after dedupe, got %d", count)
+	}
+	if winner.InstanceID != instB.ID {
+		t.Fatalf("expected fresher instance %q to win, got %q", instB.ID, winner.InstanceID)
+	}
+	wantActivity := time.UnixMilli(5_000)
+	if !winner.LastActivity.Equal(wantActivity) {
+		t.Fatalf("expected LastActivity %v, got %v", wantActivity, winner.LastActivity)
+	}
+}

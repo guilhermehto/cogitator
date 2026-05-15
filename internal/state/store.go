@@ -535,10 +535,20 @@ func (s *Store) snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	rows := make([]SessionView, 0, 32)
+	// Multiple opencode processes started in the same project directory
+	// expose the same project-scoped session list, so the same SessionID
+	// can appear under several InstanceStates. Dedupe to one row per
+	// SessionID, preferring the live source (it has the SSE-derived
+	// status/activity the recent-only row lacks). Within the same source,
+	// pick the row with the most recent activity.
+	type candidate struct {
+		view SessionView
+		live bool
+	}
+	best := map[string]candidate{}
 	for _, inst := range s.instances {
 		for _, row := range inst.sessions {
-			rows = append(rows, SessionView{
+			sv := SessionView{
 				InstanceID:   inst.id,
 				InstanceName: inst.name,
 				SessionID:    row.info.ID,
@@ -551,8 +561,25 @@ func (s *Store) snapshot() Snapshot {
 				Source:       row.source,
 				Attention:    Classify(row.status.Type, row.hasPerm, row.hasQuestion, row.lastError, row.lastActivity),
 				LastActivity: row.lastActivity,
-			})
+			}
+			cand := candidate{view: sv, live: row.source == SourceLive}
+			cur, ok := best[sv.SessionID]
+			if !ok {
+				best[sv.SessionID] = cand
+				continue
+			}
+			if cand.live && !cur.live {
+				best[sv.SessionID] = cand
+				continue
+			}
+			if cand.live == cur.live && sv.LastActivity.After(cur.view.LastActivity) {
+				best[sv.SessionID] = cand
+			}
 		}
+	}
+	rows := make([]SessionView, 0, len(best))
+	for _, c := range best {
+		rows = append(rows, c.view)
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].InstanceID != rows[j].InstanceID {
