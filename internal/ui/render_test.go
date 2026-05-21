@@ -96,7 +96,7 @@ func TestRenderAllSessionsCollapsedHidesRecentRowsButKeepsMarker(t *testing.T) {
 	visible, counts := visibleSessions([]state.SessionView{
 		liveSessionView("live", "", "busy", state.AttnActive),
 		recentSessionView("history", "", "idle", state.AttnInactive),
-	}, true)
+	}, true, time.Time{}, 0)
 
 	rendered := m.renderAllSessions(200, visible, counts)
 	if strings.Contains(rendered, "history") {

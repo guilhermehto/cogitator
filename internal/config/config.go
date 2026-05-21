@@ -19,6 +19,11 @@ type Config struct {
 	RecentSyncTimeout       time.Duration
 	SessionLookupTimeout    time.Duration
 	UnreachableThreshold    int
+	// InactiveHideAfter hides idle sessions from the sessions pane once
+	// their last activity is older than this threshold. Sessions needing
+	// attention (permission, question, error) are never hidden regardless
+	// of age. A non-positive value disables the rule.
+	InactiveHideAfter time.Duration
 }
 
 func Default() *Config {
@@ -37,5 +42,6 @@ func Default() *Config {
 		RecentSyncTimeout:       8 * time.Second,
 		SessionLookupTimeout:    5 * time.Second,
 		UnreachableThreshold:    3,
+		InactiveHideAfter:       5 * time.Minute,
 	}
 }

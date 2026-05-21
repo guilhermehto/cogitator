@@ -295,7 +295,11 @@ func (m model) View() string {
 		return "loading..."
 	}
 
-	rows, recentByInstance := visibleSessions(m.snap.Sessions, m.recentCollapsed)
+	cfg := m.cfg
+	if cfg == nil {
+		cfg = config.Default()
+	}
+	rows, recentByInstance := visibleSessions(m.snap.Sessions, m.recentCollapsed, m.snap.UpdatedAt, cfg.InactiveHideAfter)
 	paneW := m.width - 2
 	if paneW < 30 {
 		paneW = 30
@@ -310,10 +314,6 @@ func (m model) View() string {
 		}
 	}
 
-	cfg := m.cfg
-	if cfg == nil {
-		cfg = config.Default()
-	}
 	recentMins := int(cfg.RecentWindow.Minutes())
 
 	var headerHint string

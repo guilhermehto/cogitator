@@ -2,6 +2,7 @@ package ui
 
 import (
 	"testing"
+	"time"
 
 	"github.com/guilhermehto/cogitator/internal/state"
 )
@@ -37,7 +38,7 @@ func TestVisibleSessionsHidesFinishedSubagents(t *testing.T) {
 		makeSessionView("child-busy", "root", "busy", state.AttnActive),
 	}
 
-	visible, _ := visibleSessions(rows, false)
+	visible, _ := visibleSessions(rows, false, time.Time{}, 0)
 	if len(visible) != 2 {
 		t.Fatalf("visible count = %d, want 2", len(visible))
 	}
@@ -62,7 +63,7 @@ func TestVisibleSessionsKeepsUrgentSubagentsVisible(t *testing.T) {
 		makeSessionView("child-err", "root", "", state.AttnErrored),
 	}
 
-	visible, _ := visibleSessions(rows, false)
+	visible, _ := visibleSessions(rows, false, time.Time{}, 0)
 	ids := map[string]bool{}
 	for _, sv := range visible {
 		ids[sv.SessionID] = true
@@ -79,7 +80,7 @@ func TestVisibleSessionsReparentsAcrossHiddenAncestor(t *testing.T) {
 		makeSessionView("leaf-busy", "mid-idle", "busy", state.AttnActive),
 	}
 
-	visible, _ := visibleSessions(rows, false)
+	visible, _ := visibleSessions(rows, false, time.Time{}, 0)
 	for _, sv := range visible {
 		if sv.SessionID == "leaf-busy" {
 			if sv.ParentID != "root" {
@@ -101,7 +102,7 @@ func TestVisibleSessionsCollapseDropsRecentKeepsLive(t *testing.T) {
 		recentSessionView("history", "", "idle", state.AttnInactive),
 	}
 
-	visible, counts := visibleSessions(rows, true)
+	visible, counts := visibleSessions(rows, true, time.Time{}, 0)
 	ids := map[string]bool{}
 	for _, sv := range visible {
 		ids[sv.SessionID] = true
@@ -124,7 +125,7 @@ func TestVisibleSessionsExpandKeepsRecent(t *testing.T) {
 		liveSessionView("active", "", "busy", state.AttnActive),
 		recentSessionView("history", "", "idle", state.AttnInactive),
 	}
-	visible, counts := visibleSessions(rows, false)
+	visible, counts := visibleSessions(rows, false, time.Time{}, 0)
 	ids := map[string]bool{}
 	for _, sv := range visible {
 		ids[sv.SessionID] = true
@@ -142,7 +143,7 @@ func TestVisibleSessionsCollapseReparentsLiveChildAcrossHiddenRecentRoot(t *test
 		recentSessionView("recent-root", "", "idle", state.AttnInactive),
 		liveSessionView("live-child", "recent-root", "busy", state.AttnActive),
 	}
-	visible, _ := visibleSessions(rows, true)
+	visible, _ := visibleSessions(rows, true, time.Time{}, 0)
 	for _, sv := range visible {
 		if sv.SessionID == "live-child" {
 			if sv.ParentID != "" {
@@ -152,4 +153,64 @@ func TestVisibleSessionsCollapseReparentsLiveChildAcrossHiddenRecentRoot(t *test
 		}
 	}
 	t.Fatalf("live-child not visible: %+v", visible)
+}
+
+func TestVisibleSessionsHidesIdleSessionsPastInactivityWindow(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	withActivity := func(sv state.SessionView, ago time.Duration) state.SessionView {
+		sv.LastActivity = now.Add(-ago)
+		return sv
+	}
+
+	stale := withActivity(liveSessionView("stale-idle", "", "idle", state.AttnInactive), 10*time.Minute)
+	fresh := withActivity(liveSessionView("fresh-idle", "", "idle", state.AttnInactive), 1*time.Minute)
+	staleButBusy := withActivity(liveSessionView("stale-busy", "", "busy", state.AttnActive), 10*time.Minute)
+	staleButUrgent := withActivity(liveSessionView("stale-urgent", "", "idle", state.AttnPermissionPending), 10*time.Minute)
+	noActivity := liveSessionView("never-active", "", "idle", state.AttnInactive) // zero LastActivity
+
+	rows := []state.SessionView{stale, fresh, staleButBusy, staleButUrgent, noActivity}
+	visible, _ := visibleSessions(rows, false, now, 5*time.Minute)
+
+	ids := map[string]bool{}
+	for _, sv := range visible {
+		ids[sv.SessionID] = true
+	}
+	if ids["stale-idle"] {
+		t.Fatalf("stale idle session must be hidden past inactivity window: %+v", ids)
+	}
+	for _, must := range []string{"fresh-idle", "stale-busy", "stale-urgent", "never-active"} {
+		if !ids[must] {
+			t.Fatalf("session %q must remain visible: %+v", must, ids)
+		}
+	}
+}
+
+func TestVisibleSessionsInactivityDisabledByZeroThreshold(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	stale := liveSessionView("stale-idle", "", "idle", state.AttnInactive)
+	stale.LastActivity = now.Add(-1 * time.Hour)
+
+	visible, _ := visibleSessions([]state.SessionView{stale}, false, now, 0)
+	if len(visible) != 1 || visible[0].SessionID != "stale-idle" {
+		t.Fatalf("zero threshold must disable inactivity hiding, got %+v", visible)
+	}
+}
+
+func TestVisibleSessionsReparentsAcrossInactiveAncestor(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	root := liveSessionView("root", "", "idle", state.AttnInactive)
+	root.LastActivity = now.Add(-30 * time.Minute)
+	leaf := liveSessionView("leaf", "root", "busy", state.AttnActive)
+	leaf.LastActivity = now
+
+	visible, _ := visibleSessions([]state.SessionView{root, leaf}, false, now, 5*time.Minute)
+	for _, sv := range visible {
+		if sv.SessionID == "leaf" {
+			if sv.ParentID != "" {
+				t.Fatalf("leaf parent across hidden inactive ancestor should be empty, got %q", sv.ParentID)
+			}
+			return
+		}
+	}
+	t.Fatalf("leaf not visible: %+v", visible)
 }
