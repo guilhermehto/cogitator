@@ -1,7 +1,7 @@
 # cogitator
 
 `cogitator` is a terminal monitor for locally running [opencode](https://opencode.ai) instances.
-It discovers instances over mDNS, subscribes to their event streams, and renders one live sessions view with attention signals (permission requests, pending questions, and errors).
+It discovers instances over mDNS, subscribes to their event streams, and renders one live sessions view with attention signals (permission requests, pending questions, and errors). When [Taskwarrior](https://taskwarrior.org) is installed, it also embeds a Tasks pane for adding, editing, starting/stopping, completing, and deleting tasks without leaving the TUI.
 
 ## Install
 
@@ -57,6 +57,7 @@ go run ./cmd/cogitator
 | `j` / `k` | Tasks pane focused | move cursor down / up |
 | `a` | Tasks pane focused | open inline prompt to add a new task |
 | `e` | Tasks pane focused | open inline prompt to edit the selected task |
+| `s` | Tasks pane focused | start the selected task, or stop it if already running |
 | `d` | Tasks pane focused | mark the selected task done |
 | `D` | Tasks pane focused | prompt to delete the selected task (confirm with `y`) |
 | `U` | Tasks pane focused | undo the last Taskwarrior mutation |
@@ -84,6 +85,14 @@ cogitator displays a live Tasks pane alongside the Sessions pane when a
   Tasks pane is shown; if not, the pane is hidden and no error is surfaced.
 - There is no `--no-tasks` flag. The pane is intentionally always shown when
   `task` is available — the decision is auto-detected, not opt-in.
+
+**Visual indicators:**
+
+- The `ST` column shows a priority glyph (high / medium / low) for idle tasks.
+- A running task (one started via `s` or `task <id> start`) is rendered bold
+  green with a play glyph (`󰐊`) in the `ST` column, replacing the priority
+  glyph for that row. Press `s` again to stop it. The legend at the bottom of
+  the TUI lists each glyph.
 
 **Environment variables:**
 
