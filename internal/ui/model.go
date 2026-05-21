@@ -306,7 +306,7 @@ func (m model) View() string {
 	}
 	header := titleStyle.Render("cogitator") + dimStyle.Render(headerHint)
 
-	legend := legendLine()
+	legend := legendLine(m.width)
 	footer := unreachableFooter(m.snap.UnreachableInstances)
 	mutationFooter := taskwarriorErrorFooter(m.lastMutationOp, m.lastMutationErr)
 

@@ -49,6 +49,53 @@ go run ./cmd/cogitator
 
 `q`, `Esc`, or `Ctrl+C` quits.
 
+### Key bindings
+
+| Key | Context | Action |
+| --- | --- | --- |
+| `Tab` | anywhere (outside a prompt) | swap focus between Sessions and Tasks panes |
+| `j` / `k` | Tasks pane focused | move cursor down / up |
+| `a` | Tasks pane focused | open inline prompt to add a new task |
+| `e` | Tasks pane focused | open inline prompt to edit the selected task |
+| `d` | Tasks pane focused | mark the selected task done |
+| `D` | Tasks pane focused | prompt to delete the selected task (confirm with `y`) |
+| `U` | Tasks pane focused | undo the last Taskwarrior mutation |
+| `a` | Sessions pane focused | toggle collapsed/expanded recent sessions |
+| `Esc` | inside add/edit prompt | cancel the prompt without quitting |
+| `Enter` | inside add/edit prompt | submit the prompt |
+
+> **Note:** `Tab` inside the inline add/edit prompt is consumed by the text
+> input widget (cursor movement / suggestion acceptance is disabled, so Tab
+> does nothing there). Use `Esc` to cancel the prompt without quitting.
+
+## Taskwarrior integration
+
+cogitator displays a live Tasks pane alongside the Sessions pane when a
+`task` binary is found on the cogitator process's `$PATH`.
+
+**Requirements:**
+
+- A `task` (Taskwarrior) binary must be reachable on the `$PATH` of the
+  process that runs cogitator. No configuration flag is needed.
+
+**Auto-detection:**
+
+- cogitator calls `task --version` at startup. If the binary is present the
+  Tasks pane is shown; if not, the pane is hidden and no error is surfaced.
+- There is no `--no-tasks` flag. The pane is intentionally always shown when
+  `task` is available — the decision is auto-detected, not opt-in.
+
+**Environment variables:**
+
+cogitator inherits the full environment of the process that launched it.
+Taskwarrior respects the following variables from that environment:
+
+| Variable | Effect |
+| --- | --- |
+| `$PATH` | must include the directory containing the `task` binary |
+| `$TASKDATA` | overrides the Taskwarrior data directory (`~/.task` by default) |
+| `$TASKRC` | overrides the Taskwarrior config file (`~/.taskrc` by default) |
+
 ## CLI reference
 
 - `--bell`: ring the terminal bell when a session transitions into an attention state.

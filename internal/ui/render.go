@@ -127,8 +127,11 @@ func styledStatus(s string) string {
 	}
 }
 
-func legendLine() string {
-	parts := []string{
+// legendLine renders the status-icon legend, optionally appending task-priority
+// glyphs. If the combined line would exceed width, the task glyphs are omitted
+// so the legend never wraps on narrow terminals.
+func legendLine(width int) string {
+	sessionParts := []string{
 		dimStyle.Render("legend:"),
 		attnActiveStyle.Render(glyphActive) + " " + dimStyle.Render("active"),
 		attnInactiveStyle.Render(glyphInactive) + " " + dimStyle.Render("inactive"),
@@ -137,7 +140,20 @@ func legendLine() string {
 		attnPermStyle.Render(glyphPermission) + " " + dimStyle.Render("permission"),
 		attnErrStyle.Render(glyphError) + " " + dimStyle.Render("error"),
 	}
-	return strings.Join(parts, "  ")
+	sessionLegend := strings.Join(sessionParts, "  ")
+
+	taskParts := []string{
+		taskPriorityGlyph["H"] + " " + dimStyle.Render("high"),
+		"● " + dimStyle.Render("medium"),
+		"· " + dimStyle.Render("low"),
+	}
+	taskLegend := strings.Join(taskParts, " · ")
+
+	combined := sessionLegend + "    " + taskLegend
+	if width > 0 && lipgloss.Width(combined) > width {
+		return sessionLegend
+	}
+	return combined
 }
 
 func toggleVerb(collapsed bool) string {

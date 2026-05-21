@@ -221,3 +221,37 @@ func TestViewMutationErrorFooterAbsentOnNilErr(t *testing.T) {
 		t.Fatalf("expected no mutation-error footer when err is nil, got %q", rendered)
 	}
 }
+
+func TestLegendLineIncludesTaskGlyphsOnWideTerminal(t *testing.T) {
+	// A very wide terminal should include the task-priority glyphs.
+	got := legendLine(300)
+	if !strings.Contains(got, "high") {
+		t.Fatalf("expected task priority glyphs on wide terminal, got %q", got)
+	}
+	if !strings.Contains(got, "medium") {
+		t.Fatalf("expected 'medium' glyph label on wide terminal, got %q", got)
+	}
+	if !strings.Contains(got, "low") {
+		t.Fatalf("expected 'low' glyph label on wide terminal, got %q", got)
+	}
+}
+
+func TestLegendLineOmitsTaskGlyphsOnNarrowTerminal(t *testing.T) {
+	// A very narrow terminal must not include the task-priority glyphs.
+	got := legendLine(40)
+	if strings.Contains(got, "high") {
+		t.Fatalf("expected task priority glyphs omitted on narrow terminal, got %q", got)
+	}
+	// Session glyphs must still be present.
+	if !strings.Contains(got, "legend:") {
+		t.Fatalf("expected session legend prefix on narrow terminal, got %q", got)
+	}
+}
+
+func TestLegendLineZeroWidthIncludesTaskGlyphs(t *testing.T) {
+	// width=0 means "unknown / unconstrained" — task glyphs should be included.
+	got := legendLine(0)
+	if !strings.Contains(got, "high") {
+		t.Fatalf("expected task priority glyphs when width=0 (unconstrained), got %q", got)
+	}
+}
