@@ -37,8 +37,10 @@ func (m model) renderTasksPane(outerH, outerW int) string {
 		return b.String()
 	}
 
-	// Sort: urgency descending, tie-break by numeric ID ascending.
-	sorted := sortedTasks(m.tasks)
+	// m.tasks is already sorted at load time (see tasksLoadedMsg handler in
+	// model.go). Render in order so the displayed index matches m.taskCursor
+	// — critical for action routing (done/start/stop/edit/delete all use
+	// m.tasks[m.taskCursor] and must target the highlighted row).
 
 	// Inner width: border (1 each side) + padding (1 each side) = 4.
 	innerW := outerW - 4
@@ -60,8 +62,8 @@ func (m model) renderTasksPane(outerH, outerW int) string {
 	}
 
 	// Render task rows.
-	rows := make([]string, 0, len(sorted))
-	for i, tv := range sorted {
+	rows := make([]string, 0, len(m.tasks))
+	for i, tv := range m.tasks {
 		selected := m.focus == focusTasks && m.taskCursor >= 0 && i == m.taskCursor
 		active := !tv.Start.IsZero()
 		rows = append(rows, formatTaskRow(tv, innerW, selected, active))
@@ -84,15 +86,23 @@ func (m model) renderTasksPane(outerH, outerW int) string {
 	return b.String()
 }
 
-// sortedTasks returns a copy of tasks sorted by urgency descending, then ID
-// ascending (numeric when parseable, lexicographic otherwise).
+// sortedTasks returns a copy of tasks ordered for display: running tasks
+// (non-zero Start) first, then by numeric ID ascending (lexicographic when an
+// ID is not a valid int — Taskwarrior IDs are normally small integers, but
+// non-numeric synthetic IDs sort stably).
+//
+// Stable ordering matters because m.taskCursor is an index into the rendered
+// list; sortedTasks is called once at load time and the result is stored as
+// m.tasks, so the cursor stays in sync with both the display and action
+// dispatch (Done/Start/Stop/Edit/Delete all read m.tasks[m.taskCursor]).
 func sortedTasks(tasks []taskwarrior.TaskView) []taskwarrior.TaskView {
 	cp := append([]taskwarrior.TaskView(nil), tasks...)
 	sort.SliceStable(cp, func(i, j int) bool {
-		if cp[i].Urgency != cp[j].Urgency {
-			return cp[i].Urgency > cp[j].Urgency
+		ri := !cp[i].Start.IsZero()
+		rj := !cp[j].Start.IsZero()
+		if ri != rj {
+			return ri
 		}
-		// Tie-break: numeric ID ascending.
 		ni, erri := strconv.Atoi(cp[i].ID)
 		nj, errj := strconv.Atoi(cp[j].ID)
 		if erri == nil && errj == nil {

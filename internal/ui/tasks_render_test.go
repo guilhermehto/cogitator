@@ -773,3 +773,166 @@ func TestRenderTasksPaneOverflowTruncation(t *testing.T) {
 		t.Errorf("expected overflow '… +N more' line, got %q", out)
 	}
 }
+
+// ---- Sort ordering (sortedTasks) ----
+
+// TestSortedTasksByIDAscending verifies plain tasks are sorted by numeric ID
+// ascending regardless of urgency. This is the fix for the bug where
+// urgency-based sorting scrambled the natural ID order.
+func TestSortedTasksByIDAscending(t *testing.T) {
+	// IDs deliberately out of order with mixed urgencies that would have
+	// dominated the old sort (urgency desc).
+	tasks := []taskwarrior.TaskView{
+		{ID: "8", Urgency: 1.0},
+		{ID: "1", Urgency: 9.0},
+		{ID: "7", Urgency: 5.0},
+		{ID: "2", Urgency: 2.0},
+	}
+	sorted := sortedTasks(tasks)
+	got := []string{sorted[0].ID, sorted[1].ID, sorted[2].ID, sorted[3].ID}
+	want := []string{"1", "2", "7", "8"}
+	if !equalStrings(got, want) {
+		t.Errorf("sortedTasks order = %v, want %v", got, want)
+	}
+}
+
+// TestSortedTasksRunningFirst verifies tasks with a non-zero Start come
+// before idle tasks, regardless of ID.
+func TestSortedTasksRunningFirst(t *testing.T) {
+	now := time.Now()
+	tasks := []taskwarrior.TaskView{
+		{ID: "1"},
+		{ID: "2"},
+		{ID: "9", Start: now}, // running task with high ID
+		{ID: "3"},
+	}
+	sorted := sortedTasks(tasks)
+	if sorted[0].ID != "9" {
+		t.Errorf("running task should be first, got order %q,%q,%q,%q",
+			sorted[0].ID, sorted[1].ID, sorted[2].ID, sorted[3].ID)
+	}
+	// Remaining idle tasks must stay in ID-ascending order.
+	rest := []string{sorted[1].ID, sorted[2].ID, sorted[3].ID}
+	want := []string{"1", "2", "3"}
+	if !equalStrings(rest, want) {
+		t.Errorf("idle tasks after running = %v, want %v", rest, want)
+	}
+}
+
+// TestSortedTasksMultipleRunningOrderedByID verifies that when multiple tasks
+// are running, they stay grouped at the top and sort by ID ascending.
+func TestSortedTasksMultipleRunningOrderedByID(t *testing.T) {
+	now := time.Now()
+	tasks := []taskwarrior.TaskView{
+		{ID: "5", Start: now},
+		{ID: "1"},
+		{ID: "3", Start: now},
+	}
+	sorted := sortedTasks(tasks)
+	got := []string{sorted[0].ID, sorted[1].ID, sorted[2].ID}
+	want := []string{"3", "5", "1"}
+	if !equalStrings(got, want) {
+		t.Errorf("sortedTasks order = %v, want %v", got, want)
+	}
+}
+
+// ---- Cursor / action alignment (regression) ----
+
+// TestTasksLoadedSortsBeforeStoring verifies the tasksLoadedMsg handler sorts
+// the incoming task list so m.tasks indexing stays aligned with the rendered
+// order. Without this, m.tasks[m.taskCursor] would point at the wrong row.
+func TestTasksLoadedSortsBeforeStoring(t *testing.T) {
+	fake := &fakeClient{avail: true}
+	m := baseModel(fake)
+
+	// Feed an out-of-order list; expect it to be sorted (ID asc) on store.
+	msg := tasksLoadedMsg{
+		tasks: []taskwarrior.TaskView{
+			{ID: "8", Description: "eight"},
+			{ID: "1", Description: "one"},
+			{ID: "3", Description: "three"},
+		},
+	}
+	updated, _ := m.Update(msg)
+	m2 := updated.(model)
+	got := []string{m2.tasks[0].ID, m2.tasks[1].ID, m2.tasks[2].ID}
+	want := []string{"1", "3", "8"}
+	if !equalStrings(got, want) {
+		t.Errorf("m.tasks order after load = %v, want %v", got, want)
+	}
+}
+
+// TestDoneTargetsHighlightedRowAfterSort is the regression test for the bug
+// where pressing 'd' marked the wrong task as done when the export order
+// differed from the display order. With sort-at-load, m.tasks[m.taskCursor]
+// must equal the row the user sees highlighted.
+func TestDoneTargetsHighlightedRowAfterSort(t *testing.T) {
+	fake := &fakeClient{avail: true}
+	m := baseModel(fake)
+
+	// Simulate export returning tasks out of ID order.
+	msg := tasksLoadedMsg{
+		tasks: []taskwarrior.TaskView{
+			{ID: "8", Description: "eight"},
+			{ID: "1", Description: "one"},
+			{ID: "6", Description: "six"},
+		},
+	}
+	updated, _ := m.Update(msg)
+	m2 := updated.(model)
+
+	// After sort: [1, 6, 8]. Cursor at row 1 points at task "6".
+	m2.taskCursor = 1
+
+	// Press 'd' and run the resulting Cmd.
+	updated2, cmd := m2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	_ = updated2
+	if cmd == nil {
+		t.Fatal("expected a Cmd from 'd', got nil")
+	}
+	_ = cmd()
+
+	if len(fake.doneCalls) != 1 || fake.doneCalls[0] != "6" {
+		t.Errorf("Done calls = %v, want [\"6\"] (the highlighted row after sort)",
+			fake.doneCalls)
+	}
+}
+
+// TestStopTargetsRunningRowAfterSort is the regression test for the bug where
+// pressing 's' on the highlighted running task incorrectly called Start
+// instead of Stop because the action handler indexed the unsorted list.
+func TestStopTargetsRunningRowAfterSort(t *testing.T) {
+	fake := &fakeClient{avail: true}
+	m := baseModel(fake)
+
+	// Export returns the running task in the middle; sort floats it to row 0.
+	now := time.Now()
+	msg := tasksLoadedMsg{
+		tasks: []taskwarrior.TaskView{
+			{ID: "1", Description: "one"},
+			{ID: "7", Description: "seven", Start: now}, // running
+			{ID: "2", Description: "two"},
+		},
+	}
+	updated, _ := m.Update(msg)
+	m2 := updated.(model)
+
+	// After sort: [7(running), 1, 2]. Cursor at row 0 = task "7".
+	m2.taskCursor = 0
+
+	updated2, cmd := m2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	_ = updated2
+	if cmd == nil {
+		t.Fatal("expected a Cmd from 's', got nil")
+	}
+	_ = cmd()
+
+	if len(fake.stopCalls) != 1 || fake.stopCalls[0] != "7" {
+		t.Errorf("Stop calls = %v, want [\"7\"] (the running highlighted row)",
+			fake.stopCalls)
+	}
+	if len(fake.startCalls) != 0 {
+		t.Errorf("Start should not have been called on a running task, got %v",
+			fake.startCalls)
+	}
+}

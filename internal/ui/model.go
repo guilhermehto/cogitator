@@ -250,7 +250,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		const editPromptLen = len("edit #999: ")
 		m.input.Width = max(0, paneInnerWidth(m.width)-editPromptLen)
 	case tasksLoadedMsg:
-		m.tasks = msg.tasks
+		// Sort once at load time so m.tasks[m.taskCursor] is always the
+		// highlighted row. Sorting in the render path instead would
+		// desynchronise the cursor index from action dispatch (done, stop,
+		// delete, etc. all read m.tasks[m.taskCursor]).
+		m.tasks = sortedTasks(msg.tasks)
 		m.tasksErr = msg.err
 		m.tasksLoaded = true
 		// Clamp cursor into [0, len-1]. Allow -1 when the list is empty so
