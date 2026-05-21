@@ -3,6 +3,10 @@
 `cogitator` is a terminal monitor for locally running [opencode](https://opencode.ai) instances.
 It discovers instances over mDNS, subscribes to their event streams, and renders one live sessions view with attention signals (permission requests, pending questions, and errors). When [Taskwarrior](https://taskwarrior.org) is installed, it also embeds a Tasks pane for adding, editing, starting/stopping, completing, and deleting tasks without leaving the TUI.
 
+<p align="center">
+  <img src="tui.png" alt="cogitator TUI" />
+</p>
+
 ## Install
 
 ### Go install
