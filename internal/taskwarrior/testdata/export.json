@@ -1,0 +1,31 @@
+[
+  {
+    "id": 1,
+    "uuid": "aaaaaaaa-0000-0000-0000-000000000001",
+    "description": "Write unit tests",
+    "status": "pending",
+    "urgency": 2.5
+  },
+  {
+    "id": 2,
+    "uuid": "bbbbbbbb-0000-0000-0000-000000000002",
+    "description": "Review pull request",
+    "project": "cogitator",
+    "tags": ["review", "code"],
+    "priority": "H",
+    "due": "20260601T120000Z",
+    "status": "pending",
+    "urgency": 8.9
+  },
+  {
+    "id": 3,
+    "uuid": "cccccccc-0000-0000-0000-000000000003",
+    "description": "Deploy to production",
+    "project": "infra",
+    "tags": ["deploy"],
+    "priority": "M",
+    "due": "20260615T090000Z",
+    "status": "pending",
+    "urgency": 5.1
+  }
+]
