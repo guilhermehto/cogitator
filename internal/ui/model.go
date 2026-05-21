@@ -3,13 +3,38 @@ package ui
 import (
 	"fmt"
 
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/state"
+	"github.com/guilhermehto/cogitator/internal/taskwarrior"
 )
 
 type snapshotMsg state.Snapshot
+
+// focusArea tracks which pane currently holds keyboard focus.
+// Iota order is load-bearing: zero value maps to focusSessions, keeping
+// existing model{} literals in tests valid without explicit initialisation.
+type focusArea int
+
+const (
+	focusSessions focusArea = iota
+	focusTasks
+)
+
+// promptMode tracks whether the task input bar is active and in which mode.
+// Iota order is load-bearing: zero value maps to promptIdle, keeping
+// existing model{} literals in tests valid without explicit initialisation.
+type promptMode int
+
+const (
+	promptIdle promptMode = iota
+	promptAdd
+	promptEdit
+	promptConfirmDelete
+)
 
 type model struct {
 	snap            state.Snapshot
@@ -20,6 +45,19 @@ type model struct {
 	bellEnabled     bool
 	bellSent        map[rowKey]state.Attention
 	cfg             *config.Config
+
+	// Taskwarrior fields
+	tw               ClientAPI
+	twAvail          bool
+	tasks            []taskwarrior.TaskView
+	tasksLoaded      bool
+	taskCursor       int
+	focus            focusArea
+	prompt           promptMode
+	input            textinput.Model
+	lastMutationErr  error
+	lastMutationOp   string
+	mutationInFlight bool
 }
 
 func (m model) Init() tea.Cmd {
@@ -103,11 +141,37 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled bool)
 	if cfg == nil {
 		cfg = config.Default()
 	}
+
+	tw := taskwarrior.NewClient()
+	twAvail := tw.Available()
+
+	ti := textinput.New()
+	ti.Placeholder = "description project:foo +tag priority:H due:tomorrow"
+	// Override AcceptSuggestion so Tab is never consumed by the suggestion
+	// mechanism. Tab is routed by the Update loop to switch focus between
+	// panes; disabling the binding here prevents the textinput from
+	// intercepting it when the input bar is active.
+	ti.KeyMap.AcceptSuggestion = key.NewBinding(key.WithDisabled())
+	// Width is intentionally left at zero here; it is recomputed in Update
+	// on the first tea.WindowSizeMsg so it tracks the actual terminal width.
+
 	return model{
 		snaps:           snaps,
 		recentCollapsed: true,
 		bellEnabled:     bellEnabled,
 		bellSent:        map[rowKey]state.Attention{},
 		cfg:             cfg,
+
+		tw:               tw,
+		twAvail:          twAvail,
+		tasks:            nil,
+		tasksLoaded:      false,
+		taskCursor:       0,
+		focus:            focusSessions,
+		prompt:           promptIdle,
+		input:            ti,
+		lastMutationErr:  nil,
+		lastMutationOp:   "",
+		mutationInFlight: false,
 	}
 }
