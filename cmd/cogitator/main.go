@@ -21,6 +21,7 @@ func main() {
 	bell := flag.Bool("bell", false, "ring terminal bell on transitions into attention states")
 	status := flag.Bool("status", false, "print a one-shot icons-only attention summary and exit")
 	demo := flag.Bool("demo", false, "run the TUI with a curated synthetic snapshot (for screenshots); no mDNS, no shell-outs")
+	debug := flag.Bool("debug", false, "show diagnostic UI elements (e.g. unreachable-instance footer)")
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -56,8 +57,8 @@ func main() {
 		return
 	}
 
-	logger.Info("running tui mode", "bell", *bell)
-	if err := ui.RunTUI(cfg, logger, *bell); err != nil {
+	logger.Info("running tui mode", "bell", *bell, "debug", *debug)
+	if err := ui.RunTUI(cfg, logger, *bell, *debug); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

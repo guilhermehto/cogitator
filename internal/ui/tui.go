@@ -13,7 +13,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/taskwarrior"
 )
 
-func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled bool) error {
+func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) error {
 	if cfg == nil {
 		cfg = config.Default()
 	}
@@ -29,7 +29,7 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled bool) error {
 		return err
 	}
 
-	m := newModel(store.Subscribe(), cfg, bellEnabled, taskwarrior.NewClient())
+	m := newModel(store.Subscribe(), cfg, bellEnabled, debug, taskwarrior.NewClient())
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
 }

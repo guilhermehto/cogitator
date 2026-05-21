@@ -45,6 +45,7 @@ type model struct {
 	snaps           <-chan state.Snapshot
 	recentCollapsed bool
 	bellEnabled     bool
+	debug           bool
 	bellSent        map[rowKey]state.Attention
 	cfg             *config.Config
 
@@ -327,7 +328,14 @@ func (m model) View() string {
 	header := titleStyle.Render("cogitator") + dimStyle.Render(headerHint)
 
 	legend := legendLine(m.width)
-	footer := unreachableFooter(m.snap.UnreachableInstances)
+	// The unreachable footer is gated behind --debug because transient
+	// "instance unreachable" warnings (laptop sleep, network blips,
+	// short-lived opencode processes) are noisy during normal operation
+	// and don't require user action.
+	var footer string
+	if m.debug {
+		footer = unreachableFooter(m.snap.UnreachableInstances)
+	}
 	mutationFooter := taskwarriorErrorFooter(m.lastMutationOp, m.lastMutationErr)
 
 	// Compute reserved rows for height splitting.
@@ -383,8 +391,9 @@ func (m model) View() string {
 // newModel constructs the TUI model. tw is injected so demo / test paths can
 // substitute a synthetic ClientAPI without shelling out to the `task` binary;
 // production callers pass taskwarrior.NewClient(). If tw is nil, the Tasks
-// pane is suppressed (twAvail=false).
-func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled bool, tw ClientAPI) model {
+// pane is suppressed (twAvail=false). debug enables diagnostic UI elements
+// such as the unreachable-instance footer.
+func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debug bool, tw ClientAPI) model {
 	if cfg == nil {
 		cfg = config.Default()
 	}
@@ -405,6 +414,7 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled bool,
 		snaps:           snaps,
 		recentCollapsed: true,
 		bellEnabled:     bellEnabled,
+		debug:           debug,
 		bellSent:        map[rowKey]state.Attention{},
 		cfg:             cfg,
 

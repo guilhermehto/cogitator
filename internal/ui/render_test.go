@@ -156,6 +156,7 @@ func TestViewRendersUnreachableFooter(t *testing.T) {
 	m := model{
 		cfg:   config.Default(),
 		width: 120,
+		debug: true,
 		snap: state.Snapshot{
 			UpdatedAt: time.Unix(0, 0),
 			UnreachableInstances: []state.InstanceFailure{
@@ -170,6 +171,24 @@ func TestViewRendersUnreachableFooter(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "127.0.0.1:7777 (3 consecutive failures)") {
 		t.Fatalf("expected instance details in footer, got %q", rendered)
+	}
+}
+
+func TestViewHidesUnreachableFooterWithoutDebug(t *testing.T) {
+	m := model{
+		cfg:   config.Default(),
+		width: 120,
+		snap: state.Snapshot{
+			UpdatedAt: time.Unix(0, 0),
+			UnreachableInstances: []state.InstanceFailure{
+				{InstanceID: "127.0.0.1:7777", Host: "127.0.0.1", Port: 7777, ConsecutiveFailures: 3},
+			},
+		},
+	}
+
+	rendered := m.View()
+	if strings.Contains(rendered, "unreachable") {
+		t.Fatalf("unreachable footer must be suppressed without --debug, got %q", rendered)
 	}
 }
 

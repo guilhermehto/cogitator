@@ -45,7 +45,7 @@ func RunDemo(cfg *config.Config, logger *slog.Logger) error {
 
 	fakeTW := &demoClient{tasks: demoTasks(now)}
 
-	m := newModel(snaps, cfg, false, fakeTW)
+	m := newModel(snaps, cfg, false, false, fakeTW)
 	// Expand the Recent group so the section is visible in the capture.
 	m.recentCollapsed = false
 

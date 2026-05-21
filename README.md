@@ -114,6 +114,7 @@ Taskwarrior respects the following variables from that environment:
 - `--bell`: ring the terminal bell when a session transitions into an attention state.
 - `--status`: print a one-shot icons-only status line and exit.
 - `--demo`: launch the TUI with a curated synthetic snapshot (mixed session states, tasks, a running task). No mDNS, no `task` shell-outs; intended for screenshots and walkthroughs.
+- `--debug`: show diagnostic UI elements that are noisy during normal use (e.g. the unreachable-instance footer).
 - `--log-level`: set log verbosity (`debug|info|warn|error`). Default is `info`.
 - `--version`: print module version, commit, and build date.
 
