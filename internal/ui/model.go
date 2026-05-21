@@ -62,6 +62,9 @@ type model struct {
 }
 
 func (m model) Init() tea.Cmd {
+	if m.twAvail {
+		return tea.Batch(waitSnapshot(m.snaps), loadTasksCmd(m.tw, m.cfg.TaskwarriorTimeout))
+	}
 	return waitSnapshot(m.snaps)
 }
 
