@@ -213,6 +213,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return c.Done(ctx, tasks[cursor].ID)
 					})
 				}
+			case "s":
+				// Toggle: running task → stop, idle task → start.
+				// We branch on Start.IsZero() rather than tracking a flag so
+				// the action stays consistent with whatever Export last
+				// reported, even if the row was mutated out-of-band.
+				if len(tasks) > 0 && cursor >= 0 {
+					m.mutationInFlight = true
+					if tasks[cursor].Start.IsZero() {
+						return m, mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "start", func(c ClientAPI, ctx context.Context) error {
+							return c.Start(ctx, tasks[cursor].ID)
+						})
+					}
+					return m, mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "stop", func(c ClientAPI, ctx context.Context) error {
+						return c.Stop(ctx, tasks[cursor].ID)
+					})
+				}
 			case "D":
 				if len(tasks) > 0 && cursor >= 0 {
 					m.prompt = promptConfirmDelete
@@ -301,7 +317,7 @@ func (m model) View() string {
 		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s recent  ·  tab→tasks  ·  q quit",
 			live, recent, recentMins, m.snap.UpdatedAt.Format("15:04:05"), toggleVerb(m.recentCollapsed))
 	} else {
-		headerHint = fmt.Sprintf("  %d pending  ·  a add · e edit · d done · D del · U undo · j/k move  ·  tab→sessions  ·  q quit",
+		headerHint = fmt.Sprintf("  %d pending  ·  a add · e edit · s start/stop · d done · D del · U undo · j/k move  ·  tab→sessions  ·  q quit",
 			len(m.tasks))
 	}
 	header := titleStyle.Render("cogitator") + dimStyle.Render(headerHint)
@@ -336,11 +352,19 @@ func (m model) View() string {
 		tasksStyle = paneFocusedStyle
 	}
 
+	// lipgloss .Height(h) sets the CONTENT height; the rounded border adds
+	// 2 more rows (top + bottom) to the rendered output. Subtract 2 so each
+	// pane's total rendered height matches the split reservation. Without
+	// this, the View() output is 4 rows taller than the terminal and the
+	// alt-screen crops the top (header, Sessions title, column header).
+	sessionsInnerH := max(1, sessionsOuterH-2)
+	tasksInnerH := max(1, tasksOuterH-2)
+
 	sessionContent := m.renderAllSessions(paneW, rows, recentByInstance)
-	sessionsPane := sessionsStyle.Width(paneW).Height(sessionsOuterH).Render(sessionContent)
+	sessionsPane := sessionsStyle.Width(paneW).Height(sessionsInnerH).Render(sessionContent)
 
 	tasksContent := m.renderTasksPane(tasksOuterH, paneW)
-	tasksPane := tasksStyle.Width(paneW).Height(tasksOuterH).Render(tasksContent)
+	tasksPane := tasksStyle.Width(paneW).Height(tasksInnerH).Render(tasksContent)
 
 	parts := []string{header, sessionsPane, tasksPane, legend}
 	if footer != "" {

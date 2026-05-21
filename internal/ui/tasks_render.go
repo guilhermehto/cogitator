@@ -13,9 +13,11 @@ import (
 )
 
 // renderTasksPane renders the full content string for the tasks pane.
-// outerH and outerW are the dimensions passed to lipgloss (.Height/.Width)
-// including the border; the inner usable area is 2 rows shorter (top+bottom
-// border) and 4 columns narrower (border + padding each side).
+// outerH and outerW are the total visible dimensions of the rendered pane
+// (border included). The caller subtracts the border (2 rows / 2 cols) when
+// passing values to lipgloss .Height/.Width. The inner usable area for body
+// rows is outerH - 2 (border) - 1 (title) - 1 (column header) - promptRows;
+// the inner usable width is 4 columns narrower (border + padding each side).
 func (m model) renderTasksPane(outerH, outerW int) string {
 	var b strings.Builder
 
@@ -61,7 +63,8 @@ func (m model) renderTasksPane(outerH, outerW int) string {
 	rows := make([]string, 0, len(sorted))
 	for i, tv := range sorted {
 		selected := m.focus == focusTasks && m.taskCursor >= 0 && i == m.taskCursor
-		rows = append(rows, formatTaskRow(tv, innerW, selected))
+		active := !tv.Start.IsZero()
+		rows = append(rows, formatTaskRow(tv, innerW, selected, active))
 	}
 
 	if len(rows) > maxBodyRows {
@@ -129,9 +132,16 @@ func taskDescWidth(innerW int) int {
 
 // formatTaskRow renders a single task as a padded column row.
 // selected applies a reverse-video highlight when the row is the cursor row
-// and the tasks pane is focused.
-func formatTaskRow(tv taskwarrior.TaskView, innerW int, selected bool) string {
+// and the tasks pane is focused. active marks the task as currently running:
+// the ST cell switches from the priority glyph to glyphTaskActive and the
+// entire row is rendered bold + green via taskActiveStyle. selected wins over
+// active when both apply (reverse-video is applied last so the cursor row is
+// always visually unambiguous).
+func formatTaskRow(tv taskwarrior.TaskView, innerW int, selected, active bool) string {
 	stateCell := taskPriorityGlyph[tv.Priority] // blank when not in map
+	if active {
+		stateCell = glyphTaskActive
+	}
 
 	idCell := tv.ID
 
@@ -157,6 +167,9 @@ func formatTaskRow(tv taskwarrior.TaskView, innerW int, selected bool) string {
 	}
 	row := strings.Join(cells, strings.Repeat(" ", colGap))
 
+	if active {
+		row = taskActiveStyle.Render(row)
+	}
 	if selected {
 		row = lipgloss.NewStyle().Reverse(true).Render(row)
 	}

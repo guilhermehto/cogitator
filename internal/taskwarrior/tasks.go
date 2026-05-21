@@ -85,13 +85,16 @@ type taskRaw struct {
 	Tags        []string    `json:"tags"`
 	Priority    string      `json:"priority"`
 	Due         string      `json:"due"`
+	Start       string      `json:"start"`
 	Urgency     float64     `json:"urgency"`
 	Status      string      `json:"status"`
 }
 
 // TaskView is the parsed, display-ready representation of a Taskwarrior task.
 // ID is the short numeric identifier used in CLI calls; UUID is the stable
-// identifier. Due is zero if the task has no due date.
+// identifier. Due is zero if the task has no due date. Start is zero if the
+// task is not currently running; a non-zero Start means the task is active
+// (i.e. `task <id> start` was called and no matching stop has run yet).
 type TaskView struct {
 	ID          string
 	UUID        string
@@ -100,6 +103,7 @@ type TaskView struct {
 	Tags        []string
 	Priority    string
 	Due         time.Time
+	Start       time.Time
 	Urgency     float64
 	Status      string
 }
@@ -133,6 +137,7 @@ func toTaskView(r taskRaw) TaskView {
 		Tags:        r.Tags,
 		Priority:    r.Priority,
 		Due:         parseISOBasic(r.Due),
+		Start:       parseISOBasic(r.Start),
 		Urgency:     r.Urgency,
 		Status:      r.Status,
 	}
@@ -211,6 +216,34 @@ func (c *Client) Done(ctx context.Context, id string) error {
 	_, stderr, err := c.run(ctx, args...)
 	if err != nil {
 		return wrapErr(ctx, "done", err, stderr)
+	}
+	return nil
+}
+
+// Start marks a task as actively running. Taskwarrior records the start
+// timestamp on the task; subsequent exports include a `start` field.
+func (c *Client) Start(ctx context.Context, id string) error {
+	if !c.Available() {
+		return fmt.Errorf("task: binary not found")
+	}
+	args := append(writeFlags(), id, "start")
+	_, stderr, err := c.run(ctx, args...)
+	if err != nil {
+		return wrapErr(ctx, "start", err, stderr)
+	}
+	return nil
+}
+
+// Stop clears the running flag on a task. Taskwarrior accumulates the elapsed
+// interval into the task's history; the next export omits the `start` field.
+func (c *Client) Stop(ctx context.Context, id string) error {
+	if !c.Available() {
+		return fmt.Errorf("task: binary not found")
+	}
+	args := append(writeFlags(), id, "stop")
+	_, stderr, err := c.run(ctx, args...)
+	if err != nil {
+		return wrapErr(ctx, "stop", err, stderr)
 	}
 	return nil
 }

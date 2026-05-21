@@ -28,6 +28,11 @@ var (
 	attnActiveStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
 
 	statusBusyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+
+	// taskActiveStyle highlights a running Taskwarrior task. Bold + green so
+	// the running row is distinguishable from the cursor (reverse-video) and
+	// from the priority glyph palette.
+	taskActiveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Bold(true)
 )
 
 var agentPalette = []string{
@@ -54,6 +59,9 @@ const (
 	glyphQuestion   = "\U000f0625" // 󰘥
 	glyphPermission = "\U000f033e" // 󰌾
 	glyphError      = "\U000f0026" // 󰀦
+	// glyphTaskActive marks a running Taskwarrior task in the ST column.
+	// When active, it replaces the priority glyph for that row.
+	glyphTaskActive = "\U000f040a" // 󰐊 play
 )
 
 // taskPriorityGlyph maps Taskwarrior priority codes to display glyphs.
@@ -143,6 +151,7 @@ func legendLine(width int) string {
 	sessionLegend := strings.Join(sessionParts, "  ")
 
 	taskParts := []string{
+		taskActiveStyle.Render(glyphTaskActive) + " " + dimStyle.Render("running"),
 		taskPriorityGlyph["H"] + " " + dimStyle.Render("high"),
 		"● " + dimStyle.Render("medium"),
 		"· " + dimStyle.Render("low"),

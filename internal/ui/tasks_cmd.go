@@ -19,6 +19,8 @@ type ClientAPI interface {
 	Modify(ctx context.Context, id, dsl string) error
 	Done(ctx context.Context, id string) error
 	Delete(ctx context.Context, id string) error
+	Start(ctx context.Context, id string) error
+	Stop(ctx context.Context, id string) error
 	Undo(ctx context.Context) error
 }
 

@@ -28,12 +28,16 @@ type fakeClient struct {
 	modifyCalls [][2]string // [id, dsl]
 	doneCalls   []string
 	deleteCalls []string
+	startCalls  []string
+	stopCalls   []string
 	undoCalls   int
 
 	addErr    error
 	modifyErr error
 	doneErr   error
 	deleteErr error
+	startErr  error
+	stopErr   error
 	undoErr   error
 }
 
@@ -61,6 +65,16 @@ func (f *fakeClient) Done(_ context.Context, id string) error {
 func (f *fakeClient) Delete(_ context.Context, id string) error {
 	f.deleteCalls = append(f.deleteCalls, id)
 	return f.deleteErr
+}
+
+func (f *fakeClient) Start(_ context.Context, id string) error {
+	f.startCalls = append(f.startCalls, id)
+	return f.startErr
+}
+
+func (f *fakeClient) Stop(_ context.Context, id string) error {
+	f.stopCalls = append(f.stopCalls, id)
+	return f.stopErr
 }
 
 func (f *fakeClient) Undo(_ context.Context) error {
