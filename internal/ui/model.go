@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -93,13 +94,138 @@ func paneInnerWidth(w int) int {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// (a) Prompt mode pre-empt — evaluated before any global or pane key.
+		// This ensures Esc inside a prompt clears the prompt rather than quitting.
+		if m.prompt != promptIdle {
+			switch m.prompt {
+			case promptConfirmDelete:
+				if msg.String() == "y" || msg.String() == "Y" {
+					tasks := m.tasks
+					cursor := m.taskCursor
+					m.mutationInFlight = true
+					m.prompt = promptIdle
+					return m, mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "delete", func(c ClientAPI, ctx context.Context) error {
+						return c.Delete(ctx, tasks[cursor].ID)
+					})
+				}
+				// Any other key (including esc) cancels the confirm prompt.
+				m.prompt = promptIdle
+				return m, nil
+
+			case promptAdd, promptEdit:
+				switch msg.String() {
+				case "enter":
+					value := m.input.Value()
+					isEdit := m.prompt == promptEdit
+					tasks := m.tasks
+					cursor := m.taskCursor
+					m.prompt = promptIdle
+					m.input.Blur()
+					m.input.SetValue("")
+					m.mutationInFlight = true
+					// Batch the input update cmd (cursor blink teardown) with the mutation.
+					_, inputCmd := m.input.Update(msg)
+					var mutCmd tea.Cmd
+					if isEdit {
+						mutCmd = mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "modify", func(c ClientAPI, ctx context.Context) error {
+							return c.Modify(ctx, tasks[cursor].ID, value)
+						})
+					} else {
+						mutCmd = mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "add", func(c ClientAPI, ctx context.Context) error {
+							return c.Add(ctx, value)
+						})
+					}
+					return m, tea.Batch(inputCmd, mutCmd)
+
+				case "esc":
+					// Cancel prompt without quitting — must short-circuit before global quit.
+					m.prompt = promptIdle
+					m.input.Blur()
+					m.input.SetValue("")
+					return m, nil
+
+				default:
+					// Forward all other keys to the textinput so typing, backspace,
+					// cursor movement, and the blink Cmd all work correctly.
+					var cmd tea.Cmd
+					m.input, cmd = m.input.Update(msg)
+					return m, cmd
+				}
+			}
+		}
+
+		// (b) Global quit — only when no prompt is active.
 		switch msg.String() {
 		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
-		case "a":
-			m.recentCollapsed = !m.recentCollapsed
+		}
+
+		// (c) Focus swap via Tab.
+		if msg.String() == "tab" {
+			if m.twAvail {
+				if m.focus == focusSessions {
+					m.focus = focusTasks
+				} else {
+					m.focus = focusSessions
+				}
+			}
+			// No-op when !twAvail — focus stays on sessions.
 			return m, nil
 		}
+
+		// (d) Sessions-focused keys.
+		if m.focus == focusSessions {
+			if msg.String() == "a" {
+				m.recentCollapsed = !m.recentCollapsed
+			}
+			return m, nil
+		}
+
+		// (e) Tasks-focused keys — only when focused on tasks and no mutation in flight.
+		if m.focus == focusTasks && !m.mutationInFlight {
+			tasks := m.tasks
+			cursor := m.taskCursor
+			switch msg.String() {
+			case "j", "down":
+				if len(tasks) > 0 {
+					m.taskCursor = min(cursor+1, len(tasks)-1)
+				}
+			case "k", "up":
+				if len(tasks) > 0 {
+					m.taskCursor = max(cursor-1, 0)
+				}
+			case "a":
+				m.prompt = promptAdd
+				m.input.SetValue("")
+				focusCmd := m.input.Focus()
+				return m, focusCmd
+			case "e":
+				if len(tasks) > 0 && cursor >= 0 {
+					m.prompt = promptEdit
+					m.input.SetValue(flattenTaskDSL(tasks[cursor]))
+					focusCmd := m.input.Focus()
+					return m, focusCmd
+				}
+			case "d":
+				if len(tasks) > 0 && cursor >= 0 {
+					m.mutationInFlight = true
+					return m, mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "done", func(c ClientAPI, ctx context.Context) error {
+						return c.Done(ctx, tasks[cursor].ID)
+					})
+				}
+			case "D":
+				if len(tasks) > 0 && cursor >= 0 {
+					m.prompt = promptConfirmDelete
+				}
+			case "U":
+				m.mutationInFlight = true
+				return m, mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "undo", func(c ClientAPI, ctx context.Context) error {
+					return c.Undo(ctx)
+				})
+			}
+		}
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		// Recompute the input width so the prompt fits inside the bordered
@@ -169,10 +295,16 @@ func (m model) View() string {
 		cfg = config.Default()
 	}
 	recentMins := int(cfg.RecentWindow.Minutes())
-	header := titleStyle.Render("cogitator") + dimStyle.Render(
-		fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s recent  ·  q to quit",
-			live, recent, recentMins, m.snap.UpdatedAt.Format("15:04:05"), toggleVerb(m.recentCollapsed)),
-	)
+
+	var headerHint string
+	if m.focus == focusSessions {
+		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s recent  ·  tab→tasks  ·  q quit",
+			live, recent, recentMins, m.snap.UpdatedAt.Format("15:04:05"), toggleVerb(m.recentCollapsed))
+	} else {
+		headerHint = fmt.Sprintf("  %d pending  ·  a add · e edit · d done · D del · U undo · j/k move  ·  tab→sessions  ·  q quit",
+			len(m.tasks))
+	}
+	header := titleStyle.Render("cogitator") + dimStyle.Render(headerHint)
 
 	legend := legendLine()
 	footer := unreachableFooter(m.snap.UnreachableInstances)
