@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -153,7 +154,6 @@ func (m model) View() string {
 	if paneW < 30 {
 		paneW = 30
 	}
-	body := paneStyle.Width(paneW).Render(m.renderAllSessions(paneW, rows, recentByInstance))
 
 	live, recent := 0, 0
 	for _, sv := range rows {
@@ -176,10 +176,41 @@ func (m model) View() string {
 
 	legend := legendLine()
 	footer := unreachableFooter(m.snap.UnreachableInstances)
-	if footer == "" {
-		return header + "\n" + body + "\n" + legend
+
+	// Compute reserved rows for height splitting.
+	// Each section separator newline is accounted for in the join below.
+	headerRows := 1
+	legendRows := 1
+	unreachableRows := 0
+	if footer != "" {
+		unreachableRows = 1
 	}
-	return header + "\n" + body + "\n" + legend + "\n" + footer
+	// mutationFooterRows reserved for step 9; currently 0.
+	reserved := headerRows + legendRows + unreachableRows
+
+	tasksOuterH := max(8, m.height/3)
+	sessionsOuterH := max(6, m.height-tasksOuterH-reserved)
+
+	// Choose border style based on which pane is focused.
+	sessionsStyle := paneStyle
+	tasksStyle := paneStyle
+	if m.focus == focusSessions {
+		sessionsStyle = paneFocusedStyle
+	} else {
+		tasksStyle = paneFocusedStyle
+	}
+
+	sessionContent := m.renderAllSessions(paneW, rows, recentByInstance)
+	sessionsPane := sessionsStyle.Width(paneW).Height(sessionsOuterH).Render(sessionContent)
+
+	tasksContent := m.renderTasksPane(tasksOuterH, paneW)
+	tasksPane := tasksStyle.Width(paneW).Height(tasksOuterH).Render(tasksContent)
+
+	parts := []string{header, sessionsPane, tasksPane, legend}
+	if footer != "" {
+		parts = append(parts, footer)
+	}
+	return strings.Join(parts, "\n")
 }
 
 func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled bool) model {

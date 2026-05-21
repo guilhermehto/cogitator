@@ -18,7 +18,8 @@ var (
 	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	agentStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Italic(true)
 	recentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
-	paneStyle   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
+	paneStyle        = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
+	paneFocusedStyle = paneStyle.BorderForeground(lipgloss.Color("63"))
 
 	attnPermStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
 	attnQuestionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true)
@@ -55,11 +56,29 @@ const (
 	glyphError      = "\U000f0026" // 󰀦
 )
 
+// taskPriorityGlyph maps Taskwarrior priority codes to display glyphs.
+// No entry means the cell is left blank (normal priority).
+var taskPriorityGlyph = map[string]string{
+	"H": "\U000f0071", // 󰁱 high
+	"M": "●",          // medium
+	"L": "·",          // low
+}
+
 const (
 	colStateW    = 5
 	colStatusW   = 10
 	colActivityW = 8
 	colGap       = 2
+)
+
+// Task pane column widths. DESC takes the remainder after all fixed columns
+// and gaps are subtracted from the available inner width.
+const (
+	colTaskStateW   = 3
+	colTaskIDW      = 5
+	colTaskProjectW = 14
+	colTaskTagsW    = 16
+	colTaskDueW     = 10
 )
 
 func attnLabel(a state.Attention, source state.Source) string {
