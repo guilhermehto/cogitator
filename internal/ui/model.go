@@ -50,6 +50,7 @@ type model struct {
 	tw               ClientAPI
 	twAvail          bool
 	tasks            []taskwarrior.TaskView
+	tasksErr         error // last error from Export; nil on success
 	tasksLoaded      bool
 	taskCursor       int
 	focus            focusArea
@@ -74,6 +75,17 @@ func waitSnapshot(ch <-chan state.Snapshot) tea.Cmd {
 	}
 }
 
+// paneInnerWidth returns the usable inner width of the bordered tasks pane
+// given the total terminal width. It subtracts 2 for the border and 2 for
+// the horizontal padding, clamping to zero so callers never see a negative.
+func paneInnerWidth(w int) int {
+	inner := w - 2 - 2 // border (1 each side) + padding (1 each side)
+	if inner < 0 {
+		return 0
+	}
+	return inner
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -86,6 +98,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		// Recompute the input width so the prompt fits inside the bordered
+		// tasks pane. The prefix "edit #999: " is 11 chars; we reserve that
+		// space so the cursor never overflows the pane boundary.
+		const editPromptLen = len("edit #999: ")
+		m.input.Width = max(0, paneInnerWidth(m.width)-editPromptLen)
+	case tasksLoadedMsg:
+		m.tasks = msg.tasks
+		m.tasksErr = msg.err
+		m.tasksLoaded = true
+		// Clamp cursor into [0, len-1]. Allow -1 when the list is empty so
+		// downstream key handlers can no-op cleanly without a bounds check.
+		switch {
+		case len(m.tasks) == 0:
+			m.taskCursor = -1
+		case m.taskCursor >= len(m.tasks):
+			m.taskCursor = len(m.tasks) - 1
+		case m.taskCursor < 0:
+			m.taskCursor = 0
+		}
+	case taskMutationOkMsg:
+		m.mutationInFlight = false
+		m.lastMutationErr = nil
+		m.lastMutationOp = msg.op
+		// Re-fetch the task list so the pane reflects the mutation result.
+		return m, loadTasksCmd(m.tw, m.cfg.TaskwarriorTimeout)
+	case taskMutationFailedMsg:
+		m.mutationInFlight = false
+		m.lastMutationErr = msg.err
+		m.lastMutationOp = msg.op
+		// Do not refresh — leave the existing list intact and surface the error.
 	case snapshotMsg:
 		m.snap = state.Snapshot(msg)
 		next := waitSnapshot(m.snaps)
