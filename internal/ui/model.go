@@ -308,6 +308,7 @@ func (m model) View() string {
 
 	legend := legendLine()
 	footer := unreachableFooter(m.snap.UnreachableInstances)
+	mutationFooter := taskwarriorErrorFooter(m.lastMutationOp, m.lastMutationErr)
 
 	// Compute reserved rows for height splitting.
 	// Each section separator newline is accounted for in the join below.
@@ -317,8 +318,11 @@ func (m model) View() string {
 	if footer != "" {
 		unreachableRows = 1
 	}
-	// mutationFooterRows reserved for step 9; currently 0.
-	reserved := headerRows + legendRows + unreachableRows
+	mutationFooterRows := 0
+	if mutationFooter != "" {
+		mutationFooterRows = 1
+	}
+	reserved := headerRows + legendRows + unreachableRows + mutationFooterRows
 
 	tasksOuterH := max(8, m.height/3)
 	sessionsOuterH := max(6, m.height-tasksOuterH-reserved)
@@ -341,6 +345,9 @@ func (m model) View() string {
 	parts := []string{header, sessionsPane, tasksPane, legend}
 	if footer != "" {
 		parts = append(parts, footer)
+	}
+	if mutationFooter != "" {
+		parts = append(parts, mutationFooter)
 	}
 	return strings.Join(parts, "\n")
 }

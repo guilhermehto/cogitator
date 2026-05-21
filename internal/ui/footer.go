@@ -8,6 +8,16 @@ import (
 	"github.com/guilhermehto/cogitator/internal/state"
 )
 
+// taskwarriorErrorFooter returns an attnErrStyle-rendered warning line when
+// err is non-nil, identifying the failed operation by op. Returns "" when
+// err is nil so callers can skip appending it to the view.
+func taskwarriorErrorFooter(op string, err error) string {
+	if err == nil {
+		return ""
+	}
+	return attnErrStyle.Render(fmt.Sprintf("⚠ task %s failed: %s", op, err))
+}
+
 func unreachableFooter(unreachable []state.InstanceFailure) string {
 	if len(unreachable) == 0 {
 		return ""

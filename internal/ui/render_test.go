@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -169,5 +170,54 @@ func TestViewRendersUnreachableFooter(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "127.0.0.1:7777 (3 consecutive failures)") {
 		t.Fatalf("expected instance details in footer, got %q", rendered)
+	}
+}
+
+func TestTaskwarriorErrorFooterNilErrReturnsEmpty(t *testing.T) {
+	if got := taskwarriorErrorFooter("add", nil); got != "" {
+		t.Fatalf("expected empty string for nil error, got %q", got)
+	}
+}
+
+func TestTaskwarriorErrorFooterRendersOpAndErr(t *testing.T) {
+	got := taskwarriorErrorFooter("modify", fmt.Errorf("exit status 1"))
+	if !strings.Contains(got, "task modify failed") {
+		t.Fatalf("expected op in footer, got %q", got)
+	}
+	if !strings.Contains(got, "exit status 1") {
+		t.Fatalf("expected error message in footer, got %q", got)
+	}
+}
+
+func TestViewRendersMutationErrorFooter(t *testing.T) {
+	m := model{
+		cfg:             config.Default(),
+		width:           120,
+		snap:            state.Snapshot{UpdatedAt: time.Unix(0, 0)},
+		lastMutationOp:  "done",
+		lastMutationErr: fmt.Errorf("task not found"),
+	}
+
+	rendered := m.View()
+	if !strings.Contains(rendered, "task done failed") {
+		t.Fatalf("expected mutation-error footer with op, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "task not found") {
+		t.Fatalf("expected mutation-error footer with err, got %q", rendered)
+	}
+}
+
+func TestViewMutationErrorFooterAbsentOnNilErr(t *testing.T) {
+	m := model{
+		cfg:             config.Default(),
+		width:           120,
+		snap:            state.Snapshot{UpdatedAt: time.Unix(0, 0)},
+		lastMutationOp:  "add",
+		lastMutationErr: nil,
+	}
+
+	rendered := m.View()
+	if strings.Contains(rendered, "task add failed") {
+		t.Fatalf("expected no mutation-error footer when err is nil, got %q", rendered)
 	}
 }
