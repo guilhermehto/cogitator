@@ -10,6 +10,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/discovery"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/supervisor"
+	"github.com/guilhermehto/cogitator/internal/taskwarrior"
 )
 
 func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled bool) error {
@@ -28,7 +29,7 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled bool) error {
 		return err
 	}
 
-	m := newModel(store.Subscribe(), cfg, bellEnabled)
+	m := newModel(store.Subscribe(), cfg, bellEnabled, taskwarrior.NewClient())
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
 }

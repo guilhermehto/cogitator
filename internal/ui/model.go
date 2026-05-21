@@ -376,13 +376,16 @@ func (m model) View() string {
 	return strings.Join(parts, "\n")
 }
 
-func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled bool) model {
+// newModel constructs the TUI model. tw is injected so demo / test paths can
+// substitute a synthetic ClientAPI without shelling out to the `task` binary;
+// production callers pass taskwarrior.NewClient(). If tw is nil, the Tasks
+// pane is suppressed (twAvail=false).
+func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled bool, tw ClientAPI) model {
 	if cfg == nil {
 		cfg = config.Default()
 	}
 
-	tw := taskwarrior.NewClient()
-	twAvail := tw.Available()
+	twAvail := tw != nil && tw.Available()
 
 	ti := textinput.New()
 	ti.Placeholder = "description project:foo +tag priority:H due:tomorrow"

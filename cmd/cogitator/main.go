@@ -20,6 +20,7 @@ var (
 func main() {
 	bell := flag.Bool("bell", false, "ring terminal bell on transitions into attention states")
 	status := flag.Bool("status", false, "print a one-shot icons-only attention summary and exit")
+	demo := flag.Bool("demo", false, "run the TUI with a curated synthetic snapshot (for screenshots); no mDNS, no shell-outs")
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -42,6 +43,14 @@ func main() {
 		logger.Info("running status mode")
 		if err := ui.RunStatus(cfg, logger); err != nil {
 			fmt.Fprintln(os.Stderr, "mdns:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *demo {
+		if err := ui.RunDemo(cfg, logger); err != nil {
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 		return
