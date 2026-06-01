@@ -149,12 +149,16 @@ func newWindowWith(r Runner, canonical, name string, argv []string) (Target, err
 		return "", fmt.Errorf("tmuxctl: argv must not be empty")
 	}
 
-	// Build: tmux new-window -d -n <name> -P -F '#{session_name}:#{window_index}' <argv...>
+	// Build: tmux new-window -d -c <canonical> -n <name> -P -F '#{session_name}:#{window_index}' <argv...>
 	// -d: do not switch to the new window (don't disturb the current window).
+	// -c: set the working directory of the new window's pane to the canonical
+	//     worktree path. This satisfies the harness contract (internal/harness/opencode.go)
+	//     which requires CWD == worktree for the launched process.
 	// -P -F: print the target of the new window so we can return it.
 	args := []string{
 		"new-window",
 		"-d",
+		"-c", canonical,
 		"-n", name,
 		"-P", "-F", "#{session_name}:#{window_index}",
 	}

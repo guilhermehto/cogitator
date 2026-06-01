@@ -227,8 +227,26 @@ func TestEnsureWindow_CreatesNewWindow(t *testing.T) {
 
 	// Call 0: list-windows (FindWindowByDir)
 	assertCall(t, r, 0, "list-windows", "-a")
-	// Call 1: new-window with -d, -n, -P, -F, then argv
-	assertCall(t, r, 1, "new-window", "-d", "-n", "repo/branch", "-P", "-F", "#{session_name}:#{window_index}", "sleep", "60")
+	// Call 1: new-window with -d, -c <canonical>, -n, -P, -F, then argv.
+	// The -c flag sets the pane's working directory to the canonical worktree
+	// path, satisfying the harness CWD contract.
+	assertCall(t, r, 1, "new-window", "-d", "-c", "/private/tmp/newwt", "-n", "repo/branch", "-P", "-F", "#{session_name}:#{window_index}", "sleep", "60")
+	// Explicit assertion: the -c value must be the canonical worktree dir.
+	newWindowCall := r.calls[1]
+	cFlagIdx := -1
+	for i, arg := range newWindowCall {
+		if arg == "-c" {
+			cFlagIdx = i
+			break
+		}
+	}
+	if cFlagIdx == -1 {
+		t.Error("new-window call missing -c flag")
+	} else if cFlagIdx+1 >= len(newWindowCall) {
+		t.Error("new-window -c flag has no value")
+	} else if got := newWindowCall[cFlagIdx+1]; got != "/private/tmp/newwt" {
+		t.Errorf("new-window -c value = %q, want %q", got, "/private/tmp/newwt")
+	}
 	// Call 2: set-option remain-on-exit so the window survives process exit
 	assertCall(t, r, 2, "set-option", "-w", "-t", "main:1", "remain-on-exit", "on")
 	// Call 3: set-option to tag @cog_dir
