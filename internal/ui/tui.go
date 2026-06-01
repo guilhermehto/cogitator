@@ -11,6 +11,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/supervisor"
 	"github.com/guilhermehto/cogitator/internal/taskwarrior"
+	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) error {
@@ -28,6 +29,11 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 	if err := bootDiscovery(ctx, store, cfg, logger); err != nil {
 		return err
 	}
+
+	// Start the roster recorder as a distinct subscriber. It drains snapshots
+	// in its own goroutine and writes roster.json atomically off the hot path.
+	// Cancelled by the existing defer cancel() above.
+	workspace.NewRecorder().Run(ctx, store.Subscribe())
 
 	m := newModel(store.Subscribe(), cfg, bellEnabled, debug, taskwarrior.NewClient())
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
