@@ -414,6 +414,9 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 		if m.tmuxHint != "" {
 			b.WriteString("\n" + wtHintStyle.Render(m.tmuxHint))
 		}
+		if m.prompt == promptNewWorktree {
+			b.WriteString("\n" + m.worktreePromptLine())
+		}
 		return b.String()
 	}
 
@@ -467,7 +470,22 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 		b.WriteString(wtHintStyle.Render(m.tmuxHint) + "\n")
 	}
 
+	// Render branch-name prompt when the user pressed 'n' to create a worktree.
+	// This must render regardless of m.twAvail — the sessions pane is independent
+	// of taskwarrior. Placed after the hint so it is always the last visible line.
+	if m.prompt == promptNewWorktree {
+		b.WriteString(m.worktreePromptLine() + "\n")
+	}
+
 	return b.String()
+}
+
+// worktreePromptLine returns the styled prompt line shown in the sessions pane
+// while the user is typing a branch name for a new worktree ('n' action).
+// It is a shared helper so both the empty-rows and non-empty-rows paths in
+// renderWorkspaceRows produce the same label, and taskPromptLine can reuse it.
+func (m model) worktreePromptLine() string {
+	return wtHintStyle.Render("new worktree branch: ") + m.input.View()
 }
 
 // formatWorktreeRow renders a single workspace.Row as a fixed-width line.

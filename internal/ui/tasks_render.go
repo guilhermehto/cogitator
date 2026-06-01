@@ -206,6 +206,12 @@ func (m model) taskPromptLine() string {
 			desc = m.tasks[m.taskCursor].Description
 		}
 		return fmt.Sprintf("delete #%s ('%s')? [y/N]", id, desc)
+	case promptNewWorktree:
+		// The branch-name prompt is primarily rendered in the sessions pane
+		// (renderWorkspaceRows), but we return the same label here so the
+		// tasks pane does not show a blank reserved row when promptNewWorktree
+		// is active.
+		return m.worktreePromptLine()
 	default:
 		return ""
 	}

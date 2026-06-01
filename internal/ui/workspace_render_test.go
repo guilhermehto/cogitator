@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/guilhermehto/cogitator/internal/state"
@@ -355,5 +356,107 @@ func TestStoppedRowRelativeTimeUsesTickNow(t *testing.T) {
 	got2 := m.renderWorkspaceRows(200, rows, 0, fixedNow.Add(time.Hour))
 	if !strings.Contains(got2, "3h") {
 		t.Fatalf("stopped row must show '3h' relative time at fixedNow+1h, got %q", got2)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// promptNewWorktree visibility in the sessions pane
+// ---------------------------------------------------------------------------
+
+// makeWorktreePromptModel builds a model with promptNewWorktree active and the
+// given branch text pre-filled in the input widget. twAvail controls whether
+// taskwarrior is reported as installed — the sessions-pane prompt must render
+// regardless of that flag.
+func makeWorktreePromptModel(branchText string, twAvail bool) model {
+	ti := textinput.New()
+	ti.SetValue(branchText)
+	return model{
+		width:   200,
+		twAvail: twAvail,
+		prompt:  promptNewWorktree,
+		input:   ti,
+	}
+}
+
+// TestPromptNewWorktreeRendersInSessionsPaneTwAvailTrue asserts that the
+// branch-name prompt label and the typed value appear in renderWorkspaceRows
+// output when taskwarrior IS available.
+func TestPromptNewWorktreeRendersInSessionsPaneTwAvailTrue(t *testing.T) {
+	rows := []workspace.Row{
+		makeRow("/repo/a", "/repo/a", "main", "running", workspace.StateRunning, state.AttnActive, fixedNow),
+	}
+	m := makeWorktreePromptModel("feat/my-branch", true)
+	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
+
+	if !strings.Contains(got, "new worktree branch:") {
+		t.Fatalf("sessions pane must contain 'new worktree branch:' label (twAvail=true), got %q", got)
+	}
+	if !strings.Contains(got, "feat/my-branch") {
+		t.Fatalf("sessions pane must contain typed branch value (twAvail=true), got %q", got)
+	}
+}
+
+// TestPromptNewWorktreeRendersInSessionsPaneTwAvailFalse asserts that the
+// branch-name prompt renders even when taskwarrior is NOT installed — the
+// sessions pane must not depend on m.twAvail.
+func TestPromptNewWorktreeRendersInSessionsPaneTwAvailFalse(t *testing.T) {
+	rows := []workspace.Row{
+		makeRow("/repo/a", "/repo/a", "main", "running", workspace.StateRunning, state.AttnActive, fixedNow),
+	}
+	m := makeWorktreePromptModel("feat/no-tw", false)
+	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
+
+	if !strings.Contains(got, "new worktree branch:") {
+		t.Fatalf("sessions pane must contain 'new worktree branch:' label (twAvail=false), got %q", got)
+	}
+	if !strings.Contains(got, "feat/no-tw") {
+		t.Fatalf("sessions pane must contain typed branch value (twAvail=false), got %q", got)
+	}
+}
+
+// TestPromptNewWorktreeRendersInEmptySessionsPane asserts that the prompt
+// still renders in the early-return (no worktrees configured) path.
+func TestPromptNewWorktreeRendersInEmptySessionsPane(t *testing.T) {
+	m := makeWorktreePromptModel("feat/empty-path", false)
+	got := m.renderWorkspaceRows(200, nil, 0, fixedNow)
+
+	if !strings.Contains(got, "new worktree branch:") {
+		t.Fatalf("empty sessions pane must still show 'new worktree branch:' label, got %q", got)
+	}
+	if !strings.Contains(got, "feat/empty-path") {
+		t.Fatalf("empty sessions pane must still show typed branch value, got %q", got)
+	}
+}
+
+// TestPromptIdleDoesNotRenderWorktreePromptInSessionsPane confirms that the
+// branch-name prompt is absent when no prompt is active (no regression).
+func TestPromptIdleDoesNotRenderWorktreePromptInSessionsPane(t *testing.T) {
+	rows := []workspace.Row{
+		makeRow("/repo/a", "/repo/a", "main", "running", workspace.StateRunning, state.AttnActive, fixedNow),
+	}
+	m := model{width: 200, prompt: promptIdle}
+	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
+
+	if strings.Contains(got, "new worktree branch:") {
+		t.Fatalf("sessions pane must NOT show worktree prompt when promptIdle, got %q", got)
+	}
+}
+
+// TestTaskPromptLineReturnsLabelForPromptNewWorktree asserts that taskPromptLine
+// returns the branch-name label (not an empty string) when promptNewWorktree is
+// active, preventing a blank reserved row in the tasks pane.
+func TestTaskPromptLineReturnsLabelForPromptNewWorktree(t *testing.T) {
+	ti := textinput.New()
+	ti.SetValue("feat/task-pane")
+	m := model{
+		prompt: promptNewWorktree,
+		input:  ti,
+	}
+	got := m.taskPromptLine()
+	if !strings.Contains(got, "new worktree branch:") {
+		t.Fatalf("taskPromptLine must contain 'new worktree branch:' for promptNewWorktree, got %q", got)
+	}
+	if !strings.Contains(got, "feat/task-pane") {
+		t.Fatalf("taskPromptLine must contain typed value for promptNewWorktree, got %q", got)
 	}
 }
