@@ -4,17 +4,39 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/guilhermehto/cogitator/internal/config"
+	"github.com/guilhermehto/cogitator/internal/git"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/taskwarrior"
+	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 type snapshotMsg state.Snapshot
+
+// tickMsg is sent by tickCmd on each relative-time refresh interval.
+// It carries the current time so View() can compute fresh relative timestamps
+// without calling time.Now() directly (easier to test).
+type tickMsg time.Time
+
+// tickInterval is how often the sessions pane refreshes relative timestamps
+// for stopped worktree rows. One minute is sufficient because formatRelative
+// only has minute-level resolution.
+const tickInterval = time.Minute
+
+// tickCmd returns a Cmd that fires a tickMsg after tickInterval and re-arms
+// itself. The re-arm happens in Update so the ticker is always live while the
+// model is running.
+func tickCmd() tea.Cmd {
+	return tea.Tick(tickInterval, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}
 
 // focusArea tracks which pane currently holds keyboard focus.
 // Iota order is load-bearing: zero value maps to focusSessions, keeping
@@ -49,6 +71,19 @@ type model struct {
 	bellSent        map[rowKey]state.Attention
 	cfg             *config.Config
 
+	// Workspace / worktree fields.
+	// workspaceRows is the merged list of worktree rows built by workspace.Merge
+	// on each snapshot and on each tickMsg. It is nil when no repos are
+	// configured (zero value is safe — View() guards on len > 0).
+	workspaceRows []workspace.Row
+	// sessionCursor is the index into the visible worktree rows list that
+	// currently holds keyboard focus. Zero value (0) is safe.
+	sessionCursor int
+	// tickNow is the reference time used by the sessions pane for relative
+	// timestamps. Updated on each tickMsg. Zero value causes View() to fall
+	// back to time.Now().
+	tickNow time.Time
+
 	// Taskwarrior fields
 	tw               ClientAPI
 	twAvail          bool
@@ -65,10 +100,15 @@ type model struct {
 }
 
 func (m model) Init() tea.Cmd {
+	// tickCmd keeps relative timestamps in the sessions pane fresh. It fires
+	// once per minute and re-arms itself in Update. The tick runs regardless
+	// of whether repos are configured — it is cheap and avoids a conditional
+	// that would complicate Init.
+	tick := tickCmd()
 	if m.twAvail {
-		return tea.Batch(waitSnapshot(m.snaps), loadTasksCmd(m.tw, m.cfg.TaskwarriorTimeout))
+		return tea.Batch(waitSnapshot(m.snaps), loadTasksCmd(m.tw, m.cfg.TaskwarriorTimeout), tick)
 	}
-	return waitSnapshot(m.snaps)
+	return tea.Batch(waitSnapshot(m.snaps), tick)
 }
 
 func waitSnapshot(ch <-chan state.Snapshot) tea.Cmd {
@@ -176,8 +216,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// (d) Sessions-focused keys.
 		if m.focus == focusSessions {
-			if msg.String() == "a" {
+			switch msg.String() {
+			case "a":
 				m.recentCollapsed = !m.recentCollapsed
+			case "j", "down":
+				if n := len(m.workspaceRows); n > 0 {
+					m.sessionCursor = min(m.sessionCursor+1, n-1)
+				}
+			case "k", "up":
+				if n := len(m.workspaceRows); n > 0 {
+					m.sessionCursor = max(m.sessionCursor-1, 0)
+				}
 			}
 			return m, nil
 		}
@@ -281,12 +330,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Do not refresh — leave the existing list intact and surface the error.
 	case snapshotMsg:
 		m.snap = state.Snapshot(msg)
+		// Rebuild workspace rows on every snapshot so running/stopped state
+		// stays in sync with live session changes.
+		m.workspaceRows = buildWorkspaceRows(m.snap, m.cfg)
+		// Clamp cursor so it never points past the end of the new row list.
+		if n := len(m.workspaceRows); n == 0 {
+			m.sessionCursor = 0
+		} else if m.sessionCursor >= n {
+			m.sessionCursor = n - 1
+		}
 		next := waitSnapshot(m.snaps)
 		if !m.bellEnabled {
 			return m, next
 		}
 		fired := processBellTransitions(m.snap.Sessions, m.bellSent)
 		return m, tea.Batch(next, bellCmd(len(fired)))
+
+	case tickMsg:
+		// Re-arm the ticker and record the current time so View() can render
+		// fresh relative timestamps without calling time.Now() on every frame.
+		m.tickNow = time.Time(msg)
+		return m, tickCmd()
 	}
 	return m, nil
 }
@@ -372,7 +436,19 @@ func (m model) View() string {
 	sessionsInnerH := max(1, sessionsOuterH-2)
 	tasksInnerH := max(1, tasksOuterH-2)
 
-	sessionContent := m.renderAllSessions(paneW, rows, recentByInstance)
+	// When repos are configured, render the merged worktree view. Otherwise
+	// fall back to the live-only path so --status/--demo and unconfigured
+	// installs render exactly as before.
+	var sessionContent string
+	if len(m.workspaceRows) > 0 {
+		now := m.tickNow
+		if now.IsZero() {
+			now = time.Now()
+		}
+		sessionContent = m.renderWorkspaceRows(paneW, m.workspaceRows, m.sessionCursor, now)
+	} else {
+		sessionContent = m.renderAllSessions(paneW, rows, recentByInstance)
+	}
 	sessionsPane := sessionsStyle.Width(paneW).Height(sessionsInnerH).Render(sessionContent)
 
 	tasksContent := m.renderTasksPane(tasksOuterH, paneW)
@@ -430,4 +506,57 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 		lastMutationOp:   "",
 		mutationInFlight: false,
 	}
+}
+
+// buildWorkspaceRows loads workspace config, roster, and git worktrees, then
+// calls workspace.Merge to produce the merged row list. It is called on every
+// snapshot update so the list stays in sync with live session changes.
+//
+// tmuxDirs is stubbed as an empty map because tmuxctl does not yet expose a
+// "list all @cog_dir windows" helper. The stub is safe: unknown rows that
+// would have been StateUnknown (tmux window present, no LiveStatus) will be
+// rendered as StateStopped instead, which is the conservative fallback in
+// workspace.buildRow.
+//
+// Returns nil when no repos are configured (zero-value safe for callers).
+func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) []workspace.Row {
+	wsCfg, err := workspace.LoadConfig()
+	if err != nil || len(wsCfg.Repos) == 0 {
+		// No repos configured or config unreadable — live-only path.
+		return nil
+	}
+
+	// Build worktrees-by-repo map. Errors from individual repos are non-fatal:
+	// a repo that can't be listed (e.g. missing git) yields an empty slice,
+	// which Merge renders as a header-only row.
+	worktreesByRepo := make(map[string][]git.Worktree, len(wsCfg.Repos))
+	for _, repo := range wsCfg.Repos {
+		if repo.Missing {
+			continue
+		}
+		wts, err := git.ListWorktrees(repo.Path)
+		if err != nil {
+			// Non-fatal: render the repo with no worktrees.
+			continue
+		}
+		worktreesByRepo[repo.Path] = wts
+	}
+
+	roster, err := workspace.Load()
+	if err != nil {
+		// Non-fatal: proceed with an empty roster.
+		roster = map[string]workspace.RosterEntry{}
+	}
+
+	// Pre-filter to top-level sessions only (shouldHideSubagent is private to
+	// the ui package; workspace.Merge trusts the caller to do this filtering).
+	var liveTopLevel []state.SessionView
+	for _, sv := range snap.Sessions {
+		if !shouldHideSubagent(sv) && sv.ParentID == "" {
+			liveTopLevel = append(liveTopLevel, sv)
+		}
+	}
+
+	// tmuxDirs is stubbed empty — see function doc above.
+	return workspace.Merge(wsCfg.Repos, worktreesByRepo, roster, liveTopLevel, nil)
 }

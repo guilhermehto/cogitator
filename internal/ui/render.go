@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"hash/fnv"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/guilhermehto/cogitator/internal/state"
+	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 var (
@@ -62,6 +64,30 @@ const (
 	// glyphTaskActive marks a running Taskwarrior task in the ST column.
 	// When active, it replaces the priority glyph for that row.
 	glyphTaskActive = "\U000f040a" // 󰐊 play
+
+	// Workspace / worktree row glyphs.
+	glyphWtRunning = "\U000f09de" // 󰧞 same as glyphActive — live session present
+	glyphWtStopped = "\U000f0764" // 󰝤 same as glyphInactive — agent stopped
+	glyphWtEmpty   = "○"          // no session ever launched here
+	glyphWtMissing = "\U000f0e7a" // 󰹺 directory absent from disk
+	glyphWtUnknown = "?"          // harness has no LiveStatus, tmux window present
+)
+
+var (
+	// wtRunningStyle highlights a running worktree row (same palette as active sessions).
+	wtRunningStyle = attnActiveStyle
+	// wtStoppedStyle dims a stopped worktree row.
+	wtStoppedStyle = dimStyle
+	// wtEmptyStyle renders an empty worktree row (no session ever launched).
+	wtEmptyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	// wtMissingStyle renders a missing worktree row (directory absent).
+	wtMissingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Italic(true)
+	// wtUnknownStyle renders an unknown worktree row.
+	wtUnknownStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("226"))
+	// wtCursorStyle highlights the row under the session cursor.
+	wtCursorStyle = lipgloss.NewStyle().Reverse(true)
+	// wtRepoStyle renders the repo group header.
+	wtRepoStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63"))
 )
 
 // taskPriorityGlyph maps Taskwarrior priority codes to display glyphs.
@@ -367,4 +393,150 @@ func shortenDirectory(path string) string {
 		}
 	}
 	return path
+}
+
+// renderWorkspaceRows renders the merged worktree list grouped by repo.
+// cursor is the index into rows of the currently selected row.
+// now is the reference time for relative timestamps on stopped rows.
+func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, now time.Time) string {
+	var b strings.Builder
+	b.WriteString(headerStyle.Render("Sessions") + "\n")
+	if len(rows) == 0 {
+		b.WriteString(dimStyle.Render("(no worktrees configured)"))
+		return b.String()
+	}
+
+	// Group rows by repo so we can emit a repo header before each group.
+	// We preserve the order from rows (Merge already orders by repo then worktree).
+	type repoGroup struct {
+		repo string
+		rows []int // indices into rows
+	}
+	var groups []repoGroup
+	repoIndex := map[string]int{} // repo path → index in groups
+	for i, row := range rows {
+		repo := row.Repo
+		if repo == "" {
+			repo = "(unconfigured)"
+		}
+		gi, ok := repoIndex[repo]
+		if !ok {
+			gi = len(groups)
+			repoIndex[repo] = gi
+			groups = append(groups, repoGroup{repo: repo})
+		}
+		groups[gi].rows = append(groups[gi].rows, i)
+	}
+
+	for _, g := range groups {
+		// Repo header: show the base name of the repo path.
+		repoLabel := filepath.Base(g.repo)
+		if g.repo == "(unconfigured)" {
+			repoLabel = g.repo
+		}
+		b.WriteString(wtRepoStyle.Render("  "+repoLabel) + "\n")
+
+		for _, i := range g.rows {
+			row := rows[i]
+			line := formatWorktreeRow(now, row, width-2)
+			if i == cursor {
+				// Highlight the cursor row with reverse video. We apply the
+				// style to the full rendered line so the highlight spans the
+				// entire row width.
+				line = wtCursorStyle.Render(line)
+			}
+			b.WriteString(line + "\n")
+		}
+	}
+
+	return b.String()
+}
+
+// formatWorktreeRow renders a single workspace.Row as a fixed-width line.
+// The layout reuses the same column widths as the live-session rows so the
+// two views feel consistent.
+func formatWorktreeRow(now time.Time, row workspace.Row, width int) string {
+	// State glyph and style.
+	var glyph string
+	var glyphStyle lipgloss.Style
+	switch row.State {
+	case workspace.StateRunning:
+		glyph = glyphWtRunning
+		glyphStyle = wtRunningStyle
+	case workspace.StateStopped:
+		glyph = glyphWtStopped
+		glyphStyle = wtStoppedStyle
+	case workspace.StateEmpty:
+		glyph = glyphWtEmpty
+		glyphStyle = wtEmptyStyle
+	case workspace.StateMissing:
+		glyph = glyphWtMissing
+		glyphStyle = wtMissingStyle
+	case workspace.StateUnknown:
+		glyph = glyphWtUnknown
+		glyphStyle = wtUnknownStyle
+	default:
+		glyph = "·"
+		glyphStyle = dimStyle
+	}
+	stateCell := glyphStyle.Render(glyph) + " "
+
+	// Title / description column.
+	var titleStr string
+	switch row.State {
+	case workspace.StateRunning:
+		// Running: show title (or branch/worktree dir as fallback).
+		titleStr = row.Title
+		if titleStr == "" {
+			titleStr = row.Branch
+		}
+		if titleStr == "" {
+			titleStr = filepath.Base(row.Worktree)
+		}
+	case workspace.StateStopped:
+		// Stopped: show title dimmed.
+		titleStr = row.Title
+		if titleStr == "" {
+			titleStr = filepath.Base(row.Worktree)
+		}
+		titleStr = wtStoppedStyle.Render(titleStr)
+	case workspace.StateEmpty:
+		titleStr = wtEmptyStyle.Render(filepath.Base(row.Worktree))
+	case workspace.StateMissing:
+		titleStr = wtMissingStyle.Render(filepath.Base(row.Worktree) + " (missing)")
+	case workspace.StateUnknown:
+		titleStr = wtUnknownStyle.Render("status unknown")
+	default:
+		titleStr = dimStyle.Render(filepath.Base(row.Worktree))
+	}
+
+	// Branch annotation (shown for non-running rows where branch is known).
+	if row.Branch != "" && row.State != workspace.StateRunning {
+		titleStr += "  " + dimStyle.Render("["+row.Branch+"]")
+	}
+
+	// Status column: attention badges for running rows; empty otherwise.
+	var statusStr string
+	if row.State == workspace.StateRunning {
+		statusStr = attnLabel(row.Attention, state.SourceLive)
+	}
+
+	// Activity column: relative last-activity for stopped/unknown rows.
+	var activityStr string
+	if !row.LastActivity.IsZero() && (row.State == workspace.StateStopped || row.State == workspace.StateUnknown) {
+		activityStr = dimStyle.Render(formatRelative(now, row.LastActivity))
+	}
+
+	sessionW := width - colStateW - colStatusW - colActivityW - 3*colGap
+	if sessionW < 1 {
+		sessionW = 1
+	}
+
+	cells := []string{
+		padCell(stateCell, colStateW, lipgloss.Left),
+		padCell(titleStr, sessionW, lipgloss.Left),
+		padCell(statusStr, colStatusW, lipgloss.Right),
+		padCell(activityStr, colActivityW, lipgloss.Right),
+	}
+	return strings.Join(cells, strings.Repeat(" ", colGap))
 }
