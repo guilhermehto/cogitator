@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -12,8 +13,10 @@ import (
 
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/git"
+	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/taskwarrior"
+	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
@@ -58,7 +61,86 @@ const (
 	promptAdd
 	promptEdit
 	promptConfirmDelete
+	// promptNewWorktree is active while the user types a branch name for 'n'.
+	// On enter, the branch name is passed to git.AddWorktree + harness launch.
+	// On esc, the prompt is cancelled without creating anything.
+	promptNewWorktree
 )
+
+// launchingTimeout is how long a row stays in the optimistic "launching" state
+// before the overlay is cleared and the row re-derives its real state from the
+// next merge. This covers the case where the harness exits immediately or mDNS
+// never advertises.
+const launchingTimeout = 30 * time.Second
+
+// launchResultMsg is returned by launchCmd / resumeCmd after the tmux
+// operations complete (or fail). dir is the canonical worktree directory.
+type launchResultMsg struct {
+	dir string
+	err error
+}
+
+// worktreeCreatedMsg is returned by newWorktreeCmd after git.AddWorktree
+// succeeds and the harness window has been opened. canonDest is the
+// post-create canonical path (the overlay key).
+type worktreeCreatedMsg struct {
+	canonDest string
+	err       error
+}
+
+// tmuxOps is the injectable seam for tmux operations used by the action Cmds.
+// The zero value is nil; production code uses the real tmuxctl package-level
+// functions via defaultTmuxOps. Tests inject a fake.
+type tmuxOps interface {
+	Available() bool
+	FindWindowByDir(dir string) (tmuxctl.Target, error)
+	WindowProcessAlive(target tmuxctl.Target) (bool, error)
+	RelaunchInWindow(target tmuxctl.Target, argv []string) error
+	EnsureWindow(dir, name string, argv []string) (tmuxctl.Target, error)
+	Select(target tmuxctl.Target) error
+}
+
+// realTmuxOps delegates to the package-level tmuxctl functions.
+type realTmuxOps struct{}
+
+func (realTmuxOps) Available() bool { return tmuxctl.Available() }
+func (realTmuxOps) FindWindowByDir(dir string) (tmuxctl.Target, error) {
+	return tmuxctl.FindWindowByDir(dir)
+}
+func (realTmuxOps) WindowProcessAlive(target tmuxctl.Target) (bool, error) {
+	return tmuxctl.WindowProcessAlive(target)
+}
+func (realTmuxOps) RelaunchInWindow(target tmuxctl.Target, argv []string) error {
+	return tmuxctl.RelaunchInWindow(target, argv)
+}
+func (realTmuxOps) EnsureWindow(dir, name string, argv []string) (tmuxctl.Target, error) {
+	return tmuxctl.EnsureWindow(dir, name, argv)
+}
+func (realTmuxOps) Select(target tmuxctl.Target) error { return tmuxctl.Select(target) }
+
+// gitOps is the injectable seam for git worktree creation.
+type gitOps interface {
+	AddWorktree(repoPath, branch, dest string) (string, error)
+}
+
+// realGitOps delegates to the package-level git functions.
+type realGitOps struct{}
+
+func (realGitOps) AddWorktree(repoPath, branch, dest string) (string, error) {
+	return git.AddWorktree(repoPath, branch, dest)
+}
+
+// harnessOps is the injectable seam for harness registry lookups.
+type harnessOps interface {
+	Get(kind harness.Kind) (harness.Harness, error)
+}
+
+// realHarnessOps delegates to the package-level harness registry.
+type realHarnessOps struct{}
+
+func (realHarnessOps) Get(kind harness.Kind) (harness.Harness, error) {
+	return harness.DefaultRegistry.Get(kind)
+}
 
 type model struct {
 	snap            state.Snapshot
@@ -83,6 +165,25 @@ type model struct {
 	// timestamps. Updated on each tickMsg. Zero value causes View() to fall
 	// back to time.Now().
 	tickNow time.Time
+	// launching is the optimistic overlay for rows that have been launched or
+	// resumed but not yet confirmed running by the next merge. Keyed by
+	// canonical worktree dir; value is the deadline after which the overlay
+	// is cleared and the row re-derives its real state. Zero value (nil) is safe.
+	launching map[string]time.Time
+	// tmuxHint is a transient one-line message shown when tmux is unavailable
+	// or an action cannot be performed. Cleared on the next key press.
+	tmuxHint string
+	// newWorktreeRepo is the repo path captured when the user presses 'n' so
+	// the promptNewWorktree handler knows which repo to create the worktree in.
+	newWorktreeRepo string
+
+	// Injectable seams for tmux, git, and harness operations. Nil values are
+	// replaced with the real implementations in newModel. Tests inject fakes.
+	// Zero-value model{} literals in tests are safe: action Cmds guard on nil
+	// and return an error result rather than panicking.
+	tmux    tmuxOps
+	gitOp   gitOps
+	harnOp  harnessOps
 
 	// Taskwarrior fields
 	tw               ClientAPI
@@ -97,6 +198,135 @@ type model struct {
 	lastMutationErr  error
 	lastMutationOp   string
 	mutationInFlight bool
+}
+
+// launchCmd performs the jump/resume tmux operations for the given row and
+// returns a launchResultMsg. It selects the correct tmux action based on
+// window existence and pane liveness:
+//
+//   - running row: FindWindowByDir → Select (jump to existing window)
+//   - stopped/unknown row, window alive: Select
+//   - stopped/unknown row, window dead: RelaunchInWindow → Select
+//   - stopped/unknown row, no window: EnsureWindow → Select
+//
+// The function is a tea.Cmd (runs off the UI goroutine).
+func launchCmd(ops tmuxOps, row workspace.Row, harnOp harnessOps) tea.Cmd {
+	return func() tea.Msg {
+		if ops == nil || !ops.Available() {
+			return launchResultMsg{dir: row.Worktree, err: tmuxctl.ErrNotAvailable}
+		}
+
+		dir := row.Worktree
+
+		// Resolve the harness argv for resume/launch.
+		harnessKind := harness.Kind(row.Harness)
+		if harnessKind == "" {
+			harnessKind = harness.KindOpenCode
+		}
+		var argv []string
+		if harnOp != nil {
+			if h, err := harnOp.Get(harnessKind); err == nil {
+				argv = h.LaunchArgv(dir, row.SessionID)
+			}
+		}
+		if len(argv) == 0 {
+			// Fallback: use opencode directly.
+			argv = []string{"opencode", "--mdns", dir}
+		}
+
+		// For running rows, just find and select the window.
+		if row.State == workspace.StateRunning {
+			target, err := ops.FindWindowByDir(dir)
+			if err != nil {
+				// Window not found for a running row — best effort: no-op.
+				return launchResultMsg{dir: dir, err: err}
+			}
+			return launchResultMsg{dir: dir, err: ops.Select(target)}
+		}
+
+		// For stopped/unknown/empty rows: check if a window already exists.
+		target, findErr := ops.FindWindowByDir(dir)
+		if findErr == nil {
+			// Window exists — check if the process is alive.
+			alive, aliveErr := ops.WindowProcessAlive(target)
+			if aliveErr != nil {
+				// Cannot determine liveness — try to select anyway.
+				return launchResultMsg{dir: dir, err: ops.Select(target)}
+			}
+			if alive {
+				// Process is alive — just select.
+				return launchResultMsg{dir: dir, err: ops.Select(target)}
+			}
+			// Process is dead — relaunch then select.
+			if err := ops.RelaunchInWindow(target, argv); err != nil {
+				return launchResultMsg{dir: dir, err: err}
+			}
+			return launchResultMsg{dir: dir, err: ops.Select(target)}
+		}
+
+		// No window exists — create one and select it.
+		windowName := filepath.Base(dir)
+		if row.Branch != "" {
+			windowName = filepath.Base(row.Repo) + "/" + row.Branch
+		}
+		newTarget, err := ops.EnsureWindow(dir, windowName, argv)
+		if err != nil {
+			return launchResultMsg{dir: dir, err: err}
+		}
+		return launchResultMsg{dir: dir, err: ops.Select(newTarget)}
+	}
+}
+
+// newWorktreeCmd creates a git worktree for branch under repoPath, then
+// launches the harness in a new tmux window. Returns worktreeCreatedMsg with
+// the canonical post-create dest (the overlay key).
+func newWorktreeCmd(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, branch, harnessKind string) tea.Cmd {
+	return func() tea.Msg {
+		if ops == nil || !ops.Available() {
+			return worktreeCreatedMsg{err: tmuxctl.ErrNotAvailable}
+		}
+
+		// Derive the destination path as a sibling of the repo named after the branch.
+		// e.g. /home/user/myrepo → /home/user/myrepo-branch
+		dest := filepath.Join(filepath.Dir(repoPath), filepath.Base(repoPath)+"-"+branch)
+
+		var addFn func(string, string, string) (string, error)
+		if gitOp != nil {
+			addFn = gitOp.AddWorktree
+		} else {
+			addFn = git.AddWorktree
+		}
+
+		canonDest, err := addFn(repoPath, branch, dest)
+		if err != nil {
+			return worktreeCreatedMsg{err: err}
+		}
+
+		// Resolve harness argv.
+		kind := harness.Kind(harnessKind)
+		if kind == "" {
+			kind = harness.KindOpenCode
+		}
+		var argv []string
+		if harnOp != nil {
+			if h, hErr := harnOp.Get(kind); hErr == nil {
+				argv = h.LaunchArgv(canonDest, "")
+			}
+		}
+		if len(argv) == 0 {
+			argv = []string{"opencode", "--mdns", canonDest}
+		}
+
+		windowName := filepath.Base(repoPath) + "/" + branch
+		target, err := ops.EnsureWindow(canonDest, windowName, argv)
+		if err != nil {
+			return worktreeCreatedMsg{canonDest: canonDest, err: err}
+		}
+		if err := ops.Select(target); err != nil {
+			return worktreeCreatedMsg{canonDest: canonDest, err: err}
+		}
+		return worktreeCreatedMsg{canonDest: canonDest}
+	}
 }
 
 func (m model) Init() tea.Cmd {
@@ -192,6 +422,43 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.input, cmd = m.input.Update(msg)
 					return m, cmd
 				}
+
+			case promptNewWorktree:
+				// Branch-name prompt for 'n' (new worktree). On enter, create
+				// the worktree and launch the harness. On esc, cancel.
+				switch msg.String() {
+				case "enter":
+					branch := strings.TrimSpace(m.input.Value())
+					repoPath := m.newWorktreeRepo
+					m.prompt = promptIdle
+					m.input.Blur()
+					m.input.SetValue("")
+					m.newWorktreeRepo = ""
+					_, inputCmd := m.input.Update(msg)
+					if branch == "" || repoPath == "" {
+						// Nothing to do — cancelled effectively.
+						return m, inputCmd
+					}
+					// Determine harness kind from workspace config.
+					harnessKind := "opencode"
+					if wsCfg, err := workspace.LoadConfig(); err == nil && wsCfg.DefaultHarness != "" {
+						harnessKind = wsCfg.DefaultHarness
+					}
+					actionCmd := newWorktreeCmd(m.tmux, m.gitOp, m.harnOp, repoPath, branch, harnessKind)
+					return m, tea.Batch(inputCmd, actionCmd)
+
+				case "esc":
+					m.prompt = promptIdle
+					m.input.Blur()
+					m.input.SetValue("")
+					m.newWorktreeRepo = ""
+					return m, nil
+
+				default:
+					var cmd tea.Cmd
+					m.input, cmd = m.input.Update(msg)
+					return m, cmd
+				}
 			}
 		}
 
@@ -216,6 +483,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// (d) Sessions-focused keys.
 		if m.focus == focusSessions {
+			// Clear any transient tmux hint on any key press.
+			m.tmuxHint = ""
+
 			switch msg.String() {
 			case "a":
 				m.recentCollapsed = !m.recentCollapsed
@@ -227,6 +497,68 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if n := len(m.workspaceRows); n > 0 {
 					m.sessionCursor = max(m.sessionCursor-1, 0)
 				}
+
+			case "enter":
+				// Jump to a running agent or resume a stopped one.
+				// Guard: tmux must be available.
+				tmuxAvail := m.tmux != nil && m.tmux.Available()
+				if !tmuxAvail {
+					m.tmuxHint = "tmux not available — start cogitator inside a tmux session to use jump/resume"
+					return m, nil
+				}
+				if len(m.workspaceRows) == 0 {
+					return m, nil
+				}
+				row := m.workspaceRows[m.sessionCursor]
+				dir := row.Worktree
+
+				// If the row is already in the launching overlay, jump/no-op
+				// rather than launching again.
+				if _, launching := m.launching[dir]; launching {
+					// Try to select the window if it exists; otherwise no-op.
+					return m, launchCmd(m.tmux, row, m.harnOp)
+				}
+
+				// Missing rows cannot be resumed (directory absent from disk).
+				if row.State == workspace.StateMissing {
+					m.tmuxHint = "worktree directory is missing — cannot resume"
+					return m, nil
+				}
+
+				// Set optimistic launching overlay.
+				deadline := time.Now().Add(launchingTimeout)
+				if m.launching == nil {
+					m.launching = make(map[string]time.Time)
+				}
+				m.launching[dir] = deadline
+
+				return m, launchCmd(m.tmux, row, m.harnOp)
+
+			case "n":
+				// New worktree: collect a branch name via prompt.
+				tmuxAvail := m.tmux != nil && m.tmux.Available()
+				if !tmuxAvail {
+					m.tmuxHint = "tmux not available — start cogitator inside a tmux session to create worktrees"
+					return m, nil
+				}
+				if len(m.workspaceRows) == 0 {
+					return m, nil
+				}
+				row := m.workspaceRows[m.sessionCursor]
+				// Determine the repo path: use row.Repo if set, else row.Worktree.
+				repoPath := row.Repo
+				if repoPath == "" {
+					repoPath = row.Worktree
+				}
+				if repoPath == "" {
+					return m, nil
+				}
+				m.newWorktreeRepo = repoPath
+				m.prompt = promptNewWorktree
+				m.input.Placeholder = "branch name"
+				m.input.SetValue("")
+				focusCmd := m.input.Focus()
+				return m, focusCmd
 			}
 			return m, nil
 		}
@@ -328,11 +660,54 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastMutationErr = msg.err
 		m.lastMutationOp = msg.op
 		// Do not refresh — leave the existing list intact and surface the error.
+
+	case launchResultMsg:
+		// A launch/resume Cmd completed. On success the overlay stays until
+		// the next merge confirms the row is running. On error, clear the
+		// overlay immediately so the row re-derives its real state.
+		if msg.err != nil {
+			if m.launching != nil {
+				delete(m.launching, msg.dir)
+			}
+			// Surface the error as a transient hint.
+			m.tmuxHint = fmt.Sprintf("launch error: %v", msg.err)
+		}
+		return m, nil
+
+	case worktreeCreatedMsg:
+		// A new-worktree Cmd completed. On success, set the launching overlay
+		// keyed by the post-create canonical dest. On error, clear any overlay
+		// and surface the error.
+		if msg.err != nil {
+			if msg.canonDest != "" && m.launching != nil {
+				delete(m.launching, msg.canonDest)
+			}
+			m.tmuxHint = fmt.Sprintf("new worktree error: %v", msg.err)
+		} else if msg.canonDest != "" {
+			deadline := time.Now().Add(launchingTimeout)
+			if m.launching == nil {
+				m.launching = make(map[string]time.Time)
+			}
+			m.launching[msg.canonDest] = deadline
+		}
+		return m, nil
+
 	case snapshotMsg:
 		m.snap = state.Snapshot(msg)
 		// Rebuild workspace rows on every snapshot so running/stopped state
 		// stays in sync with live session changes.
 		m.workspaceRows = buildWorkspaceRows(m.snap, m.cfg)
+		// Clear launching overlay for any dir that is now confirmed running.
+		if m.launching != nil {
+			for dir := range m.launching {
+				for _, row := range m.workspaceRows {
+					if row.Worktree == dir && row.State == workspace.StateRunning {
+						delete(m.launching, dir)
+						break
+					}
+				}
+			}
+		}
 		// Clamp cursor so it never points past the end of the new row list.
 		if n := len(m.workspaceRows); n == 0 {
 			m.sessionCursor = 0
@@ -350,6 +725,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Re-arm the ticker and record the current time so View() can render
 		// fresh relative timestamps without calling time.Now() on every frame.
 		m.tickNow = time.Time(msg)
+		// Expire any launching overlays whose deadline has passed. The row
+		// will re-derive its real state from the next merge.
+		now := time.Time(msg)
+		if m.launching != nil {
+			for dir, deadline := range m.launching {
+				if now.After(deadline) {
+					delete(m.launching, dir)
+				}
+			}
+		}
 		return m, tickCmd()
 	}
 	return m, nil
@@ -494,6 +879,12 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 		bellSent:        map[rowKey]state.Attention{},
 		cfg:             cfg,
 
+		// Inject real implementations for tmux, git, and harness operations.
+		// Tests can override these fields with fakes after construction.
+		tmux:   realTmuxOps{},
+		gitOp:  realGitOps{},
+		harnOp: realHarnessOps{},
+
 		tw:               tw,
 		twAvail:          twAvail,
 		tasks:            nil,
@@ -508,15 +899,14 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 	}
 }
 
-// buildWorkspaceRows loads workspace config, roster, and git worktrees, then
-// calls workspace.Merge to produce the merged row list. It is called on every
-// snapshot update so the list stays in sync with live session changes.
+// buildWorkspaceRows loads workspace config, roster, git worktrees, and tmux
+// window dirs, then calls workspace.Merge to produce the merged row list. It
+// is called on every snapshot update so the list stays in sync with live
+// session changes.
 //
-// tmuxDirs is stubbed as an empty map because tmuxctl does not yet expose a
-// "list all @cog_dir windows" helper. The stub is safe: unknown rows that
-// would have been StateUnknown (tmux window present, no LiveStatus) will be
-// rendered as StateStopped instead, which is the conservative fallback in
-// workspace.buildRow.
+// tmuxDirs is gathered from tmuxctl.ListCogDirs() when tmux is available.
+// When tmux is unavailable or the call fails, an empty map is used (safe
+// fallback: unknown rows render as stopped instead of unknown).
 //
 // Returns nil when no repos are configured (zero-value safe for callers).
 func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) []workspace.Row {
@@ -557,6 +947,15 @@ func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) []workspace.Row
 		}
 	}
 
-	// tmuxDirs is stubbed empty — see function doc above.
-	return workspace.Merge(wsCfg.Repos, worktreesByRepo, roster, liveTopLevel, nil)
+	// Gather tmux window dirs so Merge can classify rows as StateUnknown when
+	// a tmux window exists for a dir whose harness lacks LiveStatus.
+	// Non-fatal: if tmux is unavailable or the call fails, use an empty map.
+	var tmuxDirs map[string]bool
+	if tmuxctl.Available() {
+		if dirs, err := tmuxctl.ListCogDirs(); err == nil {
+			tmuxDirs = dirs
+		}
+	}
+
+	return workspace.Merge(wsCfg.Repos, worktreesByRepo, roster, liveTopLevel, tmuxDirs)
 }

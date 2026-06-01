@@ -66,11 +66,12 @@ const (
 	glyphTaskActive = "\U000f040a" // 󰐊 play
 
 	// Workspace / worktree row glyphs.
-	glyphWtRunning = "\U000f09de" // 󰧞 same as glyphActive — live session present
-	glyphWtStopped = "\U000f0764" // 󰝤 same as glyphInactive — agent stopped
-	glyphWtEmpty   = "○"          // no session ever launched here
-	glyphWtMissing = "\U000f0e7a" // 󰹺 directory absent from disk
-	glyphWtUnknown = "?"          // harness has no LiveStatus, tmux window present
+	glyphWtRunning   = "\U000f09de" // 󰧞 same as glyphActive — live session present
+	glyphWtStopped   = "\U000f0764" // 󰝤 same as glyphInactive — agent stopped
+	glyphWtEmpty     = "○"          // no session ever launched here
+	glyphWtMissing   = "\U000f0e7a" // 󰹺 directory absent from disk
+	glyphWtUnknown   = "?"          // harness has no LiveStatus, tmux window present
+	glyphWtLaunching = "⟳"          // optimistic launching overlay — harness starting
 )
 
 var (
@@ -84,10 +85,14 @@ var (
 	wtMissingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Italic(true)
 	// wtUnknownStyle renders an unknown worktree row.
 	wtUnknownStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("226"))
+	// wtLaunchingStyle renders a row in the optimistic launching overlay.
+	wtLaunchingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
 	// wtCursorStyle highlights the row under the session cursor.
 	wtCursorStyle = lipgloss.NewStyle().Reverse(true)
 	// wtRepoStyle renders the repo group header.
 	wtRepoStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63"))
+	// wtHintStyle renders the transient tmux hint line.
+	wtHintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Italic(true)
 )
 
 // taskPriorityGlyph maps Taskwarrior priority codes to display glyphs.
@@ -398,11 +403,17 @@ func shortenDirectory(path string) string {
 // renderWorkspaceRows renders the merged worktree list grouped by repo.
 // cursor is the index into rows of the currently selected row.
 // now is the reference time for relative timestamps on stopped rows.
+// launching is the optimistic overlay map (canonical dir → deadline); rows
+// whose dir is in this map render as "launching" regardless of their State.
+// hint is a transient one-line message shown below the rows (e.g. tmux hint).
 func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, now time.Time) string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Sessions") + "\n")
 	if len(rows) == 0 {
 		b.WriteString(dimStyle.Render("(no worktrees configured)"))
+		if m.tmuxHint != "" {
+			b.WriteString("\n" + wtHintStyle.Render(m.tmuxHint))
+		}
 		return b.String()
 	}
 
@@ -438,7 +449,9 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 
 		for _, i := range g.rows {
 			row := rows[i]
-			line := formatWorktreeRow(now, row, width-2)
+			// Check if this row is in the launching overlay.
+			isLaunching := m.launching != nil && m.launching[row.Worktree] != (time.Time{})
+			line := formatWorktreeRow(now, row, width-2, isLaunching)
 			if i == cursor {
 				// Highlight the cursor row with reverse video. We apply the
 				// style to the full rendered line so the highlight spans the
@@ -449,13 +462,42 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 		}
 	}
 
+	// Render transient hint (e.g. tmux unavailable, launch error).
+	if m.tmuxHint != "" {
+		b.WriteString(wtHintStyle.Render(m.tmuxHint) + "\n")
+	}
+
 	return b.String()
 }
 
 // formatWorktreeRow renders a single workspace.Row as a fixed-width line.
 // The layout reuses the same column widths as the live-session rows so the
 // two views feel consistent.
-func formatWorktreeRow(now time.Time, row workspace.Row, width int) string {
+//
+// isLaunching overrides the row's State to show the optimistic "launching"
+// indicator when the harness has been started but not yet confirmed running.
+func formatWorktreeRow(now time.Time, row workspace.Row, width int, isLaunching bool) string {
+	// When the launching overlay is active, render a distinct launching state
+	// regardless of the underlying row state.
+	if isLaunching {
+		stateCell := wtLaunchingStyle.Render(glyphWtLaunching) + " "
+		titleStr := wtLaunchingStyle.Render("launching…")
+		if row.Branch != "" {
+			titleStr += "  " + dimStyle.Render("["+row.Branch+"]")
+		}
+		sessionW := width - colStateW - colStatusW - colActivityW - 3*colGap
+		if sessionW < 1 {
+			sessionW = 1
+		}
+		cells := []string{
+			padCell(stateCell, colStateW, lipgloss.Left),
+			padCell(titleStr, sessionW, lipgloss.Left),
+			padCell("", colStatusW, lipgloss.Right),
+			padCell("", colActivityW, lipgloss.Right),
+		}
+		return strings.Join(cells, strings.Repeat(" ", colGap))
+	}
+
 	// State glyph and style.
 	var glyph string
 	var glyphStyle lipgloss.Style

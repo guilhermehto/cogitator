@@ -325,3 +325,41 @@ func SelectWith(r Runner, target Target) error {
 	}
 	return nil
 }
+
+// ListCogDirs returns the set of canonical worktree directories that currently
+// have a tmux window tagged with @cog_dir. It runs
+// `tmux list-windows -a -F '#{@cog_dir}'` and canonicalizes each non-empty
+// value via pathnorm.Canonical.
+//
+// The returned map is keyed by canonical path; the value is always true.
+// Returns ErrNotAvailable when not inside tmux.
+func ListCogDirs() (map[string]bool, error) {
+	return ListCogDirsWith(DefaultRunner)
+}
+
+// ListCogDirsWith is the injectable variant of ListCogDirs.
+func ListCogDirsWith(r Runner) (map[string]bool, error) {
+	if !Available() {
+		return nil, ErrNotAvailable
+	}
+
+	out, err := r.Run("list-windows", "-a", "-F", "#{@cog_dir}")
+	if err != nil {
+		return nil, fmt.Errorf("tmuxctl: list-windows for cog dirs: %w", err)
+	}
+
+	result := make(map[string]bool)
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		canonical, err := pathnorm.Canonical(line)
+		if err != nil {
+			// Non-fatal: skip paths that cannot be canonicalized.
+			continue
+		}
+		result[canonical] = true
+	}
+	return result, nil
+}

@@ -386,3 +386,73 @@ func TestSelect_RunnerError(t *testing.T) {
 		t.Error("expected error when runner fails, got nil")
 	}
 }
+
+// ---- ListCogDirs ------------------------------------------------------------
+
+func TestListCogDirs_NotAvailable(t *testing.T) {
+	withoutTMUX(t)
+	r := &fakeRunner{}
+	_, err := ListCogDirsWith(r)
+	if !errors.Is(err, ErrNotAvailable) {
+		t.Errorf("ListCogDirsWith: got %v, want ErrNotAvailable", err)
+	}
+	if len(r.calls) != 0 {
+		t.Errorf("expected no tmux calls when not available, got %d", len(r.calls))
+	}
+}
+
+func TestListCogDirs_ReturnsCanonicalSet(t *testing.T) {
+	withTMUX(t)
+
+	// Simulate list-windows output: three lines, one empty (no @cog_dir set).
+	listOut := "/private/tmp/wt-a\n/private/tmp/wt-b\n\n"
+	r := &fakeRunner{}
+	r.push(listOut, nil)
+
+	dirs, err := ListCogDirsWith(r)
+	if err != nil {
+		t.Fatalf("ListCogDirsWith: unexpected error: %v", err)
+	}
+	if !dirs["/private/tmp/wt-a"] {
+		t.Errorf("expected /private/tmp/wt-a in result, got %v", dirs)
+	}
+	if !dirs["/private/tmp/wt-b"] {
+		t.Errorf("expected /private/tmp/wt-b in result, got %v", dirs)
+	}
+	if len(dirs) != 2 {
+		t.Errorf("expected 2 entries, got %d: %v", len(dirs), dirs)
+	}
+
+	// Verify the correct tmux command was issued.
+	assertCall(t, r, 0, "list-windows", "-a", "-F", "#{@cog_dir}")
+}
+
+func TestListCogDirs_EmptyOutput(t *testing.T) {
+	withTMUX(t)
+
+	r := &fakeRunner{}
+	r.push("", nil)
+
+	dirs, err := ListCogDirsWith(r)
+	if err != nil {
+		t.Fatalf("ListCogDirsWith empty output: unexpected error: %v", err)
+	}
+	if len(dirs) != 0 {
+		t.Errorf("expected empty map for empty output, got %v", dirs)
+	}
+}
+
+func TestListCogDirs_RunnerError(t *testing.T) {
+	withTMUX(t)
+
+	r := &fakeRunner{}
+	r.push("", errors.New("tmux: server not found"))
+
+	_, err := ListCogDirsWith(r)
+	if err == nil {
+		t.Error("expected error when runner fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "list-windows") {
+		t.Errorf("error should mention list-windows, got: %v", err)
+	}
+}
