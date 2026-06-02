@@ -1,16 +1,36 @@
 package ui
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
+
+// wsAnsiRe strips SGR escape sequences so tests can assert on visible text and
+// column order independent of styling.
+var wsAnsiRe = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+func wsStripANSI(s string) string { return wsAnsiRe.ReplaceAllString(s, "") }
+
+// wsRowLineContaining returns the first rendered line whose visible text
+// contains want, or "" if none match.
+func wsRowLineContaining(rendered, want string) string {
+	for _, l := range strings.Split(rendered, "\n") {
+		if strings.Contains(wsStripANSI(l), want) {
+			return l
+		}
+	}
+	return ""
+}
 
 // keyMsg synthesises a tea.KeyMsg for the given key string. Single printable
 // characters are sent as KeyRunes; named keys (j, k, up, down, a, etc.) are
@@ -137,6 +157,86 @@ func TestRenderWorkspaceRowsEmptyListShowsPlaceholder(t *testing.T) {
 	got := m.renderWorkspaceRows(200, nil, 0, fixedNow)
 	if !strings.Contains(got, "no worktrees configured") {
 		t.Fatalf("empty rows must show placeholder, got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Status column placement and cursor highlight
+// ---------------------------------------------------------------------------
+
+// TestWorkspaceRowStatusBadgeIsLeftmostColumn asserts the session status badge
+// renders in the left-most column — before the title — rather than on the far
+// right. A permission-pending running row must show the permission glyph ahead
+// of its title text.
+func TestWorkspaceRowStatusBadgeIsLeftmostColumn(t *testing.T) {
+	rows := []workspace.Row{
+		makeRow("/repo/a", "/repo/a/wt/perm", "feat/perm", "needs permission", workspace.StateRunning, state.AttnPermissionPending, fixedNow),
+	}
+	m := model{width: 120}
+	line := wsRowLineContaining(m.renderWorkspaceRows(120, rows, 0, fixedNow), "needs permission")
+	if line == "" {
+		t.Fatal("row line for 'needs permission' not found")
+	}
+	badge := strings.Index(line, glyphPermission)
+	title := strings.Index(line, "needs permission")
+	if badge < 0 {
+		t.Fatalf("permission badge glyph missing from row %q", line)
+	}
+	if badge >= title {
+		t.Fatalf("status badge must be left of the title: badge=%d title=%d in %q", badge, title, line)
+	}
+}
+
+// TestSelectedWorkspaceRowHighlightSpansWholeRow asserts the cursor row is one
+// clean reverse-video span (like the tasks pane). Embedded foreground colours
+// would emit an SGR reset that also clears the reverse attribute, breaking the
+// highlight partway through; the selected row must therefore carry exactly the
+// reverse-open and a single trailing reset, with no interior escapes.
+func TestSelectedWorkspaceRowHighlightSpansWholeRow(t *testing.T) {
+	r := lipgloss.DefaultRenderer()
+	orig := r.ColorProfile()
+	r.SetColorProfile(termenv.ANSI256)
+	defer r.SetColorProfile(orig)
+
+	rows := []workspace.Row{
+		makeRow("/repo/a", "/repo/a", "main", "cursor row", workspace.StateRunning, state.AttnActive, fixedNow),
+	}
+	m := model{width: 80}
+	line := wsRowLineContaining(m.renderWorkspaceRows(80, rows, 0, fixedNow), "cursor row")
+	if line == "" {
+		t.Fatal("cursor row not found")
+	}
+	if !strings.Contains(line, "\x1b[7m") {
+		t.Fatalf("selected row must use reverse video, got %q", line)
+	}
+	if n := strings.Count(line, "\x1b["); n != 2 {
+		t.Fatalf("selected row must be a single clean reverse span (2 escapes), got %d in %q", n, line)
+	}
+}
+
+// TestUnselectedWorkspaceRowKeepsColour guards the test above: an unselected
+// running row still carries its colour styling (so the highlight test is
+// actually exercising the strip-before-reverse path, not a no-op).
+func TestUnselectedWorkspaceRowKeepsColour(t *testing.T) {
+	r := lipgloss.DefaultRenderer()
+	orig := r.ColorProfile()
+	r.SetColorProfile(termenv.ANSI256)
+	defer r.SetColorProfile(orig)
+
+	rows := []workspace.Row{
+		makeRow("/repo/a", "/repo/a", "main", "plain row", workspace.StateRunning, state.AttnActive, fixedNow),
+	}
+	m := model{width: 80}
+	// cursor on a different (non-existent) index so this row is not selected.
+	line := wsRowLineContaining(m.renderWorkspaceRows(80, rows, -1, fixedNow), "plain row")
+	if line == "" {
+		t.Fatal("row not found")
+	}
+	if strings.Contains(line, "\x1b[7m") {
+		t.Fatalf("unselected row must not be reverse-video, got %q", line)
+	}
+	if !strings.Contains(line, "\x1b[38") {
+		t.Fatalf("unselected running row should carry a foreground colour, got %q", line)
 	}
 }
 

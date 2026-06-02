@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/workspace"
@@ -66,7 +67,6 @@ const (
 	glyphTaskActive = "\U000f040a" // 󰐊 play
 
 	// Workspace / worktree row glyphs.
-	glyphWtRunning   = "\U000f09de" // 󰧞 same as glyphActive — live session present
 	glyphWtStopped   = "\U000f0764" // 󰝤 same as glyphInactive — agent stopped
 	glyphWtEmpty     = "○"          // no session ever launched here
 	glyphWtMissing   = "\U000f0e7a" // 󰹺 directory absent from disk
@@ -75,8 +75,6 @@ const (
 )
 
 var (
-	// wtRunningStyle highlights a running worktree row (same palette as active sessions).
-	wtRunningStyle = attnActiveStyle
 	// wtStoppedStyle dims a stopped worktree row.
 	wtStoppedStyle = dimStyle
 	// wtEmptyStyle renders an empty worktree row (no session ever launched).
@@ -456,10 +454,14 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 			isLaunching := m.launching != nil && m.launching[row.Worktree] != (time.Time{})
 			line := formatWorktreeRow(now, row, width-2, isLaunching)
 			if i == cursor {
-				// Highlight the cursor row with reverse video. We apply the
-				// style to the full rendered line so the highlight spans the
-				// entire row width.
-				line = wtCursorStyle.Render(line)
+				// Highlight the cursor row with reverse video, matching the
+				// tasks pane. Reverse must wrap plain text: lipgloss emits a
+				// full SGR reset after every embedded foreground colour, and
+				// that reset also clears the reverse attribute — so wrapping a
+				// row that still carries per-cell colours leaves everything
+				// after the first coloured segment un-highlighted. Strip the
+				// embedded styling first so the reverse spans the entire row.
+				line = wtCursorStyle.Render(ansi.Strip(line))
 			}
 			b.WriteString(line + "\n")
 		}
@@ -488,58 +490,73 @@ func (m model) worktreePromptLine() string {
 	return wtHintStyle.Render("new worktree branch: ") + m.input.View()
 }
 
+// worktreeSessionWidth returns the width of the session/title column for a
+// worktree row: the inner width minus the left status column, the right
+// activity column, and the two gaps between the three columns. Clamped to 1.
+func worktreeSessionWidth(width int) int {
+	w := width - colStateW - colActivityW - 2*colGap
+	if w < 1 {
+		w = 1
+	}
+	return w
+}
+
 // formatWorktreeRow renders a single workspace.Row as a fixed-width line.
-// The layout reuses the same column widths as the live-session rows so the
-// two views feel consistent.
+//
+// Columns are status | session | activity. The status column is left-most so
+// the session's status reads first: running rows show the live attention badge
+// (active / permission / question / error), and non-running rows show the
+// worktree run-state glyph (stopped / empty / missing / unknown). This keeps
+// the status in the same place the cursor highlight starts.
 //
 // isLaunching overrides the row's State to show the optimistic "launching"
 // indicator when the harness has been started but not yet confirmed running.
 func formatWorktreeRow(now time.Time, row workspace.Row, width int, isLaunching bool) string {
+	sessionW := worktreeSessionWidth(width)
+
 	// When the launching overlay is active, render a distinct launching state
 	// regardless of the underlying row state.
 	if isLaunching {
-		stateCell := wtLaunchingStyle.Render(glyphWtLaunching) + " "
+		statusCell := wtLaunchingStyle.Render(glyphWtLaunching) + " "
 		titleStr := wtLaunchingStyle.Render("launching…")
 		if row.Branch != "" {
 			titleStr += "  " + dimStyle.Render("["+row.Branch+"]")
 		}
-		sessionW := width - colStateW - colStatusW - colActivityW - 3*colGap
-		if sessionW < 1 {
-			sessionW = 1
-		}
 		cells := []string{
-			padCell(stateCell, colStateW, lipgloss.Left),
+			padCell(statusCell, colStateW, lipgloss.Left),
 			padCell(titleStr, sessionW, lipgloss.Left),
-			padCell("", colStatusW, lipgloss.Right),
 			padCell("", colActivityW, lipgloss.Right),
 		}
 		return strings.Join(cells, strings.Repeat(" ", colGap))
 	}
 
-	// State glyph and style.
-	var glyph string
-	var glyphStyle lipgloss.Style
-	switch row.State {
-	case workspace.StateRunning:
-		glyph = glyphWtRunning
-		glyphStyle = wtRunningStyle
-	case workspace.StateStopped:
-		glyph = glyphWtStopped
-		glyphStyle = wtStoppedStyle
-	case workspace.StateEmpty:
-		glyph = glyphWtEmpty
-		glyphStyle = wtEmptyStyle
-	case workspace.StateMissing:
-		glyph = glyphWtMissing
-		glyphStyle = wtMissingStyle
-	case workspace.StateUnknown:
-		glyph = glyphWtUnknown
-		glyphStyle = wtUnknownStyle
-	default:
-		glyph = "·"
-		glyphStyle = dimStyle
+	// Status column (left-most). Running rows carry a live attention label;
+	// everything else shows the run-state glyph.
+	var statusCell string
+	if row.State == workspace.StateRunning {
+		statusCell = attnLabel(row.Attention, state.SourceLive)
+	} else {
+		var glyph string
+		var glyphStyle lipgloss.Style
+		switch row.State {
+		case workspace.StateStopped:
+			glyph = glyphWtStopped
+			glyphStyle = wtStoppedStyle
+		case workspace.StateEmpty:
+			glyph = glyphWtEmpty
+			glyphStyle = wtEmptyStyle
+		case workspace.StateMissing:
+			glyph = glyphWtMissing
+			glyphStyle = wtMissingStyle
+		case workspace.StateUnknown:
+			glyph = glyphWtUnknown
+			glyphStyle = wtUnknownStyle
+		default:
+			glyph = "·"
+			glyphStyle = dimStyle
+		}
+		statusCell = glyphStyle.Render(glyph) + " "
 	}
-	stateCell := glyphStyle.Render(glyph) + " "
 
 	// Title / description column.
 	var titleStr string
@@ -575,27 +592,15 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int, isLaunching 
 		titleStr += "  " + dimStyle.Render("["+row.Branch+"]")
 	}
 
-	// Status column: attention badges for running rows; empty otherwise.
-	var statusStr string
-	if row.State == workspace.StateRunning {
-		statusStr = attnLabel(row.Attention, state.SourceLive)
-	}
-
 	// Activity column: relative last-activity for stopped/unknown rows.
 	var activityStr string
 	if !row.LastActivity.IsZero() && (row.State == workspace.StateStopped || row.State == workspace.StateUnknown) {
 		activityStr = dimStyle.Render(formatRelative(now, row.LastActivity))
 	}
 
-	sessionW := width - colStateW - colStatusW - colActivityW - 3*colGap
-	if sessionW < 1 {
-		sessionW = 1
-	}
-
 	cells := []string{
-		padCell(stateCell, colStateW, lipgloss.Left),
+		padCell(statusCell, colStateW, lipgloss.Left),
 		padCell(titleStr, sessionW, lipgloss.Left),
-		padCell(statusStr, colStatusW, lipgloss.Right),
 		padCell(activityStr, colActivityW, lipgloss.Right),
 	}
 	return strings.Join(cells, strings.Repeat(" ", colGap))
