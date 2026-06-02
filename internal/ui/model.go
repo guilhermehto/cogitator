@@ -296,10 +296,9 @@ type model struct {
 // returns a launchResultMsg. It selects the correct tmux action based on
 // window existence and pane liveness:
 //
-//   - running row: FindWindowByDir → Select (jump to existing window)
-//   - stopped/unknown row, window alive: Select
-//   - stopped/unknown row, window dead: RelaunchInWindow → Select
-//   - stopped/unknown row, no window: EnsureWindow → Select
+//   - window alive: Select
+//   - window dead: RelaunchInWindow → Select
+//   - no window: EnsureWindow → Select
 //
 // The function is a tea.Cmd (runs off the UI goroutine).
 func launchCmd(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl.LaunchMode) tea.Cmd {
@@ -337,17 +336,9 @@ func launchCmd(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl.L
 			return ops.Select(target)
 		}
 
-		// For running rows, just find and select the window.
-		if row.State == workspace.StateRunning {
-			target, err := ops.FindWindowByDir(dir)
-			if err != nil {
-				// Window not found for a running row — best effort: no-op.
-				return launchResultMsg{dir: dir, err: err}
-			}
-			return launchResultMsg{dir: dir, err: selectTarget(target)}
-		}
-
-		// For stopped/unknown/empty rows: check if a window already exists.
+		// Check tmux directly instead of trusting the row state. A running row can
+		// be stale if the opencode process or tmux target died before the next
+		// discovery update, so use the same recovery path for all resumable rows.
 		target, findErr := ops.FindWindowByDir(dir)
 		if findErr == nil {
 			// Window exists — check if the process is alive.

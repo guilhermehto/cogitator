@@ -28,21 +28,21 @@ import (
 
 // fakeTmuxOps records calls and returns canned responses.
 type fakeTmuxOps struct {
-	available         bool
-	findWindowResult  tmuxctl.Target
-	findWindowErr     error
-	processAlive      bool
-	processAliveErr   error
-	relaunchErr       error
+	available          bool
+	findWindowResult   tmuxctl.Target
+	findWindowErr      error
+	processAlive       bool
+	processAliveErr    error
+	relaunchErr        error
 	ensureWindowResult tmuxctl.Target
-	ensureWindowErr   error
-	selectErr         error
-	killWindowErr     error
+	ensureWindowErr    error
+	selectErr          error
+	killWindowErr      error
 
 	// Call recording.
-	findWindowCalls   []string
-	processAliveCalls []tmuxctl.Target
-	relaunchCalls     []relaunchCall
+	findWindowCalls    []string
+	processAliveCalls  []tmuxctl.Target
+	relaunchCalls      []relaunchCall
 	ensureWindowCalls  []ensureWindowCall
 	selectCalls        []tmuxctl.Target
 	selectSessionCalls []tmuxctl.Target
@@ -166,8 +166,8 @@ func (f *fakeHarnessOps) Get(kind harness.Kind) (harness.Harness, error) {
 
 type fakeHarness struct{ argv []string }
 
-func (h *fakeHarness) Kind() harness.Kind                              { return "fake" }
-func (h *fakeHarness) Capabilities() harness.Capabilities             { return harness.Capabilities{} }
+func (h *fakeHarness) Kind() harness.Kind                 { return "fake" }
+func (h *fakeHarness) Capabilities() harness.Capabilities { return harness.Capabilities{} }
 func (h *fakeHarness) LaunchArgv(wt string, token harness.ResumeToken) []string {
 	if len(h.argv) > 0 {
 		return h.argv
@@ -260,6 +260,7 @@ func TestEnterOnRunningRowCallsSelect(t *testing.T) {
 		available:        true,
 		findWindowResult: "main:1",
 		findWindowErr:    nil,
+		processAlive:     true,
 		selectErr:        nil,
 	}
 	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []workspace.Row{
@@ -282,6 +283,9 @@ func TestEnterOnRunningRowCallsSelect(t *testing.T) {
 	if len(tmuxFake.selectCalls) != 1 || tmuxFake.selectCalls[0] != "main:1" {
 		t.Errorf("expected Select(main:1), got %v", tmuxFake.selectCalls)
 	}
+	if len(tmuxFake.processAliveCalls) != 1 || tmuxFake.processAliveCalls[0] != "main:1" {
+		t.Errorf("expected WindowProcessAlive(main:1), got %v", tmuxFake.processAliveCalls)
+	}
 	// No relaunch or ensure calls.
 	if len(tmuxFake.relaunchCalls) != 0 {
 		t.Errorf("expected no RelaunchInWindow calls, got %d", len(tmuxFake.relaunchCalls))
@@ -298,6 +302,7 @@ func TestEnterOnRunningRowSessionModeCallsSelectSession(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{
 		available:        true,
 		findWindowResult: "repo-a:1",
+		processAlive:     true,
 	}
 	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []workspace.Row{
 		makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnActive, fixedNow),
@@ -314,6 +319,87 @@ func TestEnterOnRunningRowSessionModeCallsSelectSession(t *testing.T) {
 	}
 	if len(tmuxFake.selectCalls) != 0 {
 		t.Errorf("session mode must not call Select, got %v", tmuxFake.selectCalls)
+	}
+}
+
+func TestEnterOnRunningRowDeadWindowCallsRelaunchThenSelect(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{
+		available:        true,
+		findWindowResult: "main:6",
+		processAlive:     false,
+		selectErr:        nil,
+	}
+	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{argv: []string{"fake", "/r/a"}}, []workspace.Row{
+		makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnActive, fixedNow),
+	})
+
+	_, cmd := m.Update(keyMsg("enter"))
+	msg := runCmd(cmd)
+
+	result, ok := msg.(launchResultMsg)
+	if !ok {
+		t.Fatalf("expected launchResultMsg, got %T", msg)
+	}
+	if result.err != nil {
+		t.Errorf("expected no error, got %v", result.err)
+	}
+	if !result.launched {
+		t.Error("dead running pane must be marked as launched after relaunch")
+	}
+	if len(tmuxFake.relaunchCalls) != 1 {
+		t.Fatalf("expected 1 RelaunchInWindow call, got %d", len(tmuxFake.relaunchCalls))
+	}
+	if tmuxFake.relaunchCalls[0].target != "main:6" {
+		t.Errorf("RelaunchInWindow target = %q, want main:6", tmuxFake.relaunchCalls[0].target)
+	}
+	if len(tmuxFake.selectCalls) != 1 || tmuxFake.selectCalls[0] != "main:6" {
+		t.Errorf("expected Select(main:6), got %v", tmuxFake.selectCalls)
+	}
+	if len(tmuxFake.ensureWindowCalls) != 0 {
+		t.Errorf("expected no EnsureWindow calls, got %d", len(tmuxFake.ensureWindowCalls))
+	}
+}
+
+func TestEnterOnRunningRowNoWindowSessionModeCreatesSessionThenSelectsSession(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{
+		available:          true,
+		findWindowErr:      tmuxctl.ErrWindowNotFound,
+		ensureWindowResult: "repo-a:0",
+		selectErr:          nil,
+	}
+	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{argv: []string{"fake", "/r/a"}}, []workspace.Row{
+		makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnActive, fixedNow),
+	})
+	m.launchMode = tmuxctl.ModeSession
+
+	_, cmd := m.Update(keyMsg("enter"))
+	msg := runCmd(cmd)
+
+	result, ok := msg.(launchResultMsg)
+	if !ok {
+		t.Fatalf("expected launchResultMsg, got %T", msg)
+	}
+	if result.err != nil {
+		t.Errorf("expected no error, got %v", result.err)
+	}
+	if !result.launched {
+		t.Error("new session recovery must be marked as launched")
+	}
+	if len(tmuxFake.ensureWindowCalls) != 1 {
+		t.Fatalf("expected 1 EnsureWindowMode call, got %d", len(tmuxFake.ensureWindowCalls))
+	}
+	ensure := tmuxFake.ensureWindowCalls[0]
+	if ensure.dir != "/r/a" || ensure.mode != tmuxctl.ModeSession {
+		t.Errorf("EnsureWindowMode = dir %q mode %v, want /r/a session mode", ensure.dir, ensure.mode)
+	}
+	if len(tmuxFake.selectSessionCalls) != 1 || tmuxFake.selectSessionCalls[0] != "repo-a:0" {
+		t.Errorf("expected SelectSession(repo-a:0), got %v", tmuxFake.selectSessionCalls)
+	}
+	if len(tmuxFake.selectCalls) != 0 {
+		t.Errorf("session mode must not call Select, got %v", tmuxFake.selectCalls)
+	}
+	if len(tmuxFake.processAliveCalls) != 0 {
+		t.Errorf("no-window recovery must not check process liveness, got %v", tmuxFake.processAliveCalls)
 	}
 }
 
