@@ -75,9 +75,14 @@ const launchingTimeout = 30 * time.Second
 
 // launchResultMsg is returned by launchCmd / resumeCmd after the tmux
 // operations complete (or fail). dir is the canonical worktree directory.
+// launched reports whether a harness process was actually started or
+// relaunched (vs. merely selecting an already-live window). Only a genuine
+// launch warrants keeping the optimistic overlay until a session confirms
+// running; a pure jump/select has nothing new to wait for.
 type launchResultMsg struct {
-	dir string
-	err error
+	dir      string
+	launched bool
+	err      error
 }
 
 // worktreeCreatedMsg is returned by newWorktreeCmd after git.AddWorktree
@@ -261,7 +266,7 @@ func launchCmd(ops tmuxOps, row workspace.Row, harnOp harnessOps) tea.Cmd {
 			if err := ops.RelaunchInWindow(target, argv); err != nil {
 				return launchResultMsg{dir: dir, err: err}
 			}
-			return launchResultMsg{dir: dir, err: ops.Select(target)}
+			return launchResultMsg{dir: dir, launched: true, err: ops.Select(target)}
 		}
 
 		// No window exists — create one and select it.
@@ -273,7 +278,7 @@ func launchCmd(ops tmuxOps, row workspace.Row, harnOp harnessOps) tea.Cmd {
 		if err != nil {
 			return launchResultMsg{dir: dir, err: err}
 		}
-		return launchResultMsg{dir: dir, err: ops.Select(newTarget)}
+		return launchResultMsg{dir: dir, launched: true, err: ops.Select(newTarget)}
 	}
 }
 
@@ -662,13 +667,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Do not refresh — leave the existing list intact and surface the error.
 
 	case launchResultMsg:
-		// A launch/resume Cmd completed. On success the overlay stays until
-		// the next merge confirms the row is running. On error, clear the
-		// overlay immediately so the row re-derives its real state.
-		if msg.err != nil {
+		// A launch/resume Cmd completed.
+		//   - error: clear the overlay so the row re-derives its real state.
+		//   - success + launched: a harness process was (re)started; keep the
+		//     overlay until the next merge confirms the row is running.
+		//   - success + !launched: we only selected an already-live window
+		//     (jump/resume of an inactive session). There is no new agent to
+		//     wait for, so clear the overlay immediately — otherwise the row
+		//     would sit in "launching…" until the 30s timeout.
+		if msg.err != nil || !msg.launched {
 			if m.launching != nil {
 				delete(m.launching, msg.dir)
 			}
+		}
+		if msg.err != nil {
 			// Surface the error as a transient hint.
 			m.tmuxHint = fmt.Sprintf("launch error: %v", msg.err)
 		}

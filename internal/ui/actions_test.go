@@ -467,46 +467,41 @@ func TestTickMsgDoesNotExpireActiveLaunchingOverlay(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Launching overlay: cleared on snapshotMsg when row becomes running
+// Launching overlay: success-path clearing depends on the launched flag
 // ---------------------------------------------------------------------------
 
-func TestSnapshotMsgClearsLaunchingOverlayWhenRunning(t *testing.T) {
-	// The model has a launching overlay for /r/a.
-	// A snapshot arrives with /r/a as a running row.
-	snapCh := make(chan state.Snapshot)
+func TestLaunchResultMsgSelectOnlyClearsOverlay(t *testing.T) {
+	// A pure jump/select (launched=false) resumes an already-live window.
+	// There is no new agent to wait for, so the overlay must clear at once —
+	// otherwise the row sits in "launching…" until the 30s timeout.
 	m := model{
 		width: 120,
-		snaps: snapCh,
 		launching: map[string]time.Time{
 			"/r/a": time.Now().Add(30 * time.Second),
 		},
-		workspaceRows: []workspace.Row{
-			makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnActive, fixedNow),
+	}
+
+	updated, _ := m.Update(launchResultMsg{dir: "/r/a", launched: false, err: nil})
+	m2 := updated.(model)
+	if m2.launching["/r/a"] != (time.Time{}) {
+		t.Error("select-only launchResultMsg must clear the overlay immediately")
+	}
+}
+
+func TestLaunchResultMsgLaunchedKeepsOverlay(t *testing.T) {
+	// A genuine (re)launch (launched=true) keeps the overlay until the next
+	// merge confirms the row is running.
+	m := model{
+		width: 120,
+		launching: map[string]time.Time{
+			"/r/a": time.Now().Add(30 * time.Second),
 		},
 	}
 
-	// Inject a pre-built workspaceRows via a snapshotMsg. Since buildWorkspaceRows
-	// calls real workspace.LoadConfig (which returns empty when no config), the
-	// rows will be nil after the snapshot. We test the overlay-clearing logic
-	// directly by pre-populating workspaceRows and then sending a snapshotMsg
-	// that triggers the clearing loop.
-	//
-	// To avoid the real buildWorkspaceRows call, we test the overlay-clearing
-	// logic via the launchResultMsg path (no error = overlay stays) and the
-	// snapshotMsg path indirectly. The direct test is: after a snapshotMsg,
-	// if the rebuilt rows contain a running row for the dir, the overlay clears.
-	//
-	// Since buildWorkspaceRows will return nil (no config), we verify the
-	// overlay-clearing code path by checking that a running row in workspaceRows
-	// causes the overlay to clear. We do this by manually setting workspaceRows
-	// after the snapshot and verifying the clearing logic in the tickMsg path.
-	//
-	// The simplest direct test: send a launchResultMsg with no error and verify
-	// the overlay is NOT cleared (it stays until confirmed running or timeout).
-	updated, _ := m.Update(launchResultMsg{dir: "/r/a", err: nil})
+	updated, _ := m.Update(launchResultMsg{dir: "/r/a", launched: true, err: nil})
 	m2 := updated.(model)
 	if m2.launching["/r/a"] == (time.Time{}) {
-		t.Error("launchResultMsg with no error must NOT clear the overlay (stays until confirmed running)")
+		t.Error("launched launchResultMsg must keep the overlay until confirmed running")
 	}
 }
 
