@@ -65,6 +65,16 @@ const (
 	// On enter, the branch name is passed to git.AddWorktree + harness launch.
 	// On esc, the prompt is cancelled without creating anything.
 	promptNewWorktree
+	// promptConfirmDeleteWorktree is the FIRST of two confirmations for deleting
+	// a worktree ('D'). 'y' advances to promptConfirmDeleteWorktree2; any other
+	// key cancels. The merge status of the branch is shown so the user knows
+	// whether removing the worktree would leave unmerged commits behind.
+	promptConfirmDeleteWorktree
+	// promptConfirmDeleteWorktree2 is the SECOND confirmation. Its default is
+	// cancel: only an explicit 'y' proceeds with deletion; every other key
+	// (including esc/enter) aborts. This double-gate guards a destructive,
+	// irreversible action.
+	promptConfirmDeleteWorktree2
 )
 
 // launchingTimeout is how long a row stays in the optimistic "launching" state
@@ -93,6 +103,25 @@ type worktreeCreatedMsg struct {
 	err       error
 }
 
+// mergeStatusMsg carries the result of an async branch merge-status probe used
+// to annotate the worktree-delete confirmation. path is the canonical worktree
+// dir the status was computed for, so a stale result for a since-cancelled or
+// retargeted prompt can be ignored.
+type mergeStatusMsg struct {
+	path  string
+	state git.MergeState
+	base  string
+}
+
+// worktreeDeletedMsg is returned by deleteWorktreeCmd after `git worktree
+// remove` completes. path is the canonical worktree dir; err is non-nil when
+// git refused (e.g. uncommitted changes) so the row is preserved and the error
+// surfaced.
+type worktreeDeletedMsg struct {
+	path string
+	err  error
+}
+
 // tmuxOps is the injectable seam for tmux operations used by the action Cmds.
 // The zero value is nil; production code uses the real tmuxctl package-level
 // functions via defaultTmuxOps. Tests inject a fake.
@@ -105,6 +134,7 @@ type tmuxOps interface {
 	EnsureWindowMode(dir, name string, argv []string, mode tmuxctl.LaunchMode) (tmuxctl.Target, error)
 	Select(target tmuxctl.Target) error
 	SelectSession(target tmuxctl.Target) error
+	KillWindow(target tmuxctl.Target) error
 }
 
 // realTmuxOps delegates to the package-level tmuxctl functions.
@@ -130,6 +160,7 @@ func (realTmuxOps) Select(target tmuxctl.Target) error { return tmuxctl.Select(t
 func (realTmuxOps) SelectSession(target tmuxctl.Target) error {
 	return tmuxctl.SelectSession(target)
 }
+func (realTmuxOps) KillWindow(target tmuxctl.Target) error { return tmuxctl.KillWindow(target) }
 
 // launchModeFor maps the workspace config's LaunchMode to the tmuxctl mode used
 // by the action Cmds. LaunchSession maps to ModeSession; everything else
@@ -141,9 +172,11 @@ func launchModeFor(m workspace.LaunchMode) tmuxctl.LaunchMode {
 	return tmuxctl.ModeWindow
 }
 
-// gitOps is the injectable seam for git worktree creation.
+// gitOps is the injectable seam for git worktree operations.
 type gitOps interface {
 	AddWorktree(repoPath, branch, dest string) (string, error)
+	RemoveWorktree(repoPath, worktreePath string) error
+	BranchMergeStatus(repoPath, branch string) (git.MergeState, string)
 }
 
 // realGitOps delegates to the package-level git functions.
@@ -151,6 +184,14 @@ type realGitOps struct{}
 
 func (realGitOps) AddWorktree(repoPath, branch, dest string) (string, error) {
 	return git.AddWorktree(repoPath, branch, dest)
+}
+
+func (realGitOps) RemoveWorktree(repoPath, worktreePath string) error {
+	return git.RemoveWorktree(repoPath, worktreePath)
+}
+
+func (realGitOps) BranchMergeStatus(repoPath, branch string) (git.MergeState, string) {
+	return git.BranchMergeStatus(repoPath, branch)
 }
 
 // harnessOps is the injectable seam for harness registry lookups.
@@ -199,6 +240,14 @@ type model struct {
 	// newWorktreeRepo is the repo path captured when the user presses 'n' so
 	// the promptNewWorktree handler knows which repo to create the worktree in.
 	newWorktreeRepo string
+	// deleteTarget is the worktree row captured when the user presses 'D' to
+	// begin the two-step delete confirmation. Zero value when no delete is in
+	// progress. Cleared on cancel and on dispatch of the delete Cmd.
+	deleteTarget workspace.Row
+	// deleteMergeInfo is the human-readable branch merge status shown in the
+	// delete confirmation prompts (e.g. "merged into main"). Empty until the
+	// async probe (mergeStatusCmd) returns; rendered as "checking…" meanwhile.
+	deleteMergeInfo string
 	// launchMode is the resolved tmux launch mode (window vs session) read from
 	// workspace config. Refreshed on each buildWorkspaceRows so config edits
 	// take effect without a restart. Zero value (ModeWindow) is safe.
@@ -367,6 +416,85 @@ func newWorktreeCmd(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, bran
 	}
 }
 
+// mergeStatusCmd probes whether branch has been merged into the repo's default
+// branch, off the UI goroutine, and reports the result as a mergeStatusMsg
+// tagged with path so the handler can correlate it to the active prompt.
+func mergeStatusCmd(gitOp gitOps, repo, branch, path string) tea.Cmd {
+	return func() tea.Msg {
+		var statusFn func(string, string) (git.MergeState, string)
+		if gitOp != nil {
+			statusFn = gitOp.BranchMergeStatus
+		} else {
+			statusFn = git.BranchMergeStatus
+		}
+		stateVal, base := statusFn(repo, branch)
+		return mergeStatusMsg{path: path, state: stateVal, base: base}
+	}
+}
+
+// deleteWorktreeCmd removes the worktree at path (belonging to repo) via git,
+// then best-effort closes its tmux window so no dead pane is left pointing at a
+// missing directory. The git removal is the only step that can fail the
+// operation; the window kill is advisory and its error is ignored.
+func deleteWorktreeCmd(ops tmuxOps, gitOp gitOps, repo, path string) tea.Cmd {
+	return func() tea.Msg {
+		var removeFn func(string, string) error
+		if gitOp != nil {
+			removeFn = gitOp.RemoveWorktree
+		} else {
+			removeFn = git.RemoveWorktree
+		}
+		if err := removeFn(repo, path); err != nil {
+			return worktreeDeletedMsg{path: path, err: err}
+		}
+
+		// Best-effort cleanup of the worktree's tmux window. Failures here do
+		// not undo the successful removal — the directory is already gone.
+		if ops != nil && ops.Available() {
+			if target, err := ops.FindWindowByDir(path); err == nil {
+				_ = ops.KillWindow(target)
+			}
+		}
+		return worktreeDeletedMsg{path: path}
+	}
+}
+
+// canDeleteWorktree reports whether row may be deleted, returning a user-facing
+// reason when it may not. The repository's primary worktree (Worktree == Repo)
+// and rows not associated with a configured repo are protected: git refuses the
+// former, and the latter has no repo root to run `git worktree remove` from.
+func canDeleteWorktree(row workspace.Row) (bool, string) {
+	if row.Worktree == "" {
+		return false, "no worktree selected"
+	}
+	if row.Repo == "" {
+		return false, "cannot delete: worktree is not part of a configured repo"
+	}
+	if row.Worktree == row.Repo {
+		return false, "cannot delete the repository's main worktree"
+	}
+	return true, ""
+}
+
+// mergeInfoText renders a branch merge state as a short human-readable phrase
+// for the delete confirmation prompts.
+func mergeInfoText(stateVal git.MergeState, base string) string {
+	switch stateVal {
+	case git.MergeMerged:
+		if base == "" {
+			return "merged"
+		}
+		return "merged into " + base
+	case git.MergeNotMerged:
+		if base == "" {
+			return "NOT merged"
+		}
+		return "NOT merged into " + base
+	default:
+		return "merge status unknown"
+	}
+}
+
 func (m model) Init() tea.Cmd {
 	// tickCmd keeps relative timestamps in the sessions pane fresh. It fires
 	// once per minute and re-arms itself in Update. The tick runs regardless
@@ -501,6 +629,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.input, cmd = m.input.Update(msg)
 					return m, cmd
 				}
+
+			case promptConfirmDeleteWorktree:
+				// First confirmation. 'y' advances to the second prompt; any
+				// other key (including esc) cancels the deletion.
+				if msg.String() == "y" || msg.String() == "Y" {
+					m.prompt = promptConfirmDeleteWorktree2
+					return m, nil
+				}
+				m.prompt = promptIdle
+				m.deleteTarget = workspace.Row{}
+				m.deleteMergeInfo = ""
+				return m, nil
+
+			case promptConfirmDeleteWorktree2:
+				// Second confirmation. Default is cancel: only an explicit 'y'
+				// proceeds; every other key (including esc/enter) aborts. This
+				// is the last gate before an irreversible removal.
+				if msg.String() == "y" || msg.String() == "Y" {
+					target := m.deleteTarget
+					m.prompt = promptIdle
+					m.deleteTarget = workspace.Row{}
+					m.deleteMergeInfo = ""
+					return m, deleteWorktreeCmd(m.tmux, m.gitOp, target.Repo, target.Worktree)
+				}
+				m.prompt = promptIdle
+				m.deleteTarget = workspace.Row{}
+				m.deleteMergeInfo = ""
+				return m, nil
 			}
 		}
 
@@ -601,6 +757,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.SetValue("")
 				focusCmd := m.input.Focus()
 				return m, focusCmd
+
+			case "D":
+				// Delete worktree: open the first of two confirmations and
+				// kick off an async merge-status probe to annotate it. tmux is
+				// not required (git removal works without it; window cleanup is
+				// best-effort).
+				if len(m.workspaceRows) == 0 {
+					return m, nil
+				}
+				row := m.workspaceRows[m.sessionCursor]
+				if ok, reason := canDeleteWorktree(row); !ok {
+					m.tmuxHint = reason
+					return m, nil
+				}
+				m.deleteTarget = row
+				m.deleteMergeInfo = ""
+				m.prompt = promptConfirmDeleteWorktree
+				return m, mergeStatusCmd(m.gitOp, row.Repo, row.Branch, row.Worktree)
 			}
 			return m, nil
 		}
@@ -741,6 +915,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case mergeStatusMsg:
+		// Annotate the active delete confirmation, but only if it still targets
+		// the same worktree the probe was launched for (guards against a stale
+		// result arriving after cancel or retarget).
+		if (m.prompt == promptConfirmDeleteWorktree || m.prompt == promptConfirmDeleteWorktree2) &&
+			msg.path == m.deleteTarget.Worktree {
+			m.deleteMergeInfo = mergeInfoText(msg.state, msg.base)
+		}
+		return m, nil
+
+	case worktreeDeletedMsg:
+		if msg.err != nil {
+			m.tmuxHint = fmt.Sprintf("delete failed: %v", msg.err)
+			return m, nil
+		}
+		// Drop the deleted row immediately so it disappears without waiting for
+		// the next snapshot; the subsequent merge confirms its absence.
+		var remaining []workspace.Row
+		for _, row := range m.workspaceRows {
+			if row.Worktree != msg.path {
+				remaining = append(remaining, row)
+			}
+		}
+		m.workspaceRows = remaining
+		if n := len(m.workspaceRows); n == 0 {
+			m.sessionCursor = 0
+		} else if m.sessionCursor >= n {
+			m.sessionCursor = n - 1
+		}
+		if m.launching != nil {
+			delete(m.launching, msg.path)
+		}
+		return m, nil
+
 	case snapshotMsg:
 		m.snap = state.Snapshot(msg)
 		// Rebuild workspace rows on every snapshot so running/stopped state
@@ -817,7 +1025,7 @@ func (m model) View() string {
 
 	var headerHint string
 	if m.focus == focusSessions {
-		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s recent  ·  tab→tasks  ·  q quit",
+		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s recent  ·  D del wt  ·  tab→tasks  ·  q quit",
 			live, recent, recentMins, m.snap.UpdatedAt.Format("15:04:05"), toggleVerb(m.recentCollapsed))
 	} else {
 		headerHint = fmt.Sprintf("  %d pending  ·  a add · e edit · s start/stop · d done · D del · U undo · j/k move  ·  tab→sessions  ·  q quit",

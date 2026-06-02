@@ -146,6 +146,64 @@ func TestAddWorktree_DuplicateBranchErrors(t *testing.T) {
 	}
 }
 
+// TestRemoveWorktree_RemovesCleanWorktree verifies that RemoveWorktree deletes
+// a clean worktree's directory and drops it from the worktree list, while the
+// repository's main worktree remains.
+func TestRemoveWorktree_RemovesCleanWorktree(t *testing.T) {
+	repo := initRepo(t)
+
+	wtDir := filepath.Join(t.TempDir(), "feature-wt")
+	gotPath, err := git.AddWorktree(repo, "feature", wtDir)
+	if err != nil {
+		t.Fatalf("AddWorktree: %v", err)
+	}
+
+	if err := git.RemoveWorktree(repo, gotPath); err != nil {
+		t.Fatalf("RemoveWorktree: %v", err)
+	}
+
+	// The directory must be gone.
+	if _, statErr := os.Stat(gotPath); !os.IsNotExist(statErr) {
+		t.Errorf("worktree dir %q still exists after RemoveWorktree (stat err = %v)", gotPath, statErr)
+	}
+
+	// Only the main worktree should remain.
+	wts, err := git.ListWorktrees(repo)
+	if err != nil {
+		t.Fatalf("ListWorktrees after remove: %v", err)
+	}
+	if len(wts) != 1 {
+		t.Fatalf("expected 1 worktree after remove, got %d: %v", len(wts), wts)
+	}
+}
+
+// TestRemoveWorktree_RefusesDirtyWorktree verifies that RemoveWorktree returns
+// an error (and leaves the directory intact) when the worktree has untracked
+// changes — the safety property that protects unsaved work from deletion.
+func TestRemoveWorktree_RefusesDirtyWorktree(t *testing.T) {
+	repo := initRepo(t)
+
+	wtDir := filepath.Join(t.TempDir(), "dirty-wt")
+	gotPath, err := git.AddWorktree(repo, "feature", wtDir)
+	if err != nil {
+		t.Fatalf("AddWorktree: %v", err)
+	}
+
+	// Introduce an untracked file so the worktree is dirty.
+	if err := os.WriteFile(filepath.Join(gotPath, "scratch.txt"), []byte("wip"), 0o644); err != nil {
+		t.Fatalf("write untracked file: %v", err)
+	}
+
+	if err := git.RemoveWorktree(repo, gotPath); err == nil {
+		t.Fatal("expected RemoveWorktree to refuse a dirty worktree, got nil error")
+	}
+
+	// The directory must still exist — nothing was deleted.
+	if _, statErr := os.Stat(gotPath); statErr != nil {
+		t.Errorf("dirty worktree %q was removed despite refusal: %v", gotPath, statErr)
+	}
+}
+
 // TestListWorktrees_BranchNames verifies that branch names with slashes
 // (e.g. "feat/foo") are preserved correctly after stripping the refs/heads/ prefix.
 func TestListWorktrees_BranchNames(t *testing.T) {
