@@ -189,6 +189,7 @@ func TestSaveConfig_RoundTrip(t *testing.T) {
 			{Path: repo2},
 		},
 		DefaultHarness: "opencode",
+		LaunchMode:     workspace.LaunchSession,
 	}
 
 	if err := workspace.SaveConfig(original); err != nil {
@@ -206,9 +207,53 @@ func TestSaveConfig_RoundTrip(t *testing.T) {
 	if loaded.DefaultHarness != "opencode" {
 		t.Errorf("DefaultHarness: got %q, want %q", loaded.DefaultHarness, "opencode")
 	}
+	if loaded.LaunchMode != workspace.LaunchSession {
+		t.Errorf("LaunchMode: got %q, want %q", loaded.LaunchMode, workspace.LaunchSession)
+	}
 	for i, r := range loaded.Repos {
 		if r.Missing {
 			t.Errorf("repo[%d] %q should not be Missing", i, r.Path)
 		}
+	}
+}
+
+func TestLoadConfigDefaultsLaunchMode(t *testing.T) {
+	tmp := t.TempDir()
+	withConfigEnv(t, tmp)
+
+	// No launchMode key on disk → empty (caller treats as window).
+	if err := workspace.SaveConfig(workspace.Config{}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	loaded, err := workspace.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if loaded.LaunchMode != "" {
+		t.Errorf("LaunchMode default: got %q, want empty", loaded.LaunchMode)
+	}
+}
+
+func TestLoadConfigUnknownLaunchModeFallsBackToWindow(t *testing.T) {
+	tmp := t.TempDir()
+	withConfigEnv(t, tmp)
+
+	path, err := workspace.ConfigPath()
+	if err != nil {
+		t.Fatalf("ConfigPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(`{"repos":[],"launchMode":"bogus"}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	loaded, err := workspace.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if loaded.LaunchMode != workspace.LaunchWindow {
+		t.Errorf("LaunchMode: got %q, want %q (fallback)", loaded.LaunchMode, workspace.LaunchWindow)
 	}
 }

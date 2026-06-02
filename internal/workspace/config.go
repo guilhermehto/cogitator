@@ -32,6 +32,18 @@ type RepoConfig struct {
 	Missing bool `json:"-"`
 }
 
+// LaunchMode selects how cogitator opens a worktree in tmux: as a new window
+// in the current session ("window", the default) or as a brand-new tmux
+// session ("session").
+type LaunchMode string
+
+const (
+	// LaunchWindow opens worktrees as new tmux windows (the default).
+	LaunchWindow LaunchMode = "window"
+	// LaunchSession opens worktrees as new tmux sessions.
+	LaunchSession LaunchMode = "session"
+)
+
 // Config is the top-level user configuration for cogitator.
 type Config struct {
 	// Repos is the ordered list of repository roots the user has configured.
@@ -39,13 +51,17 @@ type Config struct {
 	// DefaultHarness is the harness kind used when launching a new worktree
 	// (e.g. "opencode"). Empty means no default is set.
 	DefaultHarness string `json:"defaultHarness,omitempty"`
+	// LaunchMode selects whether worktrees open as a new tmux window or a new
+	// tmux session. Empty defaults to LaunchWindow.
+	LaunchMode LaunchMode `json:"launchMode,omitempty"`
 }
 
 // configFile is the on-disk JSON representation. It mirrors Config but uses
 // raw string slices so the file stays human-editable without the Missing field.
 type configFile struct {
-	Repos          []string `json:"repos"`
-	DefaultHarness string   `json:"defaultHarness,omitempty"`
+	Repos          []string   `json:"repos"`
+	DefaultHarness string     `json:"defaultHarness,omitempty"`
+	LaunchMode     LaunchMode `json:"launchMode,omitempty"`
 }
 
 // configDir returns the directory that holds cogitator's config file.
@@ -60,6 +76,21 @@ func configDir() (string, error) {
 		base = filepath.Join(home, ".config")
 	}
 	return filepath.Join(base, "cogitator"), nil
+}
+
+// normalizeLaunchMode coerces an arbitrary on-disk value to a known LaunchMode.
+// Empty stays empty (callers treat empty as LaunchWindow); LaunchSession is
+// preserved; any other value falls back to LaunchWindow so a typo can never
+// produce an undefined launch path.
+func normalizeLaunchMode(m LaunchMode) LaunchMode {
+	switch m {
+	case LaunchSession:
+		return LaunchSession
+	case "", LaunchWindow:
+		return m
+	default:
+		return LaunchWindow
+	}
 }
 
 // ConfigPath returns the absolute path to the config file.
@@ -103,6 +134,7 @@ func LoadConfig() (Config, error) {
 
 	cfg := Config{
 		DefaultHarness: raw.DefaultHarness,
+		LaunchMode:     normalizeLaunchMode(raw.LaunchMode),
 		Repos:          make([]RepoConfig, 0, len(raw.Repos)),
 	}
 
@@ -141,6 +173,7 @@ func SaveConfig(cfg Config) error {
 
 	raw := configFile{
 		DefaultHarness: cfg.DefaultHarness,
+		LaunchMode:     normalizeLaunchMode(cfg.LaunchMode),
 		Repos:          make([]string, 0, len(cfg.Repos)),
 	}
 	for _, r := range cfg.Repos {

@@ -102,7 +102,9 @@ type tmuxOps interface {
 	WindowProcessAlive(target tmuxctl.Target) (bool, error)
 	RelaunchInWindow(target tmuxctl.Target, argv []string) error
 	EnsureWindow(dir, name string, argv []string) (tmuxctl.Target, error)
+	EnsureWindowMode(dir, name string, argv []string, mode tmuxctl.LaunchMode) (tmuxctl.Target, error)
 	Select(target tmuxctl.Target) error
+	SelectSession(target tmuxctl.Target) error
 }
 
 // realTmuxOps delegates to the package-level tmuxctl functions.
@@ -121,7 +123,23 @@ func (realTmuxOps) RelaunchInWindow(target tmuxctl.Target, argv []string) error 
 func (realTmuxOps) EnsureWindow(dir, name string, argv []string) (tmuxctl.Target, error) {
 	return tmuxctl.EnsureWindow(dir, name, argv)
 }
+func (realTmuxOps) EnsureWindowMode(dir, name string, argv []string, mode tmuxctl.LaunchMode) (tmuxctl.Target, error) {
+	return tmuxctl.EnsureWindowMode(dir, name, argv, mode)
+}
 func (realTmuxOps) Select(target tmuxctl.Target) error { return tmuxctl.Select(target) }
+func (realTmuxOps) SelectSession(target tmuxctl.Target) error {
+	return tmuxctl.SelectSession(target)
+}
+
+// launchModeFor maps the workspace config's LaunchMode to the tmuxctl mode used
+// by the action Cmds. LaunchSession maps to ModeSession; everything else
+// (including the empty default) maps to ModeWindow.
+func launchModeFor(m workspace.LaunchMode) tmuxctl.LaunchMode {
+	if m == workspace.LaunchSession {
+		return tmuxctl.ModeSession
+	}
+	return tmuxctl.ModeWindow
+}
 
 // gitOps is the injectable seam for git worktree creation.
 type gitOps interface {
@@ -181,6 +199,10 @@ type model struct {
 	// newWorktreeRepo is the repo path captured when the user presses 'n' so
 	// the promptNewWorktree handler knows which repo to create the worktree in.
 	newWorktreeRepo string
+	// launchMode is the resolved tmux launch mode (window vs session) read from
+	// workspace config. Refreshed on each buildWorkspaceRows so config edits
+	// take effect without a restart. Zero value (ModeWindow) is safe.
+	launchMode tmuxctl.LaunchMode
 
 	// Injectable seams for tmux, git, and harness operations. Nil values are
 	// replaced with the real implementations in newModel. Tests inject fakes.
@@ -215,7 +237,7 @@ type model struct {
 //   - stopped/unknown row, no window: EnsureWindow → Select
 //
 // The function is a tea.Cmd (runs off the UI goroutine).
-func launchCmd(ops tmuxOps, row workspace.Row, harnOp harnessOps) tea.Cmd {
+func launchCmd(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl.LaunchMode) tea.Cmd {
 	return func() tea.Msg {
 		if ops == nil || !ops.Available() {
 			return launchResultMsg{dir: row.Worktree, err: tmuxctl.ErrNotAvailable}
@@ -239,6 +261,17 @@ func launchCmd(ops tmuxOps, row workspace.Row, harnOp harnessOps) tea.Cmd {
 			argv = []string{"opencode", "--mdns", dir}
 		}
 
+		// selectTarget moves the client to target. In session mode it switches
+		// to the session and lets tmux restore its last-active window (so you
+		// land where you left off, not always the worktree's first window).
+		// In window mode it focuses the exact tagged window.
+		selectTarget := func(target tmuxctl.Target) error {
+			if mode == tmuxctl.ModeSession {
+				return ops.SelectSession(target)
+			}
+			return ops.Select(target)
+		}
+
 		// For running rows, just find and select the window.
 		if row.State == workspace.StateRunning {
 			target, err := ops.FindWindowByDir(dir)
@@ -246,7 +279,7 @@ func launchCmd(ops tmuxOps, row workspace.Row, harnOp harnessOps) tea.Cmd {
 				// Window not found for a running row — best effort: no-op.
 				return launchResultMsg{dir: dir, err: err}
 			}
-			return launchResultMsg{dir: dir, err: ops.Select(target)}
+			return launchResultMsg{dir: dir, err: selectTarget(target)}
 		}
 
 		// For stopped/unknown/empty rows: check if a window already exists.
@@ -256,17 +289,17 @@ func launchCmd(ops tmuxOps, row workspace.Row, harnOp harnessOps) tea.Cmd {
 			alive, aliveErr := ops.WindowProcessAlive(target)
 			if aliveErr != nil {
 				// Cannot determine liveness — try to select anyway.
-				return launchResultMsg{dir: dir, err: ops.Select(target)}
+				return launchResultMsg{dir: dir, err: selectTarget(target)}
 			}
 			if alive {
 				// Process is alive — just select.
-				return launchResultMsg{dir: dir, err: ops.Select(target)}
+				return launchResultMsg{dir: dir, err: selectTarget(target)}
 			}
 			// Process is dead — relaunch then select.
 			if err := ops.RelaunchInWindow(target, argv); err != nil {
 				return launchResultMsg{dir: dir, err: err}
 			}
-			return launchResultMsg{dir: dir, launched: true, err: ops.Select(target)}
+			return launchResultMsg{dir: dir, launched: true, err: selectTarget(target)}
 		}
 
 		// No window exists — create one and select it.
@@ -274,18 +307,18 @@ func launchCmd(ops tmuxOps, row workspace.Row, harnOp harnessOps) tea.Cmd {
 		if row.Branch != "" {
 			windowName = filepath.Base(row.Repo) + "/" + row.Branch
 		}
-		newTarget, err := ops.EnsureWindow(dir, windowName, argv)
+		newTarget, err := ops.EnsureWindowMode(dir, windowName, argv, mode)
 		if err != nil {
 			return launchResultMsg{dir: dir, err: err}
 		}
-		return launchResultMsg{dir: dir, launched: true, err: ops.Select(newTarget)}
+		return launchResultMsg{dir: dir, launched: true, err: selectTarget(newTarget)}
 	}
 }
 
 // newWorktreeCmd creates a git worktree for branch under repoPath, then
 // launches the harness in a new tmux window. Returns worktreeCreatedMsg with
 // the canonical post-create dest (the overlay key).
-func newWorktreeCmd(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, branch, harnessKind string) tea.Cmd {
+func newWorktreeCmd(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, branch, harnessKind string, mode tmuxctl.LaunchMode) tea.Cmd {
 	return func() tea.Msg {
 		if ops == nil || !ops.Available() {
 			return worktreeCreatedMsg{err: tmuxctl.ErrNotAvailable}
@@ -323,7 +356,7 @@ func newWorktreeCmd(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, bran
 		}
 
 		windowName := filepath.Base(repoPath) + "/" + branch
-		target, err := ops.EnsureWindow(canonDest, windowName, argv)
+		target, err := ops.EnsureWindowMode(canonDest, windowName, argv, mode)
 		if err != nil {
 			return worktreeCreatedMsg{canonDest: canonDest, err: err}
 		}
@@ -444,12 +477,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Nothing to do — cancelled effectively.
 						return m, inputCmd
 					}
-					// Determine harness kind from workspace config.
+					// Determine harness kind and launch mode from workspace config.
 					harnessKind := "opencode"
-					if wsCfg, err := workspace.LoadConfig(); err == nil && wsCfg.DefaultHarness != "" {
-						harnessKind = wsCfg.DefaultHarness
+					launchMode := m.launchMode
+					if wsCfg, err := workspace.LoadConfig(); err == nil {
+						if wsCfg.DefaultHarness != "" {
+							harnessKind = wsCfg.DefaultHarness
+						}
+						launchMode = launchModeFor(wsCfg.LaunchMode)
 					}
-					actionCmd := newWorktreeCmd(m.tmux, m.gitOp, m.harnOp, repoPath, branch, harnessKind)
+					actionCmd := newWorktreeCmd(m.tmux, m.gitOp, m.harnOp, repoPath, branch, harnessKind, launchMode)
 					return m, tea.Batch(inputCmd, actionCmd)
 
 				case "esc":
@@ -521,7 +558,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// rather than launching again.
 				if _, launching := m.launching[dir]; launching {
 					// Try to select the window if it exists; otherwise no-op.
-					return m, launchCmd(m.tmux, row, m.harnOp)
+					return m, launchCmd(m.tmux, row, m.harnOp, m.launchMode)
 				}
 
 				// Missing rows cannot be resumed (directory absent from disk).
@@ -537,7 +574,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.launching[dir] = deadline
 
-				return m, launchCmd(m.tmux, row, m.harnOp)
+				return m, launchCmd(m.tmux, row, m.harnOp, m.launchMode)
 
 			case "n":
 				// New worktree: collect a branch name via prompt.
@@ -708,7 +745,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.snap = state.Snapshot(msg)
 		// Rebuild workspace rows on every snapshot so running/stopped state
 		// stays in sync with live session changes.
-		m.workspaceRows = buildWorkspaceRows(m.snap, m.cfg)
+		m.workspaceRows, m.launchMode = buildWorkspaceRows(m.snap, m.cfg)
 		// Clear launching overlay for any dir that is now confirmed running.
 		if m.launching != nil {
 			for dir := range m.launching {
@@ -920,12 +957,20 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 // When tmux is unavailable or the call fails, an empty map is used (safe
 // fallback: unknown rows render as stopped instead of unknown).
 //
-// Returns nil when no repos are configured (zero-value safe for callers).
-func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) []workspace.Row {
+// It also returns the resolved tmux launch mode from workspace config so the
+// caller can keep its launch behaviour in sync with config edits.
+//
+// Returns nil rows when no repos are configured (zero-value safe for callers);
+// the launch mode is still resolved (defaulting to ModeWindow).
+func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) ([]workspace.Row, tmuxctl.LaunchMode) {
 	wsCfg, err := workspace.LoadConfig()
-	if err != nil || len(wsCfg.Repos) == 0 {
-		// No repos configured or config unreadable — live-only path.
-		return nil
+	if err != nil {
+		return nil, tmuxctl.ModeWindow
+	}
+	mode := launchModeFor(wsCfg.LaunchMode)
+	if len(wsCfg.Repos) == 0 {
+		// No repos configured — live-only path.
+		return nil, mode
 	}
 
 	// Build worktrees-by-repo map. Errors from individual repos are non-fatal:
@@ -969,5 +1014,5 @@ func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) []workspace.Row
 		}
 	}
 
-	return workspace.Merge(wsCfg.Repos, worktreesByRepo, roster, liveTopLevel, tmuxDirs)
+	return workspace.Merge(wsCfg.Repos, worktreesByRepo, roster, liveTopLevel, tmuxDirs), mode
 }

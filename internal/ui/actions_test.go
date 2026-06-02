@@ -41,8 +41,9 @@ type fakeTmuxOps struct {
 	findWindowCalls   []string
 	processAliveCalls []tmuxctl.Target
 	relaunchCalls     []relaunchCall
-	ensureWindowCalls []ensureWindowCall
-	selectCalls       []tmuxctl.Target
+	ensureWindowCalls  []ensureWindowCall
+	selectCalls        []tmuxctl.Target
+	selectSessionCalls []tmuxctl.Target
 }
 
 type relaunchCall struct {
@@ -54,6 +55,7 @@ type ensureWindowCall struct {
 	dir  string
 	name string
 	argv []string
+	mode tmuxctl.LaunchMode
 }
 
 func (f *fakeTmuxOps) Available() bool { return f.available }
@@ -74,12 +76,21 @@ func (f *fakeTmuxOps) RelaunchInWindow(target tmuxctl.Target, argv []string) err
 }
 
 func (f *fakeTmuxOps) EnsureWindow(dir, name string, argv []string) (tmuxctl.Target, error) {
-	f.ensureWindowCalls = append(f.ensureWindowCalls, ensureWindowCall{dir: dir, name: name, argv: argv})
+	return f.EnsureWindowMode(dir, name, argv, tmuxctl.ModeWindow)
+}
+
+func (f *fakeTmuxOps) EnsureWindowMode(dir, name string, argv []string, mode tmuxctl.LaunchMode) (tmuxctl.Target, error) {
+	f.ensureWindowCalls = append(f.ensureWindowCalls, ensureWindowCall{dir: dir, name: name, argv: argv, mode: mode})
 	return f.ensureWindowResult, f.ensureWindowErr
 }
 
 func (f *fakeTmuxOps) Select(target tmuxctl.Target) error {
 	f.selectCalls = append(f.selectCalls, target)
+	return f.selectErr
+}
+
+func (f *fakeTmuxOps) SelectSession(target tmuxctl.Target) error {
+	f.selectSessionCalls = append(f.selectSessionCalls, target)
 	return f.selectErr
 }
 
@@ -241,6 +252,32 @@ func TestEnterOnRunningRowCallsSelect(t *testing.T) {
 	}
 	if len(tmuxFake.ensureWindowCalls) != 0 {
 		t.Errorf("expected no EnsureWindow calls, got %d", len(tmuxFake.ensureWindowCalls))
+	}
+}
+
+// In session mode, jumping to a running row must switch to the session (and
+// let tmux restore its last-active window) rather than forcing the worktree's
+// original window via Select.
+func TestEnterOnRunningRowSessionModeCallsSelectSession(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{
+		available:        true,
+		findWindowResult: "repo-a:1",
+	}
+	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []workspace.Row{
+		makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnActive, fixedNow),
+	})
+	m.launchMode = tmuxctl.ModeSession
+
+	_, cmd := m.Update(keyMsg("enter"))
+	if _, ok := runCmd(cmd).(launchResultMsg); !ok {
+		t.Fatal("expected launchResultMsg")
+	}
+
+	if len(tmuxFake.selectSessionCalls) != 1 || tmuxFake.selectSessionCalls[0] != "repo-a:1" {
+		t.Errorf("expected SelectSession(repo-a:1), got %v", tmuxFake.selectSessionCalls)
+	}
+	if len(tmuxFake.selectCalls) != 0 {
+		t.Errorf("session mode must not call Select, got %v", tmuxFake.selectCalls)
 	}
 }
 
@@ -590,7 +627,7 @@ func TestNewWorktreeCmdCallsAddWorktreeAndLaunch(t *testing.T) {
 	gitFake := &fakeGitOps{addResult: "/r-feat"}
 	harnFake := &fakeHarnessOps{argv: []string{"fake", "/r-feat"}}
 
-	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake")
+	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake", tmuxctl.ModeWindow)
 	msg := runCmd(cmd)
 
 	result, ok := msg.(worktreeCreatedMsg)
@@ -612,8 +649,31 @@ func TestNewWorktreeCmdCallsAddWorktreeAndLaunch(t *testing.T) {
 	if len(tmuxFake.ensureWindowCalls) != 1 {
 		t.Errorf("expected 1 EnsureWindow call, got %d", len(tmuxFake.ensureWindowCalls))
 	}
+	if got := tmuxFake.ensureWindowCalls[0].mode; got != tmuxctl.ModeWindow {
+		t.Errorf("EnsureWindow mode = %v, want ModeWindow", got)
+	}
 	if len(tmuxFake.selectCalls) != 1 || tmuxFake.selectCalls[0] != "main:6" {
 		t.Errorf("expected Select(main:6), got %v", tmuxFake.selectCalls)
+	}
+}
+
+func TestNewWorktreeCmdSessionModePropagates(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{
+		available:          true,
+		ensureWindowResult: "r-feat:0",
+	}
+	gitFake := &fakeGitOps{addResult: "/r-feat"}
+	harnFake := &fakeHarnessOps{argv: []string{"fake", "/r-feat"}}
+
+	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake", tmuxctl.ModeSession)
+	if _, ok := runCmd(cmd).(worktreeCreatedMsg); !ok {
+		t.Fatal("expected worktreeCreatedMsg")
+	}
+	if len(tmuxFake.ensureWindowCalls) != 1 {
+		t.Fatalf("expected 1 EnsureWindow call, got %d", len(tmuxFake.ensureWindowCalls))
+	}
+	if got := tmuxFake.ensureWindowCalls[0].mode; got != tmuxctl.ModeSession {
+		t.Errorf("EnsureWindow mode = %v, want ModeSession", got)
 	}
 }
 
@@ -622,7 +682,7 @@ func TestNewWorktreeCmdGitErrorReturnsMsg(t *testing.T) {
 	gitFake := &fakeGitOps{addErr: errors.New("branch already exists")}
 	harnFake := &fakeHarnessOps{}
 
-	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake")
+	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake", tmuxctl.ModeWindow)
 	msg := runCmd(cmd)
 
 	result, ok := msg.(worktreeCreatedMsg)
@@ -642,7 +702,7 @@ func TestNewWorktreeCmdTmuxUnavailableReturnsMsg(t *testing.T) {
 	gitFake := &fakeGitOps{}
 	harnFake := &fakeHarnessOps{}
 
-	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake")
+	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake", tmuxctl.ModeWindow)
 	msg := runCmd(cmd)
 
 	result, ok := msg.(worktreeCreatedMsg)

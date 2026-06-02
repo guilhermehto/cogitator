@@ -288,6 +288,82 @@ func TestEnsureWindow_EmptyArgvError(t *testing.T) {
 	}
 }
 
+// ---- EnsureWindowMode: session creation -------------------------------------
+
+func TestEnsureWindowMode_CreatesNewSession(t *testing.T) {
+	withTMUX(t)
+
+	r := &fakeRunner{}
+	// FindWindowByDir: no existing window.
+	r.push("main:0 /other/path\n", nil)
+	// new-session: returns the new target.
+	r.push("repo-branch:0\n", nil)
+	// set-option remain-on-exit.
+	r.push("", nil)
+	// set-option @cog_dir.
+	r.push("", nil)
+
+	target, err := EnsureWindowModeWith(r, "/private/tmp/newwt", "repo/branch", []string{"sleep", "60"}, ModeSession)
+	if err != nil {
+		t.Fatalf("EnsureWindowModeWith: unexpected error: %v", err)
+	}
+	if target != "repo-branch:0" {
+		t.Errorf("target = %q, want %q", target, "repo-branch:0")
+	}
+
+	// Call 0: list-windows (dedup lookup).
+	assertCall(t, r, 0, "list-windows", "-a")
+	// Call 1: new-session with -d, -s <sanitized name>, -c <canonical>, -P, -F, argv.
+	// The "/" in "repo/branch" is not reserved for sessions; "." and ":" are,
+	// and there are none here, so the session name is unchanged.
+	assertCall(t, r, 1, "new-session", "-d", "-s", "repo/branch", "-c", "/private/tmp/newwt", "-P", "-F", "#{session_name}:#{window_index}", "sleep", "60")
+	// Call 2/3: remain-on-exit + @cog_dir on the new window.
+	assertCall(t, r, 2, "set-option", "-w", "-t", "repo-branch:0", "remain-on-exit", "on")
+	assertCall(t, r, 3, "set-option", "-w", "-t", "repo-branch:0", "@cog_dir")
+}
+
+func TestEnsureWindowMode_SessionSanitizesName(t *testing.T) {
+	withTMUX(t)
+
+	r := &fakeRunner{}
+	r.push("", nil)                 // dedup: no window
+	r.push("my-repo-1-2-feat:0\n", nil) // new-session target
+	r.push("", nil)                 // remain-on-exit
+	r.push("", nil)                 // @cog_dir
+
+	_, err := EnsureWindowModeWith(r, "/private/tmp/wt", "my.repo:1.2/feat", []string{"sleep", "60"}, ModeSession)
+	if err != nil {
+		t.Fatalf("EnsureWindowModeWith: unexpected error: %v", err)
+	}
+
+	sessionCall := r.calls[1]
+	var sName string
+	for i, arg := range sessionCall {
+		if arg == "-s" && i+1 < len(sessionCall) {
+			sName = sessionCall[i+1]
+			break
+		}
+	}
+	if strings.ContainsAny(sName, ".:") {
+		t.Errorf("session name %q must not contain '.' or ':'", sName)
+	}
+	if sName != "my-repo-1-2/feat" {
+		t.Errorf("session name = %q, want %q", sName, "my-repo-1-2/feat")
+	}
+}
+
+func TestEnsureWindowMode_SessionEmptyArgvError(t *testing.T) {
+	withTMUX(t)
+
+	r := &fakeRunner{}
+	r.push("", nil) // dedup: no window
+
+	_, err := EnsureWindowModeWith(r, "/private/tmp/wt", "repo/branch", nil, ModeSession)
+	if err == nil {
+		t.Error("expected error for empty argv, got nil")
+	}
+}
+
 // ---- WindowProcessAlive pane_dead parsing -----------------------------------
 
 func TestWindowProcessAlive_Alive(t *testing.T) {
@@ -354,14 +430,75 @@ func TestSelect_BuildsCorrectArgv(t *testing.T) {
 	withTMUX(t)
 
 	r := &fakeRunner{}
-	r.push("", nil)
+	r.push("", nil) // select-window
+	r.push("", nil) // switch-client
 
 	err := SelectWith(r, "main:5")
 	if err != nil {
 		t.Fatalf("SelectWith: unexpected error: %v", err)
 	}
 
+	// Select must both focus the window and switch the client to its session
+	// so launching a worktree in a different session actually moves the client.
 	assertCall(t, r, 0, "select-window", "-t", "main:5")
+	assertCall(t, r, 1, "switch-client", "-t", "main:5")
+}
+
+func TestSelectSession_SwitchesToSessionOnly(t *testing.T) {
+	withTMUX(t)
+
+	r := &fakeRunner{}
+	r.push("", nil) // switch-client
+
+	err := SelectSessionWith(r, "repo-a:2")
+	if err != nil {
+		t.Fatalf("SelectSessionWith: unexpected error: %v", err)
+	}
+
+	// Only switch-client, targeting the bare session name so tmux restores
+	// the session's last-active window (not the index in the Target).
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 call (switch-client), got %d: %v", len(r.calls), r.calls)
+	}
+	assertCall(t, r, 0, "switch-client", "-t", "repo-a")
+}
+
+func TestSelectSession_NotAvailable(t *testing.T) {
+	withoutTMUX(t)
+	r := &fakeRunner{}
+	if err := SelectSessionWith(r, "repo-a:0"); !errors.Is(err, ErrNotAvailable) {
+		t.Errorf("SelectSessionWith: got %v, want ErrNotAvailable", err)
+	}
+}
+
+func TestSessionOf(t *testing.T) {
+	cases := map[Target]string{
+		"repo-a:2":      "repo-a",
+		"my/repo:0":     "my/repo",
+		"weird:1:2":     "weird:1",
+		"bare-session":  "bare-session",
+	}
+	for in, want := range cases {
+		if got := sessionOf(in); got != want {
+			t.Errorf("sessionOf(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSelect_SwitchClientErrorPropagates(t *testing.T) {
+	withTMUX(t)
+
+	r := &fakeRunner{}
+	r.push("", nil)                                  // select-window succeeds
+	r.push("", errors.New("can't find session")) // switch-client fails
+
+	err := SelectWith(r, "main:5")
+	if err == nil {
+		t.Fatal("expected error when switch-client fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "switch-client") {
+		t.Errorf("error should mention switch-client, got: %v", err)
+	}
 }
 
 // ---- Runner error propagation -----------------------------------------------

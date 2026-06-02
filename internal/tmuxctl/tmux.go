@@ -47,6 +47,17 @@ var ErrWindowNotFound = errors.New("tmuxctl: window not found for directory")
 // WindowProcessAlive, and RelaunchInWindow.
 type Target string
 
+// LaunchMode selects how a new worktree is opened: as a window in the current
+// tmux session (ModeWindow) or as a brand-new tmux session (ModeSession).
+type LaunchMode int
+
+const (
+	// ModeWindow opens worktrees with `tmux new-window` (the default).
+	ModeWindow LaunchMode = iota
+	// ModeSession opens worktrees with `tmux new-session`.
+	ModeSession
+)
+
 // Runner is the interface through which tmuxctl issues tmux commands.
 // The default implementation shells out to the real tmux binary; tests inject
 // a fake that records calls and returns canned output.
@@ -108,11 +119,26 @@ func Available() bool {
 // Deduplication is by @cog_dir (canonical path), not by window name. If a
 // window already exists for the directory, its name is NOT updated.
 func EnsureWindow(dir, name string, argv []string) (Target, error) {
-	return EnsureWindowWith(DefaultRunner, dir, name, argv)
+	return EnsureWindowModeWith(DefaultRunner, dir, name, argv, ModeWindow)
 }
 
 // EnsureWindowWith is the injectable variant of EnsureWindow.
 func EnsureWindowWith(r Runner, dir, name string, argv []string) (Target, error) {
+	return EnsureWindowModeWith(r, dir, name, argv, ModeWindow)
+}
+
+// EnsureWindowMode opens a worktree at dir using the given LaunchMode, or
+// returns the existing window/session if one is already tagged with
+// @cog_dir == canonical(dir). See EnsureWindow for the parameter contract.
+//
+// Deduplication is by @cog_dir across all windows in all sessions, so an
+// existing target is reused regardless of which mode created it.
+func EnsureWindowMode(dir, name string, argv []string, mode LaunchMode) (Target, error) {
+	return EnsureWindowModeWith(DefaultRunner, dir, name, argv, mode)
+}
+
+// EnsureWindowModeWith is the injectable variant of EnsureWindowMode.
+func EnsureWindowModeWith(r Runner, dir, name string, argv []string, mode LaunchMode) (Target, error) {
 	if !Available() {
 		return "", ErrNotAvailable
 	}
@@ -132,7 +158,10 @@ func EnsureWindowWith(r Runner, dir, name string, argv []string) (Target, error)
 		return "", fmt.Errorf("tmuxctl: find existing window: %w", err)
 	}
 
-	// No existing window — create one.
+	// No existing window — create one in the requested mode.
+	if mode == ModeSession {
+		return newSessionWith(r, canonical, name, argv)
+	}
 	return newWindowWith(r, canonical, name, argv)
 }
 
@@ -186,6 +215,74 @@ func newWindowWith(r Runner, canonical, name string, argv []string) (Target, err
 	}
 
 	return target, nil
+}
+
+// newSessionWith creates a new detached tmux session running argv, names it a
+// sanitized form of name, and sets @cog_dir to canonical. Returns the Target
+// ("session:index") of the new session's first window.
+//
+// As with newWindowWith, remain-on-exit is enabled so the window survives
+// process exit, and the window is tagged with @cog_dir for dedup.
+//
+// tmux session names may not contain "." or ":" (they are reserved in target
+// syntax); both are replaced with "-" via sanitizeSessionName. Dedup keys on
+// @cog_dir, not the name, so a sanitized-name collision only affects the label
+// shown in the session list.
+func newSessionWith(r Runner, canonical, name string, argv []string) (Target, error) {
+	if len(argv) == 0 {
+		return "", fmt.Errorf("tmuxctl: argv must not be empty")
+	}
+
+	session := sanitizeSessionName(name)
+
+	// Build: tmux new-session -d -s <session> -c <canonical> -P -F '#{session_name}:#{window_index}' <argv...>
+	// -d: create the session detached (don't switch the current client to it).
+	// -s: session name.
+	// -c: set the working directory of the session's first pane to the
+	//     canonical worktree path (harness contract: CWD == worktree).
+	// -P -F: print the target of the new session's window so we can return it.
+	args := []string{
+		"new-session",
+		"-d",
+		"-s", session,
+		"-c", canonical,
+		"-P", "-F", "#{session_name}:#{window_index}",
+	}
+	args = append(args, argv...)
+
+	out, err := r.Run(args...)
+	if err != nil {
+		return "", fmt.Errorf("tmuxctl: new-session: %w", err)
+	}
+
+	target := Target(strings.TrimSpace(out))
+	if target == "" {
+		return "", fmt.Errorf("tmuxctl: new-session returned empty target")
+	}
+
+	// Enable remain-on-exit so the window survives process exit and
+	// WindowProcessAlive / RelaunchInWindow can detect and revive it.
+	if err := setOptionWith(r, target, "remain-on-exit", "on"); err != nil {
+		return "", fmt.Errorf("tmuxctl: set remain-on-exit on %s: %w", target, err)
+	}
+
+	// Tag the window with the canonical worktree path.
+	if err := setOptionWith(r, target, "@cog_dir", canonical); err != nil {
+		return "", fmt.Errorf("tmuxctl: set @cog_dir on %s: %w", target, err)
+	}
+
+	return target, nil
+}
+
+// sanitizeSessionName replaces tmux-reserved characters ("." and ":") with "-"
+// so name is usable as a session name. An empty result falls back to "cog".
+func sanitizeSessionName(name string) string {
+	s := strings.NewReplacer(".", "-", ":", "-").Replace(name)
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "cog"
+	}
+	return s
 }
 
 // setOptionWith sets a tmux window option on target.
@@ -309,9 +406,13 @@ func RelaunchInWindowWith(r Runner, target Target, argv []string) error {
 	return nil
 }
 
-// Select focuses the given window in the current tmux client. It is equivalent
-// to pressing the window's key binding or running `tmux select-window -t
-// <target>`.
+// Select moves the attached tmux client to the given window. It first selects
+// the window within its session (`select-window`), then switches the client to
+// that session (`switch-client`). The switch-client step is required because
+// the target may live in a different session than the one the client is
+// currently attached to — as it always does in session launch mode, where each
+// worktree opens as its own session. select-window alone only changes the
+// active window inside the target's session and never moves the client there.
 //
 // Returns ErrNotAvailable when not inside tmux.
 func Select(target Target) error {
@@ -327,7 +428,46 @@ func SelectWith(r Runner, target Target) error {
 	if _, err := r.Run("select-window", "-t", string(target)); err != nil {
 		return fmt.Errorf("tmuxctl: select-window %s: %w", target, err)
 	}
+	if _, err := r.Run("switch-client", "-t", string(target)); err != nil {
+		return fmt.Errorf("tmuxctl: switch-client %s: %w", target, err)
+	}
 	return nil
+}
+
+// SelectSession switches the attached tmux client to the session that owns
+// target, without selecting a specific window. tmux restores the session's
+// last-active window, so jumping back to a worktree opened in session mode
+// lands on whatever window you were last using in that session — not always
+// the worktree's original window.
+//
+// target is a "session:index" address; only the session component is used.
+//
+// Returns ErrNotAvailable when not inside tmux.
+func SelectSession(target Target) error {
+	return SelectSessionWith(DefaultRunner, target)
+}
+
+// SelectSessionWith is the injectable variant of SelectSession.
+func SelectSessionWith(r Runner, target Target) error {
+	if !Available() {
+		return ErrNotAvailable
+	}
+
+	session := sessionOf(target)
+	if _, err := r.Run("switch-client", "-t", session); err != nil {
+		return fmt.Errorf("tmuxctl: switch-client %s: %w", session, err)
+	}
+	return nil
+}
+
+// sessionOf returns the session component of a "session:index" Target. If
+// target has no ":" it is returned unchanged (already a bare session name).
+func sessionOf(target Target) string {
+	s := string(target)
+	if i := strings.LastIndex(s, ":"); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 // ListCogDirs returns the set of canonical worktree directories that currently
