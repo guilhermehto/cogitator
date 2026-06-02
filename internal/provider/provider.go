@@ -9,6 +9,7 @@ package provider
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/guilhermehto/cogitator/internal/harness"
@@ -111,4 +112,35 @@ type Provider interface {
 	// it in a goroutine. A non-nil error indicates a fatal startup failure;
 	// transient errors should be logged and retried internally.
 	Start(ctx context.Context, sink Sink) error
+}
+
+// Manager holds a set of registered Providers and starts them all against a
+// single Sink. It is provider-agnostic: it knows nothing about mDNS, opencode,
+// or Codex — each Provider owns its own discovery mechanism.
+//
+// Manager must not import discovery, oc, state, or bubbletea.
+type Manager struct {
+	mu        sync.Mutex
+	providers []Provider
+}
+
+// Register adds p to the manager. It is safe to call before Start.
+func (m *Manager) Register(p Provider) {
+	m.mu.Lock()
+	m.providers = append(m.providers, p)
+	m.mu.Unlock()
+}
+
+// Start launches every registered Provider in its own goroutine, passing ctx
+// and sink to each. It returns immediately; providers run until ctx is
+// cancelled. Fatal startup errors from individual providers are non-fatal to
+// the manager — each provider is responsible for its own error handling.
+func (m *Manager) Start(ctx context.Context, sink Sink) {
+	m.mu.Lock()
+	ps := append([]Provider(nil), m.providers...)
+	m.mu.Unlock()
+	for _, p := range ps {
+		p := p
+		go p.Start(ctx, sink) //nolint:errcheck // fatal errors handled inside each provider
+	}
 }

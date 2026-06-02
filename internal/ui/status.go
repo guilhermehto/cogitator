@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/guilhermehto/cogitator/internal/config"
+	"github.com/guilhermehto/cogitator/internal/provider"
 	"github.com/guilhermehto/cogitator/internal/state"
+	"github.com/guilhermehto/cogitator/internal/supervisor"
 )
 
 // RunStatus is the one-shot path used by status bars and shell prompts.
@@ -24,9 +26,12 @@ func RunStatus(cfg *config.Config, logger *slog.Logger) error {
 	defer cancel()
 
 	store := state.New(ctx, cfg, logger)
-	if err := bootDiscovery(ctx, store, cfg, logger); err != nil {
-		return err
-	}
+
+	sup := supervisor.New(store, cfg, logger)
+	ocProvider := supervisor.NewOpenCodeProvider(sup, cfg, logger)
+	var mgr provider.Manager
+	mgr.Register(ocProvider)
+	mgr.Start(ctx, store)
 
 	snaps := store.Subscribe()
 	deadline := time.NewTimer(cfg.StatusDeadline)
