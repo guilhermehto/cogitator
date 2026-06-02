@@ -16,11 +16,11 @@ import (
 )
 
 var (
-	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63")).Padding(0, 1)
-	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("244"))
-	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	agentStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Italic(true)
-	recentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
+	titleStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63")).Padding(0, 1)
+	headerStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("244"))
+	dimStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	agentStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Italic(true)
+	recentStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
 	paneStyle        = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 	paneFocusedStyle = paneStyle.BorderForeground(lipgloss.Color("63"))
 
@@ -505,6 +505,62 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 // renderWorkspaceRows produce the same label, and taskPromptLine can reuse it.
 func (m model) worktreePromptLine() string {
 	return wtHintStyle.Render("new worktree branch: ") + m.input.View()
+}
+
+// renderRepoFinder renders the embedded "add repo" fuzzy finder shown in the
+// sessions pane while prompt == promptAddRepo. It draws a query line, the
+// fuzzy-matched repository list (cursor row highlighted, windowed to fit the
+// pane), and a status/help footer. height is the pane's inner content height,
+// used to window the list so a long result set never overflows the pane.
+func (m model) renderRepoFinder(width, height int) string {
+	var b strings.Builder
+	b.WriteString(headerStyle.Render("Add repo") + "\n")
+	b.WriteString("add repo > " + m.input.View())
+
+	switch {
+	case m.repoFinderErr != "":
+		b.WriteString("\n" + wtHintStyle.Render(m.repoFinderErr))
+		return b.String()
+	case m.repoFinderScanning:
+		b.WriteString("\n" + dimStyle.Render("scanning "+shortenDirectory(repoFinderRoot())+" …"))
+		return b.String()
+	case len(m.repoFinderMatches) == 0:
+		if len(m.repoFinderAll) == 0 {
+			b.WriteString("\n" + dimStyle.Render("no git repositories found under "+shortenDirectory(repoFinderRoot())))
+		} else {
+			b.WriteString("\n" + dimStyle.Render("no match"))
+		}
+		return b.String()
+	}
+
+	// Window the match list around the cursor. Reserve three lines for the
+	// title, query, and footer so the rendered block fits in height exactly.
+	listH := height - 3
+	if listH < 1 {
+		listH = 1
+	}
+	cursor := clampIndex(m.repoFinderCursor, len(m.repoFinderMatches))
+	start := 0
+	if cursor >= listH {
+		start = cursor - listH + 1
+	}
+	end := start + listH
+	if end > len(m.repoFinderMatches) {
+		end = len(m.repoFinderMatches)
+	}
+
+	for i := start; i < end; i++ {
+		// Lines are plain text, so the reverse highlight can wrap them
+		// directly (no embedded colour resets to strip, unlike worktree rows).
+		line := ansi.Truncate("  "+shortenDirectory(m.repoFinderMatches[i]), width-2, "…")
+		if i == cursor {
+			line = wtCursorStyle.Render(line)
+		}
+		b.WriteString("\n" + line)
+	}
+
+	b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("%d repos · ↑↓ move · enter add · esc cancel", len(m.repoFinderMatches))))
+	return b.String()
 }
 
 // worktreeDeletePromptLine returns the styled confirmation line shown while a

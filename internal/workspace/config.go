@@ -190,3 +190,45 @@ func SaveConfig(cfg Config) error {
 	}
 	return nil
 }
+
+// appendRepoPath appends canonical to repos when no existing entry shares the
+// same Path. It returns the (possibly unchanged) slice and whether a new entry
+// was added. Dedup is by exact canonical path, so callers must canonicalize
+// before calling.
+func appendRepoPath(repos []RepoConfig, canonical string) ([]RepoConfig, bool) {
+	for _, r := range repos {
+		if r.Path == canonical {
+			return repos, false
+		}
+	}
+	return append(repos, RepoConfig{Path: canonical}), true
+}
+
+// AddRepo canonicalizes path and appends it to the persisted config when it is
+// not already configured, then saves. It returns whether the repo was newly
+// added (false when it was already present).
+//
+// AddRepo does not verify that path is a git repository; callers should
+// validate with git.RepoRoot first and pass the resolved root here.
+func AddRepo(path string) (bool, error) {
+	canonical, err := pathnorm.Canonical(path)
+	if err != nil {
+		return false, fmt.Errorf("canonicalize repo path %q: %w", path, err)
+	}
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		return false, err
+	}
+
+	repos, added := appendRepoPath(cfg.Repos, canonical)
+	if !added {
+		return false, nil
+	}
+	cfg.Repos = repos
+
+	if err := SaveConfig(cfg); err != nil {
+		return false, err
+	}
+	return true, nil
+}

@@ -65,6 +65,10 @@ const (
 	// On enter, the branch name is passed to git.AddWorktree + harness launch.
 	// On esc, the prompt is cancelled without creating anything.
 	promptNewWorktree
+	// promptAddRepo is active while the embedded "add repo" fuzzy finder is
+	// open ('A'). cogitator scans $HOME for git repositories; the user filters
+	// the discovered list with the shared text input and selects one to add.
+	promptAddRepo
 	// promptConfirmDeleteWorktree is the FIRST of two confirmations for deleting
 	// a worktree ('D'). 'y' advances to promptConfirmDeleteWorktree2; any other
 	// key cancels. The merge status of the branch is shown so the user knows
@@ -253,13 +257,25 @@ type model struct {
 	// take effect without a restart. Zero value (ModeWindow) is safe.
 	launchMode tmuxctl.LaunchMode
 
+	// Repo finder ('A') state, meaningful only while prompt == promptAddRepo.
+	// repoFinderScanning is true between opening the finder and the scan result
+	// arriving. repoFinderAll is the discovered, not-yet-configured repo set;
+	// repoFinderMatches is its current fuzzy-filtered view (what is rendered);
+	// repoFinderCursor indexes repoFinderMatches; repoFinderErr holds a scan
+	// error to surface in the finder body. Zero values are safe (finder closed).
+	repoFinderScanning bool
+	repoFinderAll      []string
+	repoFinderMatches  []string
+	repoFinderCursor   int
+	repoFinderErr      string
+
 	// Injectable seams for tmux, git, and harness operations. Nil values are
 	// replaced with the real implementations in newModel. Tests inject fakes.
 	// Zero-value model{} literals in tests are safe: action Cmds guard on nil
 	// and return an error result rather than panicking.
-	tmux    tmuxOps
-	gitOp   gitOps
-	harnOp  harnessOps
+	tmux   tmuxOps
+	gitOp  gitOps
+	harnOp harnessOps
 
 	// Taskwarrior fields
 	tw               ClientAPI
@@ -630,6 +646,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, cmd
 				}
 
+			case promptAddRepo:
+				// Embedded repo finder. Enter adds the highlighted repo; the
+				// arrow keys (and ctrl+n/p) move the selection; esc closes;
+				// everything else edits the filter query and re-ranks matches.
+				switch msg.String() {
+				case "esc":
+					m.closeRepoFinder()
+					return m, nil
+				case "enter":
+					if len(m.repoFinderMatches) == 0 {
+						return m, nil
+					}
+					sel := m.repoFinderMatches[clampIndex(m.repoFinderCursor, len(m.repoFinderMatches))]
+					m.closeRepoFinder()
+					return m, addSelectedRepoCmd(sel)
+				case "up", "ctrl+p":
+					m.repoFinderCursor = clampIndex(m.repoFinderCursor-1, len(m.repoFinderMatches))
+					return m, nil
+				case "down", "ctrl+n":
+					m.repoFinderCursor = clampIndex(m.repoFinderCursor+1, len(m.repoFinderMatches))
+					return m, nil
+				default:
+					var cmd tea.Cmd
+					m.input, cmd = m.input.Update(msg)
+					m.repoFinderMatches = fuzzyRank(m.input.Value(), m.repoFinderAll)
+					m.repoFinderCursor = clampIndex(m.repoFinderCursor, len(m.repoFinderMatches))
+					return m, cmd
+				}
+
 			case promptConfirmDeleteWorktree:
 				// First confirmation. 'y' advances to the second prompt; any
 				// other key (including esc) cancels the deletion.
@@ -757,6 +802,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.SetValue("")
 				focusCmd := m.input.Focus()
 				return m, focusCmd
+
+			case "A":
+				// Open the embedded repo finder: scan $HOME for git repos in
+				// the background, then let the user fuzzy-filter and pick one.
+				// Runs entirely inside the TUI (no ExecProcess), so it cannot
+				// disturb the host tmux client.
+				m.prompt = promptAddRepo
+				m.repoFinderScanning = true
+				m.repoFinderAll = nil
+				m.repoFinderMatches = nil
+				m.repoFinderCursor = 0
+				m.repoFinderErr = ""
+				m.input.Placeholder = "filter repos"
+				m.input.SetValue("")
+				return m, tea.Batch(m.input.Focus(), scanReposCmd(repoFinderRoot()))
 
 			case "D":
 				// Delete worktree: open the first of two confirmations and
@@ -915,6 +975,48 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case repoScanMsg:
+		// Background repo scan finished. Ignore a stale result if the finder
+		// was closed in the meantime.
+		if m.prompt != promptAddRepo {
+			return m, nil
+		}
+		m.repoFinderScanning = false
+		if msg.err != nil {
+			m.repoFinderErr = fmt.Sprintf("scan failed: %v", msg.err)
+			m.repoFinderAll = nil
+			m.repoFinderMatches = nil
+			return m, nil
+		}
+		m.repoFinderErr = ""
+		m.repoFinderAll = msg.repos
+		m.repoFinderMatches = fuzzyRank(m.input.Value(), m.repoFinderAll)
+		m.repoFinderCursor = clampIndex(m.repoFinderCursor, len(m.repoFinderMatches))
+		return m, nil
+
+	case repoAddMsg:
+		// Outcome of registering a repo selected in the finder.
+		switch {
+		case msg.addErr != nil:
+			m.tmuxHint = fmt.Sprintf("add repo failed: %v", msg.addErr)
+			return m, nil
+		case msg.added:
+			m.tmuxHint = "added repo: " + filepath.Base(msg.repoPath)
+			// Rebuild rows so the new repo appears immediately rather than
+			// waiting for the next snapshot.
+			m.workspaceRows, m.launchMode = buildWorkspaceRows(m.snap, m.cfg)
+			if n := len(m.workspaceRows); n == 0 {
+				m.sessionCursor = 0
+			} else if m.sessionCursor >= n {
+				m.sessionCursor = n - 1
+			}
+			return m, nil
+		default:
+			// Validation passed but the repo was already configured.
+			m.tmuxHint = "repo already configured: " + filepath.Base(msg.repoPath)
+			return m, nil
+		}
+
 	case mergeStatusMsg:
 		// Annotate the active delete confirmation, but only if it still targets
 		// the same worktree the probe was launched for (guards against a stale
@@ -997,6 +1099,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// closeRepoFinder dismisses the embedded repo finder and resets its state,
+// returning the shared text input to idle. It persists nothing; callers that
+// selected a repo dispatch addSelectedRepoCmd before closing.
+func (m *model) closeRepoFinder() {
+	m.prompt = promptIdle
+	m.input.Blur()
+	m.input.SetValue("")
+	m.repoFinderScanning = false
+	m.repoFinderAll = nil
+	m.repoFinderMatches = nil
+	m.repoFinderCursor = 0
+	m.repoFinderErr = ""
+}
+
 func (m model) View() string {
 	if m.width == 0 {
 		return "loading..."
@@ -1025,7 +1141,7 @@ func (m model) View() string {
 
 	var headerHint string
 	if m.focus == focusSessions {
-		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s recent  ·  D del wt  ·  tab→tasks  ·  q quit",
+		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s recent · A add repo · D del wt  ·  tab→tasks  ·  q quit",
 			live, recent, recentMins, m.snap.UpdatedAt.Format("15:04:05"), toggleVerb(m.recentCollapsed))
 	} else {
 		headerHint = fmt.Sprintf("  %d pending  ·  a add · e edit · s start/stop · d done · D del · U undo · j/k move  ·  tab→sessions  ·  q quit",
@@ -1082,13 +1198,16 @@ func (m model) View() string {
 	// fall back to the live-only path so --status/--demo and unconfigured
 	// installs render exactly as before.
 	var sessionContent string
-	if len(m.workspaceRows) > 0 {
+	switch {
+	case m.prompt == promptAddRepo:
+		sessionContent = m.renderRepoFinder(paneW, sessionsInnerH)
+	case len(m.workspaceRows) > 0:
 		now := m.tickNow
 		if now.IsZero() {
 			now = time.Now()
 		}
 		sessionContent = m.renderWorkspaceRows(paneW, m.workspaceRows, m.sessionCursor, now)
-	} else {
+	default:
 		sessionContent = m.renderAllSessions(paneW, rows, recentByInstance)
 	}
 	sessionsPane := sessionsStyle.Width(paneW).Height(sessionsInnerH).Render(sessionContent)
