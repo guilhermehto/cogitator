@@ -33,11 +33,11 @@ func init() {
 // Kind returns "codex".
 func (codexHarness) Kind() Kind { return KindCodex }
 
-// Capabilities reports LiveStatus = false because Codex does not yet expose a
-// discovery mechanism that cogitator can consume. Rows render as "unknown"
-// until a discovery provider is added in a later step.
+// Capabilities reports LiveStatus = true because the Codex hook listener
+// (internal/codex/provider.go) provides real-time attention signals via the
+// cogitator codex-hook IPC bridge.
 func (codexHarness) Capabilities() Capabilities {
-	return Capabilities{LiveStatus: false}
+	return Capabilities{LiveStatus: true}
 }
 
 // LaunchArgv returns the argv to launch or resume Codex in worktree.

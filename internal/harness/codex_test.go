@@ -24,8 +24,8 @@ func TestCodex_Capabilities_LiveStatus(t *testing.T) {
 	}
 
 	caps := h.Capabilities()
-	if caps.LiveStatus {
-		t.Error("Capabilities().LiveStatus = true, want false")
+	if !caps.LiveStatus {
+		t.Error("Capabilities().LiveStatus = false, want true (hook listener provides live attention)")
 	}
 }
 

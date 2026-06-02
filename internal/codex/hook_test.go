@@ -3,6 +3,7 @@ package codex_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -169,6 +170,234 @@ func TestSendHook_NoListener(t *testing.T) {
 	// to avoid flakiness on slow CI while still catching hangs.
 	if elapsed > 3500*time.Millisecond {
 		t.Errorf("SendHook took %v, want < 3.5s (must not block Codex)", elapsed)
+	}
+}
+
+// ── Step-10 tests: Listen, ParseHookEvent, stale-vs-live socket ──────────────
+
+// TestListen_StaleSocket verifies that Listen unlinks a stale socket file
+// (no listener behind it) and successfully binds.
+func TestListen_StaleSocket(t *testing.T) {
+	dir := shortXDGDir(t)
+	sockPath := filepath.Join(dir, "cog-stale.sock")
+
+	// Create a stale socket file (no listener).
+	f, err := os.Create(sockPath)
+	if err != nil {
+		t.Fatalf("create stale file: %v", err)
+	}
+	f.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	received := make(chan []byte, 1)
+	cleanup, err := codex.Listen(ctx, sockPath, func(raw []byte) {
+		received <- raw
+	}, nil)
+	if err != nil {
+		t.Fatalf("Listen on stale socket: %v", err)
+	}
+	defer cleanup()
+
+	// Send a frame to confirm the listener is working.
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial after stale removal: %v", err)
+	}
+	payload := []byte(`{"hook_event_name":"SessionStart","session_id":"s1"}`)
+	if err := codex.WriteFrame(conn, payload); err != nil {
+		conn.Close()
+		t.Fatalf("WriteFrame: %v", err)
+	}
+	conn.Close()
+
+	select {
+	case got := <-received:
+		if string(got) != string(payload) {
+			t.Errorf("received %q, want %q", got, payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for frame after stale-socket rebind")
+	}
+}
+
+// TestListen_LiveSocket verifies that Listen returns ErrListenerOwned when
+// another live listener already owns the socket.
+func TestListen_LiveSocket(t *testing.T) {
+	dir := shortXDGDir(t)
+	sockPath := filepath.Join(dir, "cog-live.sock")
+
+	// Start a live listener (the "first instance").
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("net.Listen (first instance): %v", err)
+	}
+	defer ln.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	_, listenErr := codex.Listen(ctx, sockPath, func(_ []byte) {}, nil)
+	if !errors.Is(listenErr, codex.ErrListenerOwned) {
+		t.Errorf("Listen with live socket: got %v, want ErrListenerOwned", listenErr)
+	}
+}
+
+// TestListen_CleanupUnlinks verifies that the cleanup function unlinks the
+// socket file.
+func TestListen_CleanupUnlinks(t *testing.T) {
+	dir := shortXDGDir(t)
+	sockPath := filepath.Join(dir, "cog-cleanup.sock")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cleanup, err := codex.Listen(ctx, sockPath, func(_ []byte) {}, nil)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+
+	if _, err := os.Stat(sockPath); err != nil {
+		t.Fatalf("socket file should exist before cleanup: %v", err)
+	}
+
+	cleanup()
+
+	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
+		t.Errorf("socket file should be removed after cleanup, got: %v", err)
+	}
+}
+
+// TestParseHookEvent_EventMapping verifies that the defensive parser maps
+// known event names (both PascalCase and snake_case) to their canonical form
+// and extracts session_id and cwd from multiple candidate field names.
+func TestParseHookEvent_EventMapping(t *testing.T) {
+	tests := []struct {
+		name          string
+		json          string
+		wantEvent     string
+		wantSessionID string
+		wantCWD       string
+		wantIsError   bool
+	}{
+		{
+			name:          "SessionStart PascalCase",
+			json:          `{"hook_event_name":"SessionStart","session_id":"s1","cwd":"/tmp/a"}`,
+			wantEvent:     "session_start",
+			wantSessionID: "s1",
+			wantCWD:       "/tmp/a",
+		},
+		{
+			name:          "session_start snake_case",
+			json:          `{"hook_event_name":"session_start","session_id":"s2","cwd":"/tmp/b"}`,
+			wantEvent:     "session_start",
+			wantSessionID: "s2",
+			wantCWD:       "/tmp/b",
+		},
+		{
+			name:          "Stop → stopped",
+			json:          `{"hook_event_name":"Stop","session_id":"s3"}`,
+			wantEvent:     "stopped",
+			wantSessionID: "s3",
+		},
+		{
+			name:          "stopped snake_case",
+			json:          `{"hook_event_name":"stopped","session_id":"s4"}`,
+			wantEvent:     "stopped",
+			wantSessionID: "s4",
+		},
+		{
+			name:          "PermissionRequest PascalCase",
+			json:          `{"hook_event_name":"PermissionRequest","session_id":"s5","cwd":"/tmp/c"}`,
+			wantEvent:     "permission_request",
+			wantSessionID: "s5",
+			wantCWD:       "/tmp/c",
+		},
+		{
+			name:          "permission_request snake_case",
+			json:          `{"hook_event_name":"permission_request","session_id":"s6"}`,
+			wantEvent:     "permission_request",
+			wantSessionID: "s6",
+		},
+		{
+			name:          "event field fallback",
+			json:          `{"event":"UserPromptSubmit","session_id":"s7"}`,
+			wantEvent:     "user_prompt_submit",
+			wantSessionID: "s7",
+		},
+		{
+			name:          "type field fallback",
+			json:          `{"type":"PreToolUse","session_id":"s8"}`,
+			wantEvent:     "pre_tool_use",
+			wantSessionID: "s8",
+		},
+		{
+			name:          "sessionId camelCase fallback",
+			json:          `{"hook_event_name":"PostToolUse","sessionId":"s9"}`,
+			wantEvent:     "post_tool_use",
+			wantSessionID: "s9",
+		},
+		{
+			name:          "id fallback for session id",
+			json:          `{"hook_event_name":"Notification","id":"s10"}`,
+			wantEvent:     "notification",
+			wantSessionID: "s10",
+		},
+		{
+			name:          "directory fallback for cwd",
+			json:          `{"hook_event_name":"SessionStart","session_id":"s11","directory":"/tmp/d"}`,
+			wantEvent:     "session_start",
+			wantSessionID: "s11",
+			wantCWD:       "/tmp/d",
+		},
+		{
+			name:          "error indicator",
+			json:          `{"hook_event_name":"SessionStart","session_id":"s12","error":"something went wrong"}`,
+			wantEvent:     "session_start",
+			wantSessionID: "s12",
+			wantIsError:   true,
+		},
+		{
+			name:          "unknown event name passes through",
+			json:          `{"hook_event_name":"SomeFutureEvent","session_id":"s13"}`,
+			wantEvent:     "SomeFutureEvent",
+			wantSessionID: "s13",
+		},
+		{
+			name:      "empty JSON is graceful",
+			json:      `{}`,
+			wantEvent: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ev, err := codex.ParseHookEvent([]byte(tc.json))
+			if err != nil {
+				t.Fatalf("ParseHookEvent: %v", err)
+			}
+			if ev.EventName != tc.wantEvent {
+				t.Errorf("EventName = %q, want %q", ev.EventName, tc.wantEvent)
+			}
+			if ev.SessionID != tc.wantSessionID {
+				t.Errorf("SessionID = %q, want %q", ev.SessionID, tc.wantSessionID)
+			}
+			if ev.CWD != tc.wantCWD {
+				t.Errorf("CWD = %q, want %q", ev.CWD, tc.wantCWD)
+			}
+			if ev.IsError != tc.wantIsError {
+				t.Errorf("IsError = %v, want %v", ev.IsError, tc.wantIsError)
+			}
+		})
+	}
+}
+
+// TestParseHookEvent_MalformedJSON verifies that malformed JSON returns an error.
+func TestParseHookEvent_MalformedJSON(t *testing.T) {
+	_, err := codex.ParseHookEvent([]byte(`not json`))
+	if err == nil {
+		t.Error("ParseHookEvent(malformed): expected error, got nil")
 	}
 }
 
