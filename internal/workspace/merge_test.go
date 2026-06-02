@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/guilhermehto/cogitator/internal/git"
+	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/workspace"
@@ -28,7 +29,7 @@ func mustDir(t *testing.T, base, name string) string {
 	return canonical
 }
 
-// makeSession builds a SessionView for testing.
+// makeSession builds a SessionView for testing with Provider defaulting to "opencode".
 func makeSession(dir, sessionID, title string, src state.Source, activity time.Time) state.SessionView {
 	return state.SessionView{
 		SessionID:    sessionID,
@@ -37,8 +38,16 @@ func makeSession(dir, sessionID, title string, src state.Source, activity time.T
 		Source:       src,
 		Attention:    state.AttnInactive,
 		LastActivity: activity,
+		Provider:     harness.Kind("opencode"),
 		// ParentID empty → top-level session (as required by liveTopLevel contract)
 	}
+}
+
+// makeSessionWithProvider builds a SessionView for testing with an explicit Provider.
+func makeSessionWithProvider(dir, sessionID, title string, src state.Source, activity time.Time, provider harness.Kind) state.SessionView {
+	sv := makeSession(dir, sessionID, title, src, activity)
+	sv.Provider = provider
+	return sv
 }
 
 // makeRosterEntry builds a RosterEntry for testing.
@@ -431,5 +440,82 @@ func TestMerge_RosterOnlyMissingDir(t *testing.T) {
 	}
 	if row.State != workspace.StateMissing {
 		t.Errorf("State: got %q, want %q", row.State, workspace.StateMissing)
+	}
+}
+
+// TestMerge_ProviderCodexLiveOnlyRow verifies that a live-only session with
+// Provider="codex" produces a row with Harness="codex" (not relabeled "opencode").
+func TestMerge_ProviderCodexLiveOnlyRow(t *testing.T) {
+	tmp := t.TempDir()
+	wtDir := mustDir(t, tmp, "wt-codex-live")
+
+	now := time.Now()
+	sess := makeSessionWithProvider(wtDir, "sess-codex", "Codex Task", state.SourceLive, now, harness.Kind("codex"))
+	sess.Attention = state.AttnActive
+
+	rows := workspace.Merge(nil, nil, nil, []state.SessionView{sess}, nil)
+
+	row := findRow(rows, wtDir)
+	if row == nil {
+		t.Fatalf("no row for live-only codex dir %q", wtDir)
+	}
+	if row.Harness != "codex" {
+		t.Errorf("Harness: got %q, want %q — codex live row must not be relabeled opencode", row.Harness, "codex")
+	}
+	if row.State != workspace.StateRunning {
+		t.Errorf("State: got %q, want %q", row.State, workspace.StateRunning)
+	}
+}
+
+// TestMerge_ProviderOpencodeUnchanged verifies that a live-only session with
+// Provider="opencode" still produces a row with Harness="opencode".
+func TestMerge_ProviderOpencodeUnchanged(t *testing.T) {
+	tmp := t.TempDir()
+	wtDir := mustDir(t, tmp, "wt-oc-live")
+
+	now := time.Now()
+	sess := makeSession(wtDir, "sess-oc", "OC Task", state.SourceLive, now)
+	// makeSession already sets Provider="opencode"
+
+	rows := workspace.Merge(nil, nil, nil, []state.SessionView{sess}, nil)
+
+	row := findRow(rows, wtDir)
+	if row == nil {
+		t.Fatalf("no row for live-only opencode dir %q", wtDir)
+	}
+	if row.Harness != "opencode" {
+		t.Errorf("Harness: got %q, want %q", row.Harness, "opencode")
+	}
+}
+
+// TestMerge_ProviderCodexWithRosterEntry verifies that a live codex session
+// in a dir that already has a roster entry keeps the roster's harness (the
+// roster wins over the live session's provider when the roster entry is present).
+func TestMerge_ProviderCodexWithRosterEntry(t *testing.T) {
+	tmp := t.TempDir()
+	repoDir := mustDir(t, tmp, "repo")
+	wtDir := mustDir(t, tmp, "wt-codex-roster")
+
+	now := time.Now()
+	repos := []workspace.RepoConfig{{Path: repoDir}}
+	worktreesByRepo := map[string][]git.Worktree{
+		repoDir: {{Path: wtDir, Branch: "main"}},
+	}
+	roster := map[string]workspace.RosterEntry{
+		wtDir: makeRosterEntry(wtDir, "codex", "sess-codex", "Codex Session", now.Add(-time.Minute)),
+	}
+	sess := makeSessionWithProvider(wtDir, "sess-codex-live", "Codex Live", state.SourceLive, now, harness.Kind("codex"))
+
+	rows := workspace.Merge(repos, worktreesByRepo, roster, []state.SessionView{sess}, nil)
+
+	row := findRow(rows, wtDir)
+	if row == nil {
+		t.Fatalf("no row for codex worktree %q", wtDir)
+	}
+	if row.Harness != "codex" {
+		t.Errorf("Harness: got %q, want %q", row.Harness, "codex")
+	}
+	if row.State != workspace.StateRunning {
+		t.Errorf("State: got %q, want %q", row.State, workspace.StateRunning)
 	}
 }

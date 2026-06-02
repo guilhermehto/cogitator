@@ -19,6 +19,7 @@ import (
 
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/discovery"
+	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/oc"
 )
 
@@ -47,6 +48,9 @@ type SessionView struct {
 	// that doesn't shuffle on every message tick. Zero until the
 	// /session/{id} fetch resolves for an SSE-discovered session.
 	Created time.Time
+	// Provider identifies which coding-agent harness produced this session.
+	// Defaults to "opencode" for sessions discovered via the opencode SSE path.
+	Provider harness.Kind
 }
 
 type Snapshot struct {
@@ -679,6 +683,7 @@ func (s *Store) snapshot() Snapshot {
 				Attention:    Classify(row.status.Type, row.hasPerm, row.hasQuestion, row.lastError, row.lastActivity),
 				LastActivity: row.lastActivity,
 				Created:      created,
+				Provider:     harness.Kind("opencode"),
 			}
 			cand := candidate{view: sv, live: row.source == SourceLive, healthy: healthy}
 			cur, ok := best[sv.SessionID]

@@ -220,11 +220,15 @@ func Merge(
 
 	for _, dir := range liveOnlyDirs {
 		cand := liveByDir[dir]
+		harnessKind := string(cand.view.Provider)
+		if harnessKind == "" {
+			harnessKind = "opencode"
+		}
 		row := Row{
 			Repo:         "",
 			Worktree:     dir,
 			Branch:       "",
-			Harness:      "opencode", // live sessions are always opencode
+			Harness:      harnessKind,
 			Title:        cand.view.Title,
 			SessionID:    cand.view.SessionID,
 			State:        StateRunning,
@@ -325,7 +329,12 @@ func buildRow(
 		row.Attention = cand.view.Attention
 		row.LastActivity = cand.view.LastActivity
 		if row.Harness == "" {
-			row.Harness = "opencode" // live sessions are always opencode
+			// No roster entry for this dir; derive harness from the live session's provider.
+			if cand.view.Provider != "" {
+				row.Harness = string(cand.view.Provider)
+			} else {
+				row.Harness = "opencode"
+			}
 		}
 		row.State = StateRunning
 		return row

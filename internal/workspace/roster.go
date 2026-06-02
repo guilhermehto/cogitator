@@ -245,10 +245,14 @@ func (r *Recorder) applySnapshot(m map[string]RosterEntry, snap state.Snapshot) 
 			// Unresolvable path — skip rather than storing a bad key.
 			continue
 		}
-		// Default harness for live-discovered sessions is opencode; preserve
-		// any harness already recorded for this directory (e.g. codex set at
-		// create time) so a snapshot never silently downgrades the kind.
-		harnessKind := "opencode"
+		// Derive the harness kind from the session's Provider field; fall back
+		// to "opencode" when unset (zero value). Preserve any harness already
+		// recorded for this directory (e.g. codex set at create time) so a
+		// snapshot never silently downgrades the kind.
+		harnessKind := string(sv.Provider)
+		if harnessKind == "" {
+			harnessKind = "opencode"
+		}
 		if cur, ok := m[canonical]; ok && cur.Harness != "" {
 			harnessKind = cur.Harness
 		}
