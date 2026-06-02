@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/guilhermehto/cogitator/internal/pathnorm"
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
@@ -214,6 +215,80 @@ func TestSaveConfig_RoundTrip(t *testing.T) {
 		if r.Missing {
 			t.Errorf("repo[%d] %q should not be Missing", i, r.Path)
 		}
+	}
+}
+
+// TestAddRepo_AppendsAndDedups verifies that AddRepo persists a new repo and
+// reports duplicates without growing the config.
+func TestAddRepo_AppendsAndDedups(t *testing.T) {
+	tmp := t.TempDir()
+	withConfigEnv(t, tmp)
+
+	repo := filepath.Join(tmp, "myrepo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+
+	added, err := workspace.AddRepo(repo)
+	if err != nil {
+		t.Fatalf("AddRepo: %v", err)
+	}
+	if !added {
+		t.Fatalf("AddRepo: expected added=true on first add")
+	}
+
+	// Second add of the same path is a no-op duplicate.
+	added, err = workspace.AddRepo(repo)
+	if err != nil {
+		t.Fatalf("AddRepo (dup): %v", err)
+	}
+	if added {
+		t.Fatalf("AddRepo: expected added=false on duplicate")
+	}
+
+	loaded, err := workspace.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(loaded.Repos) != 1 {
+		t.Fatalf("expected 1 repo after dedup, got %d", len(loaded.Repos))
+	}
+	want, err := pathnorm.Canonical(repo)
+	if err != nil {
+		t.Fatalf("pathnorm.Canonical: %v", err)
+	}
+	if loaded.Repos[0].Path != want {
+		t.Errorf("persisted repo path: got %q, want %q", loaded.Repos[0].Path, want)
+	}
+}
+
+// TestAddRepo_PreservesExisting verifies that AddRepo keeps already-configured
+// repos when appending a new one.
+func TestAddRepo_PreservesExisting(t *testing.T) {
+	tmp := t.TempDir()
+	withConfigEnv(t, tmp)
+
+	first := filepath.Join(tmp, "first")
+	second := filepath.Join(tmp, "second")
+	for _, d := range []string{first, second} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+
+	if _, err := workspace.AddRepo(first); err != nil {
+		t.Fatalf("AddRepo first: %v", err)
+	}
+	if _, err := workspace.AddRepo(second); err != nil {
+		t.Fatalf("AddRepo second: %v", err)
+	}
+
+	loaded, err := workspace.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(loaded.Repos) != 2 {
+		t.Fatalf("expected 2 repos, got %d", len(loaded.Repos))
 	}
 }
 
