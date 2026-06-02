@@ -89,6 +89,9 @@ var (
 	wtCursorStyle = lipgloss.NewStyle().Reverse(true)
 	// wtRepoStyle renders the repo group header.
 	wtRepoStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63"))
+	// wtPathStyle renders the faded-italic path annotation shown next to a repo
+	// header (the repo path) and next to each session row (the worktree/branch).
+	wtPathStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
 	// wtHintStyle renders the transient tmux hint line.
 	wtHintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Italic(true)
 )
@@ -441,12 +444,17 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 	}
 
 	for _, g := range groups {
-		// Repo header: show the base name of the repo path.
-		repoLabel := filepath.Base(g.repo)
+		// Repo header: bold base name, with the full (home-shortened) repo
+		// path in faded italic next to it. The synthetic "(unconfigured)"
+		// group has no real path to annotate.
+		var header string
 		if g.repo == "(unconfigured)" {
-			repoLabel = g.repo
+			header = wtRepoStyle.Render("  " + g.repo)
+		} else {
+			header = wtRepoStyle.Render("  "+filepath.Base(g.repo)) +
+				"  " + wtPathStyle.Render(shortenDirectory(g.repo))
 		}
-		b.WriteString(wtRepoStyle.Render("  "+repoLabel) + "\n")
+		b.WriteString(header + "\n")
 
 		for _, i := range g.rows {
 			row := rows[i]
@@ -520,7 +528,7 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int, isLaunching 
 		statusCell := wtLaunchingStyle.Render(glyphWtLaunching) + " "
 		titleStr := wtLaunchingStyle.Render("launching…")
 		if row.Branch != "" {
-			titleStr += "  " + dimStyle.Render("["+row.Branch+"]")
+			titleStr += "  " + wtPathStyle.Render("["+row.Branch+"]")
 		}
 		cells := []string{
 			padCell(statusCell, colStateW, lipgloss.Left),
@@ -587,9 +595,10 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int, isLaunching 
 		titleStr = dimStyle.Render(filepath.Base(row.Worktree))
 	}
 
-	// Branch annotation (shown for non-running rows where branch is known).
-	if row.Branch != "" && row.State != workspace.StateRunning {
-		titleStr += "  " + dimStyle.Render("["+row.Branch+"]")
+	// Branch annotation: the git worktree/branch name next to every row whose
+	// branch is known, in faded italic.
+	if row.Branch != "" {
+		titleStr += "  " + wtPathStyle.Render("["+row.Branch+"]")
 	}
 
 	// Activity column: relative last-activity for stopped/unknown rows.

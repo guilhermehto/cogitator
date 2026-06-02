@@ -81,6 +81,36 @@ func TestRenderWorkspaceRowsRunningRowShowsTitle(t *testing.T) {
 	}
 }
 
+func TestRenderWorkspaceRowsRunningRowShowsBranch(t *testing.T) {
+	m := model{width: 200}
+	rows := []workspace.Row{
+		makeRow("/repo/a", "/repo/a", "feat/login", "running session", workspace.StateRunning, state.AttnActive, fixedNow),
+	}
+	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
+	row := wsRowLineContaining(got, "running session")
+	if row == "" {
+		t.Fatal("running row not found")
+	}
+	if !strings.Contains(wsStripANSI(row), "feat/login") {
+		t.Fatalf("running row must show its branch annotation, got %q", row)
+	}
+}
+
+func TestRenderWorkspaceRowsRepoHeaderShowsRepoPath(t *testing.T) {
+	m := model{width: 200}
+	rows := []workspace.Row{
+		makeRow("/srv/code/myrepo", "/srv/code/myrepo", "main", "a session", workspace.StateRunning, state.AttnActive, fixedNow),
+	}
+	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
+	header := wsRowLineContaining(got, "myrepo")
+	if header == "" {
+		t.Fatal("repo header not found")
+	}
+	if !strings.Contains(wsStripANSI(header), "/srv/code/myrepo") {
+		t.Fatalf("repo header must show the full repo path, got %q", header)
+	}
+}
+
 func TestRenderWorkspaceRowsStoppedRowShowsTitleDimmed(t *testing.T) {
 	m := model{width: 200}
 	lastAct := fixedNow.Add(-30 * time.Minute)
