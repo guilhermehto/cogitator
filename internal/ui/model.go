@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/git"
@@ -69,6 +70,12 @@ const (
 	// open ('A'). cogitator scans $HOME for git repositories; the user filters
 	// the discovered list with the shared text input and selects one to add.
 	promptAddRepo
+	// promptChooseHarness is shown after the user types a branch name for 'n'
+	// and presses enter. It presents the registered harness kinds as a list;
+	// the user moves the cursor with up/down and confirms with enter. On esc
+	// the whole new-worktree flow is cancelled. The default cursor position is
+	// the index of wsCfg.DefaultHarness (or opencode when unset).
+	promptChooseHarness
 	// promptConfirmDeleteWorktree is the FIRST of two confirmations for deleting
 	// a worktree ('D'). 'y' advances to promptConfirmDeleteWorktree2; any other
 	// key cancels. The merge status of the branch is shown so the user knows
@@ -101,10 +108,12 @@ type launchResultMsg struct {
 
 // worktreeCreatedMsg is returned by newWorktreeCmd after git.AddWorktree
 // succeeds and the harness window has been opened. canonDest is the
-// post-create canonical path (the overlay key).
+// post-create canonical path (the overlay key). harnessKind is the harness
+// that was launched so the handler can write a create-time roster entry.
 type worktreeCreatedMsg struct {
-	canonDest string
-	err       error
+	canonDest   string
+	harnessKind string
+	err         error
 }
 
 // mergeStatusMsg carries the result of an async branch merge-status probe used
@@ -205,6 +214,9 @@ func (realGitOps) BranchMergeStatus(repoPath, branch string) (git.MergeState, st
 // harnessOps is the injectable seam for harness registry lookups.
 type harnessOps interface {
 	Get(kind harness.Kind) (harness.Harness, error)
+	// Kinds returns all registered harness kinds. Callers that need a stable
+	// order must sort the result.
+	Kinds() []harness.Kind
 }
 
 // realHarnessOps delegates to the package-level harness registry.
@@ -212,6 +224,10 @@ type realHarnessOps struct{}
 
 func (realHarnessOps) Get(kind harness.Kind) (harness.Harness, error) {
 	return harness.DefaultRegistry.Get(kind)
+}
+
+func (realHarnessOps) Kinds() []harness.Kind {
+	return harness.DefaultRegistry.Kinds()
 }
 
 type model struct {
@@ -248,6 +264,20 @@ type model struct {
 	// newWorktreeRepo is the repo path captured when the user presses 'n' so
 	// the promptNewWorktree handler knows which repo to create the worktree in.
 	newWorktreeRepo string
+	// newWorktreeBranch is the branch name typed in promptNewWorktree, carried
+	// forward to promptChooseHarness so the chooser can dispatch newWorktreeCmd.
+	newWorktreeBranch string
+	// harnessChooserKinds is the ordered list of harness kinds shown in the
+	// promptChooseHarness list. Populated when entering the chooser.
+	harnessChooserKinds []harness.Kind
+	// harnessChooserCursor is the index into harnessChooserKinds of the
+	// currently highlighted choice. Defaults to the index of DefaultHarness
+	// (or opencode when unset).
+	harnessChooserCursor int
+	// rosterUpserts is the channel used to inject create-time roster entries
+	// into the recorder without calling workspace.Save directly. Nil when the
+	// recorder is not wired (e.g. in tests that don't need roster writes).
+	rosterUpserts chan<- workspace.RosterEntry
 	// deleteTarget is the worktree row captured when the user presses 'D' to
 	// begin the two-step delete confirmation. Zero value when no delete is in
 	// progress. Cleared on cancel and on dispatch of the delete Cmd.
@@ -418,12 +448,12 @@ func newWorktreeCmd(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, bran
 		windowName := filepath.Base(repoPath) + "/" + branch
 		target, err := ops.EnsureWindowMode(canonDest, windowName, argv, mode)
 		if err != nil {
-			return worktreeCreatedMsg{canonDest: canonDest, err: err}
+			return worktreeCreatedMsg{canonDest: canonDest, harnessKind: string(kind), err: err}
 		}
 		if err := ops.Select(target); err != nil {
-			return worktreeCreatedMsg{canonDest: canonDest, err: err}
+			return worktreeCreatedMsg{canonDest: canonDest, harnessKind: string(kind), err: err}
 		}
-		return worktreeCreatedMsg{canonDest: canonDest}
+		return worktreeCreatedMsg{canonDest: canonDest, harnessKind: string(kind)}
 	}
 }
 
@@ -605,38 +635,45 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 
 			case promptNewWorktree:
-				// Branch-name prompt for 'n' (new worktree). On enter, create
-				// the worktree and launch the harness. On esc, cancel.
+				// Branch-name prompt for 'n' (new worktree). On enter, advance
+				// to the harness chooser. On esc, cancel.
 				switch msg.String() {
 				case "enter":
 					branch := strings.TrimSpace(m.input.Value())
 					repoPath := m.newWorktreeRepo
-					m.prompt = promptIdle
-					m.input.Blur()
-					m.input.SetValue("")
-					m.newWorktreeRepo = ""
 					_, inputCmd := m.input.Update(msg)
 					if branch == "" || repoPath == "" {
 						// Nothing to do — cancelled effectively.
+						m.prompt = promptIdle
+						m.input.Blur()
+						m.input.SetValue("")
+						m.newWorktreeRepo = ""
 						return m, inputCmd
 					}
-					// Determine harness kind and launch mode from workspace config.
-					harnessKind := "opencode"
-					launchMode := m.launchMode
-					if wsCfg, err := workspace.LoadConfig(); err == nil {
-						if wsCfg.DefaultHarness != "" {
-							harnessKind = wsCfg.DefaultHarness
+					// Carry the branch forward and open the harness chooser.
+					m.newWorktreeBranch = branch
+					m.input.Blur()
+					m.input.SetValue("")
+					m.prompt = promptChooseHarness
+					m.harnessChooserKinds = harnessChooserKinds(m.harnOp)
+					m.harnessChooserCursor = defaultHarnessIndex(m.harnessChooserKinds)
+					// Override default cursor from workspace config when set.
+					if wsCfg, err := workspace.LoadConfig(); err == nil && wsCfg.DefaultHarness != "" {
+						for i, k := range m.harnessChooserKinds {
+							if string(k) == wsCfg.DefaultHarness {
+								m.harnessChooserCursor = i
+								break
+							}
 						}
-						launchMode = launchModeFor(wsCfg.LaunchMode)
 					}
-					actionCmd := newWorktreeCmd(m.tmux, m.gitOp, m.harnOp, repoPath, branch, harnessKind, launchMode)
-					return m, tea.Batch(inputCmd, actionCmd)
+					return m, inputCmd
 
 				case "esc":
 					m.prompt = promptIdle
 					m.input.Blur()
 					m.input.SetValue("")
 					m.newWorktreeRepo = ""
+					m.newWorktreeBranch = ""
 					return m, nil
 
 				default:
@@ -644,6 +681,51 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.input, cmd = m.input.Update(msg)
 					return m, cmd
 				}
+
+			case promptChooseHarness:
+				// Harness chooser: up/down moves the cursor; enter confirms and
+				// dispatches newWorktreeCmd; esc cancels the whole flow.
+				switch msg.String() {
+				case "enter":
+					branch := m.newWorktreeBranch
+					repoPath := m.newWorktreeRepo
+					var chosenKind string
+					if len(m.harnessChooserKinds) > 0 {
+						idx := clampIndex(m.harnessChooserCursor, len(m.harnessChooserKinds))
+						chosenKind = string(m.harnessChooserKinds[idx])
+					}
+					if chosenKind == "" {
+						chosenKind = string(harness.KindOpenCode)
+					}
+					m.prompt = promptIdle
+					m.newWorktreeRepo = ""
+					m.newWorktreeBranch = ""
+					m.harnessChooserKinds = nil
+					m.harnessChooserCursor = 0
+					launchMode := m.launchMode
+					if wsCfg, err := workspace.LoadConfig(); err == nil {
+						launchMode = launchModeFor(wsCfg.LaunchMode)
+					}
+					actionCmd := newWorktreeCmd(m.tmux, m.gitOp, m.harnOp, repoPath, branch, chosenKind, launchMode)
+					return m, actionCmd
+
+				case "esc":
+					m.prompt = promptIdle
+					m.newWorktreeRepo = ""
+					m.newWorktreeBranch = ""
+					m.harnessChooserKinds = nil
+					m.harnessChooserCursor = 0
+					return m, nil
+
+				case "up", "ctrl+p":
+					m.harnessChooserCursor = clampIndex(m.harnessChooserCursor-1, len(m.harnessChooserKinds))
+					return m, nil
+
+				case "down", "ctrl+n":
+					m.harnessChooserCursor = clampIndex(m.harnessChooserCursor+1, len(m.harnessChooserKinds))
+					return m, nil
+				}
+				return m, nil
 
 			case promptAddRepo:
 				// Embedded repo finder. Enter adds the highlighted repo; the
@@ -958,8 +1040,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case worktreeCreatedMsg:
 		// A new-worktree Cmd completed. On success, set the launching overlay
-		// keyed by the post-create canonical dest. On error, clear any overlay
-		// and surface the error.
+		// keyed by the post-create canonical dest and write a create-time roster
+		// entry so the harness kind is persisted before any live-discovery
+		// snapshot arrives (Codex sessions are never live-discovered, so without
+		// this write the roster would never record the harness kind).
 		if msg.err != nil {
 			if msg.canonDest != "" && m.launching != nil {
 				delete(m.launching, msg.canonDest)
@@ -971,6 +1055,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.launching = make(map[string]time.Time)
 			}
 			m.launching[msg.canonDest] = deadline
+			// Write a create-time roster entry via the recorder's Upserts
+			// channel so the recorder's in-memory map is updated atomically
+			// with the next Save. Non-blocking: if the channel is full the
+			// write is skipped (best-effort; the entry will appear on the next
+			// live-discovery snapshot for harnesses that support it).
+			if m.rosterUpserts != nil {
+				kind := msg.harnessKind
+				if kind == "" {
+					kind = string(harness.KindOpenCode)
+				}
+				entry := workspace.RosterEntry{
+					Dir:          msg.canonDest,
+					Harness:      kind,
+					LastActivity: time.Now(),
+				}
+				select {
+				case m.rosterUpserts <- entry:
+				default:
+				}
+			}
 		}
 		return m, nil
 
@@ -1101,6 +1205,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // closeRepoFinder dismisses the embedded repo finder and resets its state,
 // returning the shared text input to idle. It persists nothing; callers that
 // selected a repo dispatch addSelectedRepoCmd before closing.
+// harnessChooserKinds returns the sorted list of harness kinds to show in the
+// chooser. It falls back to [KindOpenCode] when harnOp is nil or returns no
+// kinds, so the chooser always has at least one option.
+func harnessChooserKinds(harnOp harnessOps) []harness.Kind {
+	if harnOp == nil {
+		return []harness.Kind{harness.KindOpenCode}
+	}
+	kinds := harnOp.Kinds()
+	if len(kinds) == 0 {
+		return []harness.Kind{harness.KindOpenCode}
+	}
+	// Sort for a stable, predictable order in the UI.
+	sorted := make([]harness.Kind, len(kinds))
+	copy(sorted, kinds)
+	for i := 1; i < len(sorted); i++ {
+		for j := i; j > 0 && sorted[j] < sorted[j-1]; j-- {
+			sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
+		}
+	}
+	return sorted
+}
+
+// defaultHarnessIndex returns the index of KindOpenCode in kinds, or 0 when
+// not found. Used to pre-position the chooser cursor on the most common choice.
+func defaultHarnessIndex(kinds []harness.Kind) int {
+	for i, k := range kinds {
+		if k == harness.KindOpenCode {
+			return i
+		}
+	}
+	return 0
+}
+
 func (m *model) closeRepoFinder() {
 	m.prompt = promptIdle
 	m.input.Blur()
@@ -1110,6 +1247,32 @@ func (m *model) closeRepoFinder() {
 	m.repoFinderMatches = nil
 	m.repoFinderCursor = 0
 	m.repoFinderErr = ""
+}
+
+// renderHarnessChooser renders the harness-selection list shown in the sessions
+// pane while prompt == promptChooseHarness. The user moves the cursor with
+// up/down and confirms with enter; esc cancels the whole new-worktree flow.
+func (m model) renderHarnessChooser(width, height int) string {
+	var b strings.Builder
+	b.WriteString(headerStyle.Render("Choose harness") + "\n")
+	b.WriteString(dimStyle.Render(fmt.Sprintf("new worktree: %s / %s", filepath.Base(m.newWorktreeRepo), m.newWorktreeBranch)) + "\n")
+
+	if len(m.harnessChooserKinds) == 0 {
+		b.WriteString(dimStyle.Render("(no harnesses registered)"))
+		return b.String()
+	}
+
+	cursor := clampIndex(m.harnessChooserCursor, len(m.harnessChooserKinds))
+	for i, k := range m.harnessChooserKinds {
+		line := ansi.Truncate("  "+string(k), width-2, "…")
+		if i == cursor {
+			line = wtCursorStyle.Render(line)
+		}
+		b.WriteString(line + "\n")
+	}
+
+	b.WriteString(dimStyle.Render("↑↓ move · enter select · esc cancel"))
+	return b.String()
 }
 
 func (m model) View() string {
@@ -1200,6 +1363,8 @@ func (m model) View() string {
 	switch {
 	case m.prompt == promptAddRepo:
 		sessionContent = m.renderRepoFinder(paneW, sessionsInnerH)
+	case m.prompt == promptChooseHarness:
+		sessionContent = m.renderHarnessChooser(paneW, sessionsInnerH)
 	case len(m.workspaceRows) > 0:
 		now := m.tickNow
 		if now.IsZero() {

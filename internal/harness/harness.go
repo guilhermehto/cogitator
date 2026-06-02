@@ -112,6 +112,16 @@ func (r *Registry) Get(kind Kind) (Harness, error) {
 	return h, nil
 }
 
+// Kinds returns the registered Kind values in an unspecified order.
+// Callers that need a stable order (e.g. UI choosers) must sort the result.
+func (r *Registry) Kinds() []Kind {
+	out := make([]Kind, 0, len(r.harnesses))
+	for k := range r.harnesses {
+		out = append(out, k)
+	}
+	return out
+}
+
 // DefaultRegistry is the package-level registry populated by init functions
 // in each harness implementation file (e.g. opencode.go).
 var DefaultRegistry = newRegistry()

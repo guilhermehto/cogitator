@@ -33,9 +33,13 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 	// Start the roster recorder as a distinct subscriber. It drains snapshots
 	// in its own goroutine and writes roster.json atomically off the hot path.
 	// Cancelled by the existing defer cancel() above.
-	workspace.NewRecorder().Run(ctx, store.Subscribe())
+	rec := workspace.NewRecorder()
+	rec.Run(ctx, store.Subscribe())
 
 	m := newModel(store.Subscribe(), cfg, bellEnabled, debug, taskwarrior.NewClient())
+	// Wire the recorder's Upserts channel so the model can inject create-time
+	// roster entries (e.g. for Codex worktrees that are never live-discovered).
+	m.rosterUpserts = rec.Upserts
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
 }
