@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
 	"runtime/debug"
 
+	"github.com/guilhermehto/cogitator/internal/codex"
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/logging"
 	"github.com/guilhermehto/cogitator/internal/ui"
@@ -18,6 +20,16 @@ var (
 )
 
 func main() {
+	// Route subcommands before flag.Parse() so bare subcommand names are not
+	// misinterpreted as unknown flags.
+	if len(os.Args) > 1 && os.Args[1] == "codex-hook" {
+		if err := codex.SendHook(context.Background(), os.Stdin); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	bell := flag.Bool("bell", false, "ring terminal bell on transitions into attention states")
 	status := flag.Bool("status", false, "print a one-shot icons-only attention summary and exit")
 	demo := flag.Bool("demo", false, "run the TUI with a curated synthetic snapshot (for screenshots); no mDNS, no shell-outs")
