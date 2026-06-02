@@ -212,6 +212,11 @@ func (m model) taskPromptLine() string {
 		// tasks pane does not show a blank reserved row when promptNewWorktree
 		// is active.
 		return m.worktreePromptLine()
+	case promptConfirmDeleteWorktree, promptConfirmDeleteWorktree2:
+		// As with promptNewWorktree, the delete confirmation is primarily a
+		// sessions-pane action; mirror its line here so the reserved prompt row
+		// in the tasks pane is never blank.
+		return m.worktreeDeletePromptLine()
 	default:
 		return ""
 	}

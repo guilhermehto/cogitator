@@ -470,6 +470,27 @@ func sessionOf(target Target) string {
 	return s
 }
 
+// KillWindow closes the tmux window addressed by target (`tmux kill-window`).
+// It is used to clean up a worktree's window after the worktree directory is
+// deleted, so no dead pane pointing at a missing directory is left behind. When
+// target is the last window in its session, tmux closes the session too.
+//
+// Returns ErrNotAvailable when not inside tmux.
+func KillWindow(target Target) error {
+	return KillWindowWith(DefaultRunner, target)
+}
+
+// KillWindowWith is the injectable variant of KillWindow.
+func KillWindowWith(r Runner, target Target) error {
+	if !Available() {
+		return ErrNotAvailable
+	}
+	if _, err := r.Run("kill-window", "-t", string(target)); err != nil {
+		return fmt.Errorf("tmuxctl: kill-window %s: %w", target, err)
+	}
+	return nil
+}
+
 // ListCogDirs returns the set of canonical worktree directories that currently
 // have a tmux window tagged with @cog_dir. It runs
 // `tmux list-windows -a -F '#{@cog_dir}'` and canonicalizes each non-empty

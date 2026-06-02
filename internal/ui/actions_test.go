@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/guilhermehto/cogitator/internal/git"
 	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
@@ -36,6 +37,7 @@ type fakeTmuxOps struct {
 	ensureWindowResult tmuxctl.Target
 	ensureWindowErr   error
 	selectErr         error
+	killWindowErr     error
 
 	// Call recording.
 	findWindowCalls   []string
@@ -44,6 +46,7 @@ type fakeTmuxOps struct {
 	ensureWindowCalls  []ensureWindowCall
 	selectCalls        []tmuxctl.Target
 	selectSessionCalls []tmuxctl.Target
+	killWindowCalls    []tmuxctl.Target
 }
 
 type relaunchCall struct {
@@ -94,11 +97,24 @@ func (f *fakeTmuxOps) SelectSession(target tmuxctl.Target) error {
 	return f.selectErr
 }
 
-// fakeGitOps records AddWorktree calls and returns canned results.
+func (f *fakeTmuxOps) KillWindow(target tmuxctl.Target) error {
+	f.killWindowCalls = append(f.killWindowCalls, target)
+	return f.killWindowErr
+}
+
+// fakeGitOps records AddWorktree/RemoveWorktree/BranchMergeStatus calls and
+// returns canned results.
 type fakeGitOps struct {
 	addResult string
 	addErr    error
 	addCalls  []addWorktreeCall
+
+	removeErr   error
+	removeCalls []removeWorktreeCall
+
+	mergeState git.MergeState
+	mergeBase  string
+	mergeCalls []mergeStatusCall
 }
 
 type addWorktreeCall struct {
@@ -107,12 +123,32 @@ type addWorktreeCall struct {
 	dest     string
 }
 
+type removeWorktreeCall struct {
+	repoPath     string
+	worktreePath string
+}
+
+type mergeStatusCall struct {
+	repoPath string
+	branch   string
+}
+
 func (f *fakeGitOps) AddWorktree(repoPath, branch, dest string) (string, error) {
 	f.addCalls = append(f.addCalls, addWorktreeCall{repoPath: repoPath, branch: branch, dest: dest})
 	if f.addResult != "" {
 		return f.addResult, f.addErr
 	}
 	return dest, f.addErr
+}
+
+func (f *fakeGitOps) RemoveWorktree(repoPath, worktreePath string) error {
+	f.removeCalls = append(f.removeCalls, removeWorktreeCall{repoPath: repoPath, worktreePath: worktreePath})
+	return f.removeErr
+}
+
+func (f *fakeGitOps) BranchMergeStatus(repoPath, branch string) (git.MergeState, string) {
+	f.mergeCalls = append(f.mergeCalls, mergeStatusCall{repoPath: repoPath, branch: branch})
+	return f.mergeState, f.mergeBase
 }
 
 // fakeHarnessOps returns a fixed argv for any kind.
@@ -795,5 +831,340 @@ func TestRenderWorkspaceRowsShowsTmuxHint(t *testing.T) {
 	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
 	if !strings.Contains(got, "tmux not available") {
 		t.Fatalf("tmuxHint must appear in rendered output, got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 'D' key: delete worktree — guards and confirmation entry
+// ---------------------------------------------------------------------------
+
+func TestDKeyOpensDeleteConfirmAndProbesMerge(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{available: true}
+	gitFake := &fakeGitOps{mergeState: git.MergeMerged, mergeBase: "main"}
+	m := makeTestModel(tmuxFake, gitFake, &fakeHarnessOps{}, []workspace.Row{
+		makeRow("/r", "/r/a", "feat", "title", workspace.StateStopped, state.AttnInactive, fixedNow),
+	})
+
+	updated, cmd := m.Update(keyMsg("D"))
+	m2 := updated.(model)
+
+	if m2.prompt != promptConfirmDeleteWorktree {
+		t.Fatalf("prompt = %v, want promptConfirmDeleteWorktree", m2.prompt)
+	}
+	if m2.deleteTarget.Worktree != "/r/a" {
+		t.Errorf("deleteTarget.Worktree = %q, want /r/a", m2.deleteTarget.Worktree)
+	}
+	// The Cmd must be the async merge probe.
+	msg := runCmd(cmd)
+	result, ok := msg.(mergeStatusMsg)
+	if !ok {
+		t.Fatalf("expected mergeStatusMsg, got %T", msg)
+	}
+	if result.path != "/r/a" {
+		t.Errorf("mergeStatusMsg path = %q, want /r/a", result.path)
+	}
+	if len(gitFake.mergeCalls) != 1 || gitFake.mergeCalls[0].branch != "feat" {
+		t.Errorf("expected BranchMergeStatus(_, feat), got %+v", gitFake.mergeCalls)
+	}
+}
+
+func TestDKeyOnMainWorktreeShowsHint(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{available: true}
+	m := makeTestModel(tmuxFake, &fakeGitOps{}, &fakeHarnessOps{}, []workspace.Row{
+		// Worktree == Repo → the repository's primary worktree.
+		makeRow("/r", "/r", "main", "title", workspace.StateRunning, state.AttnActive, fixedNow),
+	})
+
+	updated, cmd := m.Update(keyMsg("D"))
+	m2 := updated.(model)
+
+	if m2.prompt != promptIdle {
+		t.Errorf("prompt = %v, want promptIdle (main worktree guarded)", m2.prompt)
+	}
+	if m2.tmuxHint == "" {
+		t.Error("deleting the main worktree must set a hint")
+	}
+	if cmd != nil {
+		t.Error("guarded delete must not dispatch a cmd")
+	}
+}
+
+func TestDKeyOnUnconfiguredRowShowsHint(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{available: true}
+	m := makeTestModel(tmuxFake, &fakeGitOps{}, &fakeHarnessOps{}, []workspace.Row{
+		// Repo == "" → not part of a configured repo.
+		makeRow("", "/somewhere/wt", "feat", "title", workspace.StateRunning, state.AttnActive, fixedNow),
+	})
+
+	updated, _ := m.Update(keyMsg("D"))
+	m2 := updated.(model)
+
+	if m2.prompt != promptIdle {
+		t.Errorf("prompt = %v, want promptIdle (unconfigured row guarded)", m2.prompt)
+	}
+	if m2.tmuxHint == "" {
+		t.Error("deleting an unconfigured row must set a hint")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Double confirmation transitions
+// ---------------------------------------------------------------------------
+
+func TestDeleteConfirmFirstYAdvancesToSecond(t *testing.T) {
+	m := model{
+		width:        120,
+		prompt:       promptConfirmDeleteWorktree,
+		deleteTarget: makeRow("/r", "/r/a", "feat", "", workspace.StateStopped, state.AttnInactive, fixedNow),
+	}
+
+	updated, cmd := m.Update(keyMsg("y"))
+	m2 := updated.(model)
+
+	if m2.prompt != promptConfirmDeleteWorktree2 {
+		t.Fatalf("prompt = %v, want promptConfirmDeleteWorktree2", m2.prompt)
+	}
+	if cmd != nil {
+		t.Error("advancing to the second confirm must not dispatch a cmd")
+	}
+	if m2.deleteTarget.Worktree != "/r/a" {
+		t.Error("deleteTarget must persist across the first confirm")
+	}
+}
+
+func TestDeleteConfirmFirstEscCancels(t *testing.T) {
+	m := model{
+		width:           120,
+		prompt:          promptConfirmDeleteWorktree,
+		deleteTarget:    makeRow("/r", "/r/a", "feat", "", workspace.StateStopped, state.AttnInactive, fixedNow),
+		deleteMergeInfo: "merged into main",
+	}
+
+	updated, cmd := m.Update(keyMsg("esc"))
+	m2 := updated.(model)
+
+	if m2.prompt != promptIdle {
+		t.Errorf("esc must cancel the first confirm, prompt = %v", m2.prompt)
+	}
+	if m2.deleteTarget.Worktree != "" {
+		t.Error("cancel must clear deleteTarget")
+	}
+	if m2.deleteMergeInfo != "" {
+		t.Error("cancel must clear deleteMergeInfo")
+	}
+	if cmd != nil {
+		t.Error("cancel must not dispatch a cmd (and must not quit)")
+	}
+}
+
+// The second confirmation defaults to cancel: every key other than 'y' aborts
+// without deleting — including enter and esc.
+func TestDeleteConfirmSecondDefaultCancels(t *testing.T) {
+	for _, key := range []string{"n", "N", "esc", "enter"} {
+		m := model{
+			width:        120,
+			prompt:       promptConfirmDeleteWorktree2,
+			deleteTarget: makeRow("/r", "/r/a", "feat", "", workspace.StateStopped, state.AttnInactive, fixedNow),
+			tmux:         &fakeTmuxOps{available: true},
+			gitOp:        &fakeGitOps{},
+		}
+
+		updated, cmd := m.Update(keyMsg(key))
+		m2 := updated.(model)
+
+		if m2.prompt != promptIdle {
+			t.Errorf("key %q: prompt = %v, want promptIdle (default cancel)", key, m2.prompt)
+		}
+		if cmd != nil {
+			t.Errorf("key %q: second confirm default must not dispatch a delete cmd", key)
+		}
+		if m2.deleteTarget.Worktree != "" {
+			t.Errorf("key %q: cancel must clear deleteTarget", key)
+		}
+	}
+}
+
+func TestDeleteWorktreeFullConfirmFlowDispatchesRemove(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{available: true, findWindowErr: tmuxctl.ErrWindowNotFound}
+	gitFake := &fakeGitOps{mergeState: git.MergeMerged, mergeBase: "main"}
+	m := makeTestModel(tmuxFake, gitFake, &fakeHarnessOps{}, []workspace.Row{
+		makeRow("/r", "/r/a", "feat", "title", workspace.StateStopped, state.AttnInactive, fixedNow),
+	})
+
+	// D → first confirm.
+	u1, _ := m.Update(keyMsg("D"))
+	m1 := u1.(model)
+	if m1.prompt != promptConfirmDeleteWorktree {
+		t.Fatalf("after D, prompt = %v", m1.prompt)
+	}
+	// y → second confirm.
+	u2, _ := m1.Update(keyMsg("y"))
+	m2 := u2.(model)
+	if m2.prompt != promptConfirmDeleteWorktree2 {
+		t.Fatalf("after first y, prompt = %v", m2.prompt)
+	}
+	// y → dispatch delete.
+	u3, cmd := m2.Update(keyMsg("y"))
+	m3 := u3.(model)
+	if m3.prompt != promptIdle {
+		t.Fatalf("after second y, prompt = %v, want promptIdle", m3.prompt)
+	}
+	result, ok := runCmd(cmd).(worktreeDeletedMsg)
+	if !ok {
+		t.Fatalf("expected worktreeDeletedMsg")
+	}
+	if result.err != nil {
+		t.Errorf("unexpected error: %v", result.err)
+	}
+	if len(gitFake.removeCalls) != 1 {
+		t.Fatalf("expected 1 RemoveWorktree call, got %d", len(gitFake.removeCalls))
+	}
+	if gitFake.removeCalls[0].repoPath != "/r" || gitFake.removeCalls[0].worktreePath != "/r/a" {
+		t.Errorf("RemoveWorktree args = %+v, want {/r /r/a}", gitFake.removeCalls[0])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// deleteWorktreeCmd: remove + best-effort window kill
+// ---------------------------------------------------------------------------
+
+func TestDeleteWorktreeCmdRemovesAndKillsWindow(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{available: true, findWindowResult: "main:2"}
+	gitFake := &fakeGitOps{}
+
+	result, ok := runCmd(deleteWorktreeCmd(tmuxFake, gitFake, "/r", "/r/a")).(worktreeDeletedMsg)
+	if !ok {
+		t.Fatalf("expected worktreeDeletedMsg")
+	}
+	if result.err != nil {
+		t.Errorf("unexpected error: %v", result.err)
+	}
+	if len(gitFake.removeCalls) != 1 {
+		t.Fatalf("expected 1 RemoveWorktree call, got %d", len(gitFake.removeCalls))
+	}
+	if len(tmuxFake.killWindowCalls) != 1 || tmuxFake.killWindowCalls[0] != "main:2" {
+		t.Errorf("expected KillWindow(main:2), got %v", tmuxFake.killWindowCalls)
+	}
+}
+
+func TestDeleteWorktreeCmdGitErrorSkipsWindowKill(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{available: true, findWindowResult: "main:2"}
+	gitFake := &fakeGitOps{removeErr: errors.New("worktree contains modified or untracked files")}
+
+	result, ok := runCmd(deleteWorktreeCmd(tmuxFake, gitFake, "/r", "/r/a")).(worktreeDeletedMsg)
+	if !ok {
+		t.Fatalf("expected worktreeDeletedMsg")
+	}
+	if result.err == nil {
+		t.Fatal("expected error from git refusal, got nil")
+	}
+	if len(tmuxFake.killWindowCalls) != 0 {
+		t.Errorf("a failed removal must not kill any window, got %v", tmuxFake.killWindowCalls)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// worktreeDeletedMsg + mergeStatusMsg handlers
+// ---------------------------------------------------------------------------
+
+func TestWorktreeDeletedMsgRemovesRowAndClampsCursor(t *testing.T) {
+	m := model{
+		width: 120,
+		workspaceRows: []workspace.Row{
+			makeRow("/r", "/r/a", "main", "a", workspace.StateRunning, state.AttnActive, fixedNow),
+			makeRow("/r", "/r/b", "feat", "b", workspace.StateStopped, state.AttnInactive, fixedNow),
+		},
+		sessionCursor: 1,
+	}
+
+	updated, _ := m.Update(worktreeDeletedMsg{path: "/r/b"})
+	m2 := updated.(model)
+
+	if len(m2.workspaceRows) != 1 {
+		t.Fatalf("expected 1 row after deletion, got %d", len(m2.workspaceRows))
+	}
+	if m2.workspaceRows[0].Worktree != "/r/a" {
+		t.Errorf("wrong row remained: %q", m2.workspaceRows[0].Worktree)
+	}
+	if m2.sessionCursor != 0 {
+		t.Errorf("cursor = %d, want 0 (clamped)", m2.sessionCursor)
+	}
+}
+
+func TestWorktreeDeletedMsgErrorSetsHintKeepsRow(t *testing.T) {
+	m := model{
+		width: 120,
+		workspaceRows: []workspace.Row{
+			makeRow("/r", "/r/a", "main", "a", workspace.StateRunning, state.AttnActive, fixedNow),
+		},
+	}
+
+	updated, _ := m.Update(worktreeDeletedMsg{path: "/r/a", err: errors.New("modified files")})
+	m2 := updated.(model)
+
+	if len(m2.workspaceRows) != 1 {
+		t.Fatalf("a failed deletion must keep the row, got %d rows", len(m2.workspaceRows))
+	}
+	if !strings.Contains(m2.tmuxHint, "delete failed") {
+		t.Errorf("error must set a 'delete failed' hint, got %q", m2.tmuxHint)
+	}
+}
+
+func TestMergeStatusMsgUpdatesDeleteInfoWhenTargetMatches(t *testing.T) {
+	m := model{
+		width:        120,
+		prompt:       promptConfirmDeleteWorktree,
+		deleteTarget: makeRow("/r", "/r/a", "feat", "", workspace.StateStopped, state.AttnInactive, fixedNow),
+	}
+
+	updated, _ := m.Update(mergeStatusMsg{path: "/r/a", state: git.MergeNotMerged, base: "main"})
+	m2 := updated.(model)
+
+	if !strings.Contains(m2.deleteMergeInfo, "NOT merged into main") {
+		t.Errorf("deleteMergeInfo = %q, want to contain 'NOT merged into main'", m2.deleteMergeInfo)
+	}
+}
+
+func TestMergeStatusMsgIgnoredWhenPathMismatch(t *testing.T) {
+	m := model{
+		width:        120,
+		prompt:       promptConfirmDeleteWorktree,
+		deleteTarget: makeRow("/r", "/r/a", "feat", "", workspace.StateStopped, state.AttnInactive, fixedNow),
+	}
+
+	updated, _ := m.Update(mergeStatusMsg{path: "/r/OTHER", state: git.MergeMerged, base: "main"})
+	m2 := updated.(model)
+
+	if m2.deleteMergeInfo != "" {
+		t.Errorf("a stale mergeStatusMsg for a different path must be ignored, got %q", m2.deleteMergeInfo)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Render: delete confirmation prompt
+// ---------------------------------------------------------------------------
+
+func TestRenderWorktreeDeletePromptShowsMergeAndPermanent(t *testing.T) {
+	base := makeRow("/r", "/r/a", "feat/x", "", workspace.StateStopped, state.AttnInactive, fixedNow)
+
+	m1 := model{width: 200, prompt: promptConfirmDeleteWorktree, deleteTarget: base, deleteMergeInfo: "NOT merged into main"}
+	got1 := m1.renderWorkspaceRows(200, []workspace.Row{base}, 0, fixedNow)
+	if !strings.Contains(got1, "delete worktree") || !strings.Contains(got1, "NOT merged into main") {
+		t.Fatalf("first confirm must show the prompt and merge info, got %q", got1)
+	}
+
+	m2 := model{width: 200, prompt: promptConfirmDeleteWorktree2, deleteTarget: base, deleteMergeInfo: "NOT merged into main"}
+	got2 := m2.renderWorkspaceRows(200, []workspace.Row{base}, 0, fixedNow)
+	if !strings.Contains(got2, "PERMANENTLY") {
+		t.Fatalf("second confirm must warn 'PERMANENTLY', got %q", got2)
+	}
+}
+
+func TestRenderWorktreeDeletePromptShowsCheckingBeforeProbe(t *testing.T) {
+	base := makeRow("/r", "/r/a", "feat", "", workspace.StateStopped, state.AttnInactive, fixedNow)
+	m := model{width: 200, prompt: promptConfirmDeleteWorktree, deleteTarget: base}
+	got := m.renderWorkspaceRows(200, []workspace.Row{base}, 0, fixedNow)
+	if !strings.Contains(got, "checking merge status") {
+		t.Fatalf("pre-probe prompt must show 'checking merge status…', got %q", got)
 	}
 }

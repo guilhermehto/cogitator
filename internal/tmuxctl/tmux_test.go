@@ -542,6 +542,42 @@ func TestSelect_RunnerError(t *testing.T) {
 	}
 }
 
+// ---- KillWindow -------------------------------------------------------------
+
+func TestKillWindow_NotAvailable(t *testing.T) {
+	withoutTMUX(t)
+	r := &fakeRunner{}
+	if err := KillWindowWith(r, "main:1"); !errors.Is(err, ErrNotAvailable) {
+		t.Errorf("KillWindowWith: got %v, want ErrNotAvailable", err)
+	}
+	if len(r.calls) != 0 {
+		t.Errorf("expected no tmux calls when not available, got %d", len(r.calls))
+	}
+}
+
+func TestKillWindow_BuildsCorrectArgv(t *testing.T) {
+	withTMUX(t)
+
+	r := &fakeRunner{}
+	r.push("", nil)
+
+	if err := KillWindowWith(r, "main:3"); err != nil {
+		t.Fatalf("KillWindowWith: unexpected error: %v", err)
+	}
+	assertCall(t, r, 0, "kill-window", "-t", "main:3")
+}
+
+func TestKillWindow_RunnerError(t *testing.T) {
+	withTMUX(t)
+
+	r := &fakeRunner{}
+	r.push("", errors.New("no such window"))
+
+	if err := KillWindowWith(r, "main:99"); err == nil {
+		t.Error("expected error when runner fails, got nil")
+	}
+}
+
 // ---- ListCogDirs ------------------------------------------------------------
 
 func TestListCogDirs_NotAvailable(t *testing.T) {

@@ -89,6 +89,9 @@ var (
 	wtCursorStyle = lipgloss.NewStyle().Reverse(true)
 	// wtRepoStyle renders the repo group header.
 	wtRepoStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63"))
+	// wtPathStyle renders the faded-italic path annotation shown next to a repo
+	// header (the repo path) and next to each session row (the worktree/branch).
+	wtPathStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
 	// wtHintStyle renders the transient tmux hint line.
 	wtHintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Italic(true)
 )
@@ -415,6 +418,9 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 		if m.prompt == promptNewWorktree {
 			b.WriteString("\n" + m.worktreePromptLine())
 		}
+		if m.prompt == promptConfirmDeleteWorktree || m.prompt == promptConfirmDeleteWorktree2 {
+			b.WriteString("\n" + m.worktreeDeletePromptLine())
+		}
 		return b.String()
 	}
 
@@ -441,12 +447,17 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 	}
 
 	for _, g := range groups {
-		// Repo header: show the base name of the repo path.
-		repoLabel := filepath.Base(g.repo)
+		// Repo header: bold base name, with the full (home-shortened) repo
+		// path in faded italic next to it. The synthetic "(unconfigured)"
+		// group has no real path to annotate.
+		var header string
 		if g.repo == "(unconfigured)" {
-			repoLabel = g.repo
+			header = wtRepoStyle.Render("  " + g.repo)
+		} else {
+			header = wtRepoStyle.Render("  "+filepath.Base(g.repo)) +
+				"  " + wtPathStyle.Render(shortenDirectory(g.repo))
 		}
-		b.WriteString(wtRepoStyle.Render("  "+repoLabel) + "\n")
+		b.WriteString(header + "\n")
 
 		for _, i := range g.rows {
 			row := rows[i]
@@ -477,6 +488,12 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 	// of taskwarrior. Placed after the hint so it is always the last visible line.
 	if m.prompt == promptNewWorktree {
 		b.WriteString(m.worktreePromptLine() + "\n")
+	}
+
+	// Render the worktree delete confirmation (first or second step) as the
+	// last visible line so it reads as the active modal.
+	if m.prompt == promptConfirmDeleteWorktree || m.prompt == promptConfirmDeleteWorktree2 {
+		b.WriteString(m.worktreeDeletePromptLine() + "\n")
 	}
 
 	return b.String()
@@ -546,6 +563,32 @@ func (m model) renderRepoFinder(width, height int) string {
 	return b.String()
 }
 
+// worktreeDeletePromptLine returns the styled confirmation line shown while a
+// worktree deletion is being confirmed. The first confirmation is a warning
+// tone; the second is rendered in the error style and spells out that it is
+// permanent and defaults to cancel. Both surface the branch and its merge
+// status so the user can judge whether removing the worktree loses work.
+func (m model) worktreeDeletePromptLine() string {
+	branch := m.deleteTarget.Branch
+	if branch == "" {
+		branch = filepath.Base(m.deleteTarget.Worktree)
+	}
+	info := m.deleteMergeInfo
+	if info == "" {
+		info = "checking merge status…"
+	}
+	switch m.prompt {
+	case promptConfirmDeleteWorktree:
+		return wtHintStyle.Render(fmt.Sprintf(
+			"delete worktree [%s] — %s? press y to continue, any other key cancels", branch, info))
+	case promptConfirmDeleteWorktree2:
+		return attnErrStyle.Render(fmt.Sprintf(
+			"PERMANENTLY delete worktree [%s] (%s)? y to delete · any other key cancels (default: cancel)", branch, info))
+	default:
+		return ""
+	}
+}
+
 // worktreeSessionWidth returns the width of the session/title column for a
 // worktree row: the inner width minus the left status column, the right
 // activity column, and the two gaps between the three columns. Clamped to 1.
@@ -576,7 +619,7 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int, isLaunching 
 		statusCell := wtLaunchingStyle.Render(glyphWtLaunching) + " "
 		titleStr := wtLaunchingStyle.Render("launching…")
 		if row.Branch != "" {
-			titleStr += "  " + dimStyle.Render("["+row.Branch+"]")
+			titleStr += "  " + wtPathStyle.Render("["+row.Branch+"]")
 		}
 		cells := []string{
 			padCell(statusCell, colStateW, lipgloss.Left),
@@ -643,9 +686,10 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int, isLaunching 
 		titleStr = dimStyle.Render(filepath.Base(row.Worktree))
 	}
 
-	// Branch annotation (shown for non-running rows where branch is known).
-	if row.Branch != "" && row.State != workspace.StateRunning {
-		titleStr += "  " + dimStyle.Render("["+row.Branch+"]")
+	// Branch annotation: the git worktree/branch name next to every row whose
+	// branch is known, in faded italic.
+	if row.Branch != "" {
+		titleStr += "  " + wtPathStyle.Render("["+row.Branch+"]")
 	}
 
 	// Activity column: relative last-activity for stopped/unknown rows.
