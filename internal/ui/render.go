@@ -415,6 +415,9 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 		if m.prompt == promptNewWorktree {
 			b.WriteString("\n" + m.worktreePromptLine())
 		}
+		if m.prompt == promptConfirmDeleteWorktree || m.prompt == promptConfirmDeleteWorktree2 {
+			b.WriteString("\n" + m.worktreeDeletePromptLine())
+		}
 		return b.String()
 	}
 
@@ -479,6 +482,12 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 		b.WriteString(m.worktreePromptLine() + "\n")
 	}
 
+	// Render the worktree delete confirmation (first or second step) as the
+	// last visible line so it reads as the active modal.
+	if m.prompt == promptConfirmDeleteWorktree || m.prompt == promptConfirmDeleteWorktree2 {
+		b.WriteString(m.worktreeDeletePromptLine() + "\n")
+	}
+
 	return b.String()
 }
 
@@ -488,6 +497,32 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 // renderWorkspaceRows produce the same label, and taskPromptLine can reuse it.
 func (m model) worktreePromptLine() string {
 	return wtHintStyle.Render("new worktree branch: ") + m.input.View()
+}
+
+// worktreeDeletePromptLine returns the styled confirmation line shown while a
+// worktree deletion is being confirmed. The first confirmation is a warning
+// tone; the second is rendered in the error style and spells out that it is
+// permanent and defaults to cancel. Both surface the branch and its merge
+// status so the user can judge whether removing the worktree loses work.
+func (m model) worktreeDeletePromptLine() string {
+	branch := m.deleteTarget.Branch
+	if branch == "" {
+		branch = filepath.Base(m.deleteTarget.Worktree)
+	}
+	info := m.deleteMergeInfo
+	if info == "" {
+		info = "checking merge status…"
+	}
+	switch m.prompt {
+	case promptConfirmDeleteWorktree:
+		return wtHintStyle.Render(fmt.Sprintf(
+			"delete worktree [%s] — %s? press y to continue, any other key cancels", branch, info))
+	case promptConfirmDeleteWorktree2:
+		return attnErrStyle.Render(fmt.Sprintf(
+			"PERMANENTLY delete worktree [%s] (%s)? y to delete · any other key cancels (default: cancel)", branch, info))
+	default:
+		return ""
+	}
 }
 
 // worktreeSessionWidth returns the width of the session/title column for a
