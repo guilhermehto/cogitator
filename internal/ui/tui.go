@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/guilhermehto/cogitator/internal/codex"
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/provider"
 	"github.com/guilhermehto/cogitator/internal/state"
@@ -34,6 +35,10 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 	ocProvider := supervisor.NewOpenCodeProvider(sup, cfg, logger)
 	var mgr provider.Manager
 	mgr.Register(ocProvider)
+	if cfg.CodexEnabled {
+		codexProvider := codex.NewProvider(cfg.CodexHome, cfg.CodexPollInterval, cfg.CodexRecencyWindow, logger)
+		mgr.Register(codexProvider)
+	}
 	mgr.Start(ctx, store)
 
 	// Start the roster recorder as a distinct subscriber. It drains snapshots

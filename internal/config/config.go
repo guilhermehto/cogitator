@@ -1,6 +1,9 @@
 package config
 
-import "time"
+import (
+	"os"
+	"time"
+)
 
 // Config centralizes runtime tunables. Values are currently static defaults;
 // no env or file-based overrides are wired yet.
@@ -24,6 +27,24 @@ type Config struct {
 	// attention (permission, question, error) are never hidden regardless
 	// of age. A non-positive value disables the rule.
 	InactiveHideAfter time.Duration
+
+	// CodexEnabled enables the polled Codex session monitor. Default false.
+	// When false, no Codex provider is started and cogitator behaves exactly
+	// as before Codex support was added.
+	CodexEnabled bool
+
+	// CodexHome is the path to the Codex home directory (CODEX_HOME). When
+	// empty the provider defaults to ~/.codex (resolved by the reader).
+	// Populated from the CODEX_HOME environment variable in Default().
+	CodexHome string
+
+	// CodexPollInterval is how often the Codex provider polls CODEX_HOME.
+	CodexPollInterval time.Duration
+
+	// CodexRecencyWindow is the duration within which a session's last
+	// activity is considered "live" (SourceLive). Sessions older than this
+	// window are labelled SourceRecent.
+	CodexRecencyWindow time.Duration
 }
 
 func Default() *Config {
@@ -43,5 +64,10 @@ func Default() *Config {
 		SessionLookupTimeout:    5 * time.Second,
 		UnreachableThreshold:    3,
 		InactiveHideAfter:       5 * time.Minute,
+
+		CodexEnabled:       false,
+		CodexHome:          os.Getenv("CODEX_HOME"),
+		CodexPollInterval:  5 * time.Second,
+		CodexRecencyWindow: 30 * time.Minute,
 	}
 }
