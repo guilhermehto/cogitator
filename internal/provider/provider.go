@@ -96,6 +96,13 @@ type Sink interface {
 	// ClearProviderInstance removes all sessions for a provider instance
 	// (e.g. when an opencode process disappears from mDNS).
 	ClearProviderInstance(providerKind harness.Kind, instanceID string)
+
+	// ReplaceProviderInstance atomically replaces the full session set for
+	// (providerKind, instanceID) with updates. It publishes exactly one
+	// snapshot when the set changes, and zero snapshots when it is
+	// identical to the current set. Sessions for other providers or
+	// instances are never touched.
+	ReplaceProviderInstance(providerKind harness.Kind, instanceID string, updates []SessionUpdate)
 }
 
 // Provider is the interface any local coding-agent monitor must implement to

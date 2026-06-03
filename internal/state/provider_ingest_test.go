@@ -277,6 +277,221 @@ func TestClearProviderInstance(t *testing.T) {
 	}
 }
 
+// ── ReplaceProviderInstance tests ─────────────────────────────────────────────
+
+// drainSnapshots reads all snapshots currently buffered in ch without blocking.
+func drainSnapshots(ch <-chan Snapshot) []Snapshot {
+	var out []Snapshot
+	for {
+		select {
+		case s := <-ch:
+			out = append(out, s)
+		default:
+			return out
+		}
+	}
+}
+
+// countSessionsForProvider counts sessions in snap belonging to providerKind.
+func countSessionsForProvider(snap Snapshot, providerKind harness.Kind) int {
+	n := 0
+	for _, sv := range snap.Sessions {
+		if sv.Provider == providerKind {
+			n++
+		}
+	}
+	return n
+}
+
+// makeUpdate builds a minimal SessionUpdate for (codex, "codex", sessionID).
+func makeUpdate(sessionID, statusType string, lastActivity time.Time) provider.SessionUpdate {
+	return provider.SessionUpdate{
+		Provider:     harness.KindCodex,
+		InstanceID:   "codex",
+		SessionID:    sessionID,
+		StatusType:   statusType,
+		LastActivity: lastActivity,
+		Source:       "live",
+	}
+}
+
+// TestReplaceProviderInstance_SinglePublishOnChange verifies that a call with N
+// updates for (codex,"codex") replacing a prior set emits exactly one snapshot
+// containing all N sessions — no empty intermediate snapshot is observable.
+func TestReplaceProviderInstance_SinglePublishOnChange(t *testing.T) {
+	ctx := context.Background()
+	s := newProviderTestStore(ctx)
+	now := time.Unix(1_700_000, 0)
+	s.now = func() time.Time { return now }
+
+	ch := s.Subscribe()
+	// Drain the initial snapshot emitted by Subscribe.
+	drainSnapshots(ch)
+
+	updates := []provider.SessionUpdate{
+		makeUpdate("ses-1", "busy", now),
+		makeUpdate("ses-2", "idle", now),
+		makeUpdate("ses-3", "busy", now),
+	}
+	s.ReplaceProviderInstance(harness.KindCodex, "codex", updates)
+
+	snaps := drainSnapshots(ch)
+	if len(snaps) != 1 {
+		t.Fatalf("expected exactly 1 snapshot, got %d", len(snaps))
+	}
+	snap := snaps[0]
+	if n := countSessionsForProvider(snap, harness.KindCodex); n != 3 {
+		t.Errorf("snapshot has %d codex sessions, want 3", n)
+	}
+	// Verify no intermediate empty snapshot was published.
+	for _, sv := range snap.Sessions {
+		if sv.Provider == harness.KindCodex && sv.SessionID == "" {
+			t.Error("snapshot contains a codex session with empty SessionID")
+		}
+	}
+}
+
+// TestReplaceProviderInstance_ZeroPublishWhenUnchanged verifies that calling
+// ReplaceProviderInstance with an identical set emits zero snapshots.
+func TestReplaceProviderInstance_ZeroPublishWhenUnchanged(t *testing.T) {
+	ctx := context.Background()
+	s := newProviderTestStore(ctx)
+	now := time.Unix(1_700_000, 0)
+	s.now = func() time.Time { return now }
+
+	updates := []provider.SessionUpdate{
+		makeUpdate("ses-1", "busy", now),
+		makeUpdate("ses-2", "idle", now),
+	}
+	// First call — establishes the set.
+	s.ReplaceProviderInstance(harness.KindCodex, "codex", updates)
+
+	ch := s.Subscribe()
+	drainSnapshots(ch) // drain initial snapshot
+
+	// Second call with identical set — must produce zero snapshots.
+	s.ReplaceProviderInstance(harness.KindCodex, "codex", updates)
+
+	snaps := drainSnapshots(ch)
+	if len(snaps) != 0 {
+		t.Errorf("expected 0 snapshots for identical replace, got %d", len(snaps))
+	}
+}
+
+// TestReplaceProviderInstance_PrunesRemovedSessions verifies that a prior set
+// {A,B,C} replaced by {A,B} produces a snapshot omitting C and including A,B.
+func TestReplaceProviderInstance_PrunesRemovedSessions(t *testing.T) {
+	ctx := context.Background()
+	s := newProviderTestStore(ctx)
+	now := time.Unix(1_700_000, 0)
+	s.now = func() time.Time { return now }
+
+	// Establish {A, B, C}.
+	s.ReplaceProviderInstance(harness.KindCodex, "codex", []provider.SessionUpdate{
+		makeUpdate("A", "idle", now),
+		makeUpdate("B", "idle", now),
+		makeUpdate("C", "idle", now),
+	})
+
+	ch := s.Subscribe()
+	drainSnapshots(ch)
+
+	// Replace with {A, B} — C must be pruned.
+	s.ReplaceProviderInstance(harness.KindCodex, "codex", []provider.SessionUpdate{
+		makeUpdate("A", "idle", now),
+		makeUpdate("B", "idle", now),
+	})
+
+	snaps := drainSnapshots(ch)
+	if len(snaps) != 1 {
+		t.Fatalf("expected 1 snapshot after pruning, got %d", len(snaps))
+	}
+	snap := snaps[0]
+	ids := map[string]bool{}
+	for _, sv := range snap.Sessions {
+		if sv.Provider == harness.KindCodex {
+			ids[sv.SessionID] = true
+		}
+	}
+	if ids["C"] {
+		t.Error("session C survived replace — should have been pruned")
+	}
+	if !ids["A"] || !ids["B"] {
+		t.Errorf("sessions A and B must survive; got ids=%v", ids)
+	}
+}
+
+// TestReplaceProviderInstance_ScopedToProviderInstance verifies that rows for
+// other providers/instances are never touched by a replace call.
+func TestReplaceProviderInstance_ScopedToProviderInstance(t *testing.T) {
+	ctx := context.Background()
+	s := newProviderTestStore(ctx)
+	now := time.Unix(1_700_000, 0)
+	s.now = func() time.Time { return now }
+
+	// Seed a session from a different provider.
+	s.ApplyUpdate(provider.SessionUpdate{
+		Provider:     harness.Kind("opencode-provider"),
+		InstanceID:   "other-inst",
+		SessionID:    "other-ses",
+		StatusType:   "idle",
+		LastActivity: now,
+		Source:       "live",
+	})
+
+	// Replace codex sessions — must not touch the other provider's row.
+	s.ReplaceProviderInstance(harness.KindCodex, "codex", []provider.SessionUpdate{
+		makeUpdate("codex-ses", "busy", now),
+	})
+
+	snap := s.snapshot()
+	var otherFound bool
+	for _, sv := range snap.Sessions {
+		if sv.Provider == harness.Kind("opencode-provider") && sv.SessionID == "other-ses" {
+			otherFound = true
+		}
+	}
+	if !otherFound {
+		t.Error("other-provider session was incorrectly removed by ReplaceProviderInstance")
+	}
+}
+
+// TestReplaceProviderInstance_HookSeededSessionIdempotent verifies that a
+// hook-seeded session present in two consecutive identical replaces with no new
+// hook event produces zero snapshots on the second replace (struct == holds
+// because timestamps are stored once and reused).
+func TestReplaceProviderInstance_HookSeededSessionIdempotent(t *testing.T) {
+	ctx := context.Background()
+	s := newProviderTestStore(ctx)
+	// Use a fixed now so LastActivity is identical across both calls.
+	now := time.Unix(1_700_000, 0)
+	s.now = func() time.Time { return now }
+
+	hookSeeded := provider.SessionUpdate{
+		Provider:      harness.KindCodex,
+		InstanceID:    "codex",
+		SessionID:     "hook-ses",
+		StatusType:    "busy",
+		HasPermission: true,
+		LastActivity:  now, // stored once, reused — struct == holds
+		Source:        "live",
+	}
+
+	// First replace — establishes the hook-seeded session.
+	s.ReplaceProviderInstance(harness.KindCodex, "codex", []provider.SessionUpdate{hookSeeded})
+
+	ch := s.Subscribe()
+	drainSnapshots(ch)
+
+	// Second replace with identical update — must produce zero snapshots.
+	s.ReplaceProviderInstance(harness.KindCodex, "codex", []provider.SessionUpdate{hookSeeded})
+
+	snaps := drainSnapshots(ch)
+	if len(snaps) != 0 {
+		t.Errorf("expected 0 snapshots for identical hook-seeded replace, got %d", len(snaps))
+	}
+}
+
 // TestOpenCodeApplyEventPathUnchanged verifies that the existing opencode
 // ApplyEvent path produces identical snapshot behavior after the dedup re-key.
 func TestOpenCodeApplyEventPathUnchanged(t *testing.T) {

@@ -27,6 +27,8 @@ func (r *recordingSink) ClearProviderInstance(p harness.Kind, instanceID string)
 	r.cleared = append(r.cleared, struct{ provider harness.Kind; instance string }{p, instanceID})
 }
 
+func (r *recordingSink) ReplaceProviderInstance(_ harness.Kind, _ string, _ []provider.SessionUpdate) {}
+
 // Compile-time check: recordingSink satisfies provider.Sink.
 var _ provider.Sink = (*recordingSink)(nil)
 
