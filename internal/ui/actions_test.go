@@ -38,6 +38,7 @@ type fakeTmuxOps struct {
 	ensureWindowErr    error
 	selectErr          error
 	killWindowErr      error
+	killSessionErr     error
 
 	// Call recording.
 	findWindowCalls    []string
@@ -47,6 +48,7 @@ type fakeTmuxOps struct {
 	selectCalls        []tmuxctl.Target
 	selectSessionCalls []tmuxctl.Target
 	killWindowCalls    []tmuxctl.Target
+	killSessionCalls   []tmuxctl.Target
 }
 
 type relaunchCall struct {
@@ -100,6 +102,11 @@ func (f *fakeTmuxOps) SelectSession(target tmuxctl.Target) error {
 func (f *fakeTmuxOps) KillWindow(target tmuxctl.Target) error {
 	f.killWindowCalls = append(f.killWindowCalls, target)
 	return f.killWindowErr
+}
+
+func (f *fakeTmuxOps) KillSession(target tmuxctl.Target) error {
+	f.killSessionCalls = append(f.killSessionCalls, target)
+	return f.killSessionErr
 }
 
 // fakeGitOps records AddWorktree/RemoveWorktree/BranchMergeStatus calls and
@@ -1111,14 +1118,14 @@ func TestDeleteWorktreeFullConfirmFlowDispatchesRemove(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// deleteWorktreeCmd: remove + best-effort window kill
+// deleteWorktreeCmd: remove + best-effort tmux attachment cleanup
 // ---------------------------------------------------------------------------
 
 func TestDeleteWorktreeCmdRemovesAndKillsWindow(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: true, findWindowResult: "main:2"}
 	gitFake := &fakeGitOps{}
 
-	result, ok := runCmd(deleteWorktreeCmd(tmuxFake, gitFake, "/r", "/r/a")).(worktreeDeletedMsg)
+	result, ok := runCmd(deleteWorktreeCmd(tmuxFake, gitFake, "/r", "/r/a", tmuxctl.ModeWindow)).(worktreeDeletedMsg)
 	if !ok {
 		t.Fatalf("expected worktreeDeletedMsg")
 	}
@@ -1131,13 +1138,38 @@ func TestDeleteWorktreeCmdRemovesAndKillsWindow(t *testing.T) {
 	if len(tmuxFake.killWindowCalls) != 1 || tmuxFake.killWindowCalls[0] != "main:2" {
 		t.Errorf("expected KillWindow(main:2), got %v", tmuxFake.killWindowCalls)
 	}
+	if len(tmuxFake.killSessionCalls) != 0 {
+		t.Errorf("window-mode cleanup must not kill sessions, got %v", tmuxFake.killSessionCalls)
+	}
+}
+
+func TestDeleteWorktreeCmdRemovesAndKillsSessionInSessionMode(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{available: true, findWindowResult: "repo-feat:0"}
+	gitFake := &fakeGitOps{}
+
+	result, ok := runCmd(deleteWorktreeCmd(tmuxFake, gitFake, "/r", "/r/a", tmuxctl.ModeSession)).(worktreeDeletedMsg)
+	if !ok {
+		t.Fatalf("expected worktreeDeletedMsg")
+	}
+	if result.err != nil {
+		t.Errorf("unexpected error: %v", result.err)
+	}
+	if len(gitFake.removeCalls) != 1 {
+		t.Fatalf("expected 1 RemoveWorktree call, got %d", len(gitFake.removeCalls))
+	}
+	if len(tmuxFake.killSessionCalls) != 1 || tmuxFake.killSessionCalls[0] != "repo-feat:0" {
+		t.Errorf("expected KillSession(repo-feat:0), got %v", tmuxFake.killSessionCalls)
+	}
+	if len(tmuxFake.killWindowCalls) != 0 {
+		t.Errorf("session-mode cleanup must not kill only the tagged window, got %v", tmuxFake.killWindowCalls)
+	}
 }
 
 func TestDeleteWorktreeCmdGitErrorSkipsWindowKill(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: true, findWindowResult: "main:2"}
 	gitFake := &fakeGitOps{removeErr: errors.New("worktree contains modified or untracked files")}
 
-	result, ok := runCmd(deleteWorktreeCmd(tmuxFake, gitFake, "/r", "/r/a")).(worktreeDeletedMsg)
+	result, ok := runCmd(deleteWorktreeCmd(tmuxFake, gitFake, "/r", "/r/a", tmuxctl.ModeWindow)).(worktreeDeletedMsg)
 	if !ok {
 		t.Fatalf("expected worktreeDeletedMsg")
 	}
@@ -1146,6 +1178,9 @@ func TestDeleteWorktreeCmdGitErrorSkipsWindowKill(t *testing.T) {
 	}
 	if len(tmuxFake.killWindowCalls) != 0 {
 		t.Errorf("a failed removal must not kill any window, got %v", tmuxFake.killWindowCalls)
+	}
+	if len(tmuxFake.killSessionCalls) != 0 {
+		t.Errorf("a failed removal must not kill any session, got %v", tmuxFake.killSessionCalls)
 	}
 }
 

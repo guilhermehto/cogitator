@@ -491,6 +491,27 @@ func KillWindowWith(r Runner, target Target) error {
 	return nil
 }
 
+// KillSession closes the tmux session that owns target (`tmux kill-session`).
+// It is used to clean up worktrees launched in session mode, where the attached
+// tmux resource is the whole session rather than only the tagged first window.
+//
+// Returns ErrNotAvailable when not inside tmux.
+func KillSession(target Target) error {
+	return KillSessionWith(DefaultRunner, target)
+}
+
+// KillSessionWith is the injectable variant of KillSession.
+func KillSessionWith(r Runner, target Target) error {
+	if !Available() {
+		return ErrNotAvailable
+	}
+	session := sessionOf(target)
+	if _, err := r.Run("kill-session", "-t", session); err != nil {
+		return fmt.Errorf("tmuxctl: kill-session %s: %w", session, err)
+	}
+	return nil
+}
+
 // ListCogDirs returns the set of canonical worktree directories that currently
 // have a tmux window tagged with @cog_dir. It runs
 // `tmux list-windows -a -F '#{@cog_dir}'` and canonicalizes each non-empty

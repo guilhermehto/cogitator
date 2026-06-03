@@ -326,10 +326,10 @@ func TestEnsureWindowMode_SessionSanitizesName(t *testing.T) {
 	withTMUX(t)
 
 	r := &fakeRunner{}
-	r.push("", nil)                 // dedup: no window
+	r.push("", nil)                     // dedup: no window
 	r.push("my-repo-1-2-feat:0\n", nil) // new-session target
-	r.push("", nil)                 // remain-on-exit
-	r.push("", nil)                 // @cog_dir
+	r.push("", nil)                     // remain-on-exit
+	r.push("", nil)                     // @cog_dir
 
 	_, err := EnsureWindowModeWith(r, "/private/tmp/wt", "my.repo:1.2/feat", []string{"sleep", "60"}, ModeSession)
 	if err != nil {
@@ -473,10 +473,10 @@ func TestSelectSession_NotAvailable(t *testing.T) {
 
 func TestSessionOf(t *testing.T) {
 	cases := map[Target]string{
-		"repo-a:2":      "repo-a",
-		"my/repo:0":     "my/repo",
-		"weird:1:2":     "weird:1",
-		"bare-session":  "bare-session",
+		"repo-a:2":     "repo-a",
+		"my/repo:0":    "my/repo",
+		"weird:1:2":    "weird:1",
+		"bare-session": "bare-session",
 	}
 	for in, want := range cases {
 		if got := sessionOf(in); got != want {
@@ -489,7 +489,7 @@ func TestSelect_SwitchClientErrorPropagates(t *testing.T) {
 	withTMUX(t)
 
 	r := &fakeRunner{}
-	r.push("", nil)                                  // select-window succeeds
+	r.push("", nil)                              // select-window succeeds
 	r.push("", errors.New("can't find session")) // switch-client fails
 
 	err := SelectWith(r, "main:5")
@@ -574,6 +574,42 @@ func TestKillWindow_RunnerError(t *testing.T) {
 	r.push("", errors.New("no such window"))
 
 	if err := KillWindowWith(r, "main:99"); err == nil {
+		t.Error("expected error when runner fails, got nil")
+	}
+}
+
+// ---- KillSession ------------------------------------------------------------
+
+func TestKillSession_NotAvailable(t *testing.T) {
+	withoutTMUX(t)
+	r := &fakeRunner{}
+	if err := KillSessionWith(r, "repo-a:0"); !errors.Is(err, ErrNotAvailable) {
+		t.Errorf("KillSessionWith: got %v, want ErrNotAvailable", err)
+	}
+	if len(r.calls) != 0 {
+		t.Errorf("expected no tmux calls when not available, got %d", len(r.calls))
+	}
+}
+
+func TestKillSession_BuildsCorrectArgv(t *testing.T) {
+	withTMUX(t)
+
+	r := &fakeRunner{}
+	r.push("", nil)
+
+	if err := KillSessionWith(r, "repo-a:3"); err != nil {
+		t.Fatalf("KillSessionWith: unexpected error: %v", err)
+	}
+	assertCall(t, r, 0, "kill-session", "-t", "repo-a")
+}
+
+func TestKillSession_RunnerError(t *testing.T) {
+	withTMUX(t)
+
+	r := &fakeRunner{}
+	r.push("", errors.New("no such session"))
+
+	if err := KillSessionWith(r, "repo-a:99"); err == nil {
 		t.Error("expected error when runner fails, got nil")
 	}
 }
