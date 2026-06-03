@@ -298,9 +298,9 @@ func TestEnsureWindowMode_CreatesNewSession(t *testing.T) {
 	r.push("main:0 /other/path\n", nil)
 	// new-session: returns the new target.
 	r.push("repo-branch:0\n", nil)
-	// set-option remain-on-exit.
-	r.push("", nil)
 	// set-option @cog_dir.
+	r.push("", nil)
+	// send-keys harness command.
 	r.push("", nil)
 
 	target, err := EnsureWindowModeWith(r, "/private/tmp/newwt", "repo/branch", []string{"sleep", "60"}, ModeSession)
@@ -313,13 +313,20 @@ func TestEnsureWindowMode_CreatesNewSession(t *testing.T) {
 
 	// Call 0: list-windows (dedup lookup).
 	assertCall(t, r, 0, "list-windows", "-a")
-	// Call 1: new-session with -d, -s <sanitized name>, -c <canonical>, -P, -F, argv.
-	// The "/" in "repo/branch" is not reserved for sessions; "." and ":" are,
-	// and there are none here, so the session name is unchanged.
-	assertCall(t, r, 1, "new-session", "-d", "-s", "repo/branch", "-c", "/private/tmp/newwt", "-P", "-F", "#{session_name}:#{window_index}", "sleep", "60")
-	// Call 2/3: remain-on-exit + @cog_dir on the new window.
-	assertCall(t, r, 2, "set-option", "-w", "-t", "repo-branch:0", "remain-on-exit", "on")
-	assertCall(t, r, 3, "set-option", "-w", "-t", "repo-branch:0", "@cog_dir")
+	// Call 1: new-session with -d, -s <sanitized name>, -c <canonical>, -P, -F.
+	// No command is appended: the window runs the default shell, and the harness
+	// is sent via send-keys so quitting it returns to that shell. The "/" in
+	// "repo/branch" is not reserved for sessions; "." and ":" are, and there are
+	// none here, so the session name is unchanged.
+	assertCall(t, r, 1, "new-session", "-d", "-s", "repo/branch", "-c", "/private/tmp/newwt", "-P", "-F", "#{session_name}:#{window_index}")
+	// Call 2: @cog_dir on the new window. Session mode does not set
+	// remain-on-exit (the shell keeps the window alive instead).
+	assertCall(t, r, 2, "set-option", "-w", "-t", "repo-branch:0", "@cog_dir")
+	// Call 3: send-keys the harness command line + Enter into the shell.
+	assertCall(t, r, 3, "send-keys", "-t", "repo-branch:0", "sleep 60", "Enter")
+	if len(r.calls) != 4 {
+		t.Errorf("expected 4 calls, got %d: %v", len(r.calls), r.calls)
+	}
 }
 
 func TestEnsureWindowMode_DuplicateSessionReusesExistingSession(t *testing.T) {
@@ -355,8 +362,8 @@ func TestEnsureWindowMode_SessionSanitizesName(t *testing.T) {
 	r := &fakeRunner{}
 	r.push("", nil)                     // dedup: no window
 	r.push("my-repo-1-2-feat:0\n", nil) // new-session target
-	r.push("", nil)                     // remain-on-exit
 	r.push("", nil)                     // @cog_dir
+	r.push("", nil)                     // send-keys harness command
 
 	_, err := EnsureWindowModeWith(r, "/private/tmp/wt", "my.repo:1.2/feat", []string{"sleep", "60"}, ModeSession)
 	if err != nil {
@@ -389,6 +396,46 @@ func TestEnsureWindowMode_SessionEmptyArgvError(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for empty argv, got nil")
 	}
+}
+
+func TestShellJoin(t *testing.T) {
+	tests := []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{"simple", []string{"opencode", "--mdns", "/home/me/repo"}, "opencode --mdns /home/me/repo"},
+		{"path with space", []string{"opencode", "/home/me/my repo"}, "opencode '/home/me/my repo'"},
+		{"embedded single quote", []string{"echo", "it's"}, `echo 'it'\''s'`},
+		{"empty element", []string{"opencode", ""}, "opencode ''"},
+		{"shell metachars", []string{"sh", "-c", "a;b"}, "sh -c 'a;b'"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shellJoin(tc.argv); got != tc.want {
+				t.Errorf("shellJoin(%q) = %q, want %q", tc.argv, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEnsureWindowMode_SessionQuotesHarnessCommand verifies a worktree path with
+// a space is quoted in the send-keys command so the shell runs it as one word.
+func TestEnsureWindowMode_SessionQuotesHarnessCommand(t *testing.T) {
+	withTMUX(t)
+
+	r := &fakeRunner{}
+	r.push("", nil)              // dedup: no window
+	r.push("repo-feat:0\n", nil) // new-session target
+	r.push("", nil)              // @cog_dir
+	r.push("", nil)              // send-keys
+
+	_, err := EnsureWindowModeWith(r, "/private/tmp/my wt", "repo/feat", []string{"opencode", "--mdns", "/private/tmp/my wt"}, ModeSession)
+	if err != nil {
+		t.Fatalf("EnsureWindowModeWith: unexpected error: %v", err)
+	}
+
+	assertCall(t, r, 3, "send-keys", "-t", "repo-feat:0", "opencode --mdns '/private/tmp/my wt'", "Enter")
 }
 
 // ---- WindowProcessAlive pane_dead parsing -----------------------------------

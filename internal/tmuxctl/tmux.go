@@ -217,12 +217,20 @@ func newWindowWith(r Runner, canonical, name string, argv []string) (Target, err
 	return target, nil
 }
 
-// newSessionWith creates a new detached tmux session running argv, names it a
-// sanitized form of name, and sets @cog_dir to canonical. Returns the Target
-// ("session:index") of the new session's first window.
+// newSessionWith creates a new detached tmux session whose first window runs an
+// interactive shell in canonical, then launches argv inside that shell. It
+// names the session a sanitized form of name, sets @cog_dir to canonical, and
+// returns the Target ("session:index") of the session's first window.
 //
-// As with newWindowWith, remain-on-exit is enabled so the window survives
-// process exit, and the window is tagged with @cog_dir for dedup.
+// The harness is run via send-keys into the shell rather than as the pane's own
+// command. This is what the user gets from a hand-made session: when the harness
+// exits, the shell stays put at the worktree CWD instead of the pane dying or
+// the (single-window) session collapsing. remain-on-exit is therefore left at
+// its default (off) — the shell, not remain-on-exit, keeps the window alive.
+//
+// Because the shell persists, the dead-pane revival path (WindowProcessAlive /
+// RelaunchInWindow) does not apply in session mode: a resume lands the client in
+// the still-open session rather than respawning the harness.
 //
 // tmux session names may not contain "." or ":" (they are reserved in target
 // syntax); both are replaced with "-" via sanitizeSessionName. Dedup keys on
@@ -235,12 +243,15 @@ func newSessionWith(r Runner, canonical, name string, argv []string) (Target, er
 
 	session := sanitizeSessionName(name)
 
-	// Build: tmux new-session -d -s <session> -c <canonical> -P -F '#{session_name}:#{window_index}' <argv...>
+	// Build: tmux new-session -d -s <session> -c <canonical> -P -F '#{session_name}:#{window_index}'
 	// -d: create the session detached (don't switch the current client to it).
 	// -s: session name.
 	// -c: set the working directory of the session's first pane to the
 	//     canonical worktree path (harness contract: CWD == worktree).
 	// -P -F: print the target of the new session's window so we can return it.
+	//
+	// No command is appended, so the window runs the default shell. The harness
+	// is started afterwards via send-keys so exiting it returns to that shell.
 	args := []string{
 		"new-session",
 		"-d",
@@ -248,7 +259,6 @@ func newSessionWith(r Runner, canonical, name string, argv []string) (Target, er
 		"-c", canonical,
 		"-P", "-F", "#{session_name}:#{window_index}",
 	}
-	args = append(args, argv...)
 
 	out, err := r.Run(args...)
 	if err != nil {
@@ -270,18 +280,54 @@ func newSessionWith(r Runner, canonical, name string, argv []string) (Target, er
 		return "", fmt.Errorf("tmuxctl: new-session returned empty target")
 	}
 
-	// Enable remain-on-exit so the window survives process exit and
-	// WindowProcessAlive / RelaunchInWindow can detect and revive it.
-	if err := setOptionWith(r, target, "remain-on-exit", "on"); err != nil {
-		return "", fmt.Errorf("tmuxctl: set remain-on-exit on %s: %w", target, err)
-	}
-
-	// Tag the window with the canonical worktree path.
+	// Tag the window with the canonical worktree path before running anything.
 	if err := setOptionWith(r, target, "@cog_dir", canonical); err != nil {
 		return "", fmt.Errorf("tmuxctl: set @cog_dir on %s: %w", target, err)
 	}
 
+	// Run the harness inside the shell. The command is typed as one literal key
+	// argument followed by Enter, so quitting the harness drops back to the
+	// shell rather than ending the pane.
+	cmdline := shellJoin(argv)
+	if _, err := r.Run("send-keys", "-t", string(target), cmdline, "Enter"); err != nil {
+		return "", fmt.Errorf("tmuxctl: send-keys harness to %s: %w", target, err)
+	}
+
 	return target, nil
+}
+
+// shellJoin renders argv as a single POSIX-sh command line, quoting each element
+// as needed so it can be typed into a shell via send-keys without the shell
+// re-splitting or expanding it.
+func shellJoin(argv []string) string {
+	parts := make([]string, len(argv))
+	for i, a := range argv {
+		parts[i] = shellQuote(a)
+	}
+	return strings.Join(parts, " ")
+}
+
+// shellQuote returns s quoted for safe use as a single POSIX-sh word. Values
+// made up only of unambiguously safe characters are returned unquoted; anything
+// else is wrapped in single quotes with embedded single quotes escaped.
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	if strings.IndexFunc(s, func(r rune) bool { return !isShellSafe(r) }) < 0 {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// isShellSafe reports whether r can appear unquoted in a POSIX-sh word without
+// being treated specially by the shell.
+func isShellSafe(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		return true
+	}
+	return strings.ContainsRune("_@%+=:,./-", r)
 }
 
 func isDuplicateSessionError(err error, session string) bool {
