@@ -252,10 +252,14 @@ func ReadFrame(r io.Reader) ([]byte, error) {
 
 // HookEvent is the parsed representation of a Codex lifecycle hook payload.
 //
-// FIELD-NAME CAVEAT: the exact per-event stdin field names were NOT verified
-// against a live hook fire (codex-cli 0.136.0). The parser is defensive:
-// it tries multiple candidate field names for each logical field so that a
-// single correction here fixes all callers.
+// Canonical stdin field names are verified against the official Codex hooks
+// docs (developers.openai.com/codex/hooks, codex-cli 0.136.0):
+//   - hook_event_name — the lifecycle event name
+//   - session_id      — the session identifier
+//   - cwd             — the working directory for the session
+//
+// The parser is defensive: it tries multiple candidate field names for each
+// logical field so that a single correction here fixes all callers.
 //
 // Confirmed event names (snake_case wire): session_start, user_prompt_submit,
 // pre_tool_use, post_tool_use, permission_request, stopped, notification.
@@ -309,9 +313,9 @@ func ParseHookEvent(raw []byte) (HookEvent, error) {
 	ev := HookEvent{}
 
 	// Event name: try hook_event_name, event, type (in that order).
-	// UNVERIFIED-FIELD-NAMES: confirmed event names but not the exact key used
-	// in the stdin payload — adjust the candidate list here if live fire shows
-	// a different key.
+	// hook_event_name is the canonical key per the official Codex hooks docs
+	// (developers.openai.com/codex/hooks, verified against codex-cli 0.136.0).
+	// Fallback candidates are kept for defensive tolerance.
 	for _, key := range []string{"hook_event_name", "event", "type"} {
 		if v, ok := m[key]; ok {
 			var s string
@@ -327,7 +331,9 @@ func ParseHookEvent(raw []byte) (HookEvent, error) {
 	}
 
 	// Session ID: try session_id, sessionId, id.
-	// UNVERIFIED-FIELD-NAMES: see caveat above.
+	// session_id is the canonical key per the official Codex hooks docs
+	// (developers.openai.com/codex/hooks, verified against codex-cli 0.136.0).
+	// Fallback candidates are kept for defensive tolerance.
 	for _, key := range []string{"session_id", "sessionId", "id"} {
 		if v, ok := m[key]; ok {
 			var s string
@@ -339,7 +345,9 @@ func ParseHookEvent(raw []byte) (HookEvent, error) {
 	}
 
 	// CWD: try cwd, directory.
-	// UNVERIFIED-FIELD-NAMES: see caveat above.
+	// cwd is the canonical key per the official Codex hooks docs
+	// (developers.openai.com/codex/hooks, verified against codex-cli 0.136.0).
+	// Fallback candidates are kept for defensive tolerance.
 	for _, key := range []string{"cwd", "directory"} {
 		if v, ok := m[key]; ok {
 			var s string

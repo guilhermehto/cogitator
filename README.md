@@ -109,6 +109,34 @@ Taskwarrior respects the following variables from that environment:
 | `$TASKDATA` | overrides the Taskwarrior data directory (`~/.task` by default) |
 | `$TASKRC` | overrides the Taskwarrior config file (`~/.taskrc` by default) |
 
+## Codex live attention (opt-in)
+
+cogitator can display live attention signals for [Codex](https://openai.com/codex) sessions running on the same machine, using the Codex lifecycle hooks system.
+
+**Quick start:**
+
+1. Enable Codex monitoring: `CODEX_ENABLED=true cogitator` (or export it in your shell profile).
+2. Wire the hooks in `~/.codex/hooks.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart":      [ { "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
+    "UserPromptSubmit":  [ { "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
+    "PreToolUse":        [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
+    "PostToolUse":       [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
+    "PermissionRequest": [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
+    "Stop":              [ { "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ]
+  }
+}
+```
+
+3. Trust the hook: start `codex`, run `/hooks`, and confirm trust for `cogitator codex-hook`. Until trusted, Codex skips the hook silently.
+
+Hooks are enabled by default in Codex (`codex features list | grep hooks`). If cogitator is not running when a hook fires, `cogitator codex-hook` exits 1 and Codex continues — it never blocks your tool calls.
+
+See [docs/codex.md](docs/codex.md) for the full setup guide, inline TOML alternative, minimal hook variant, and `CODEX_HOME` override.
+
 ## CLI reference
 
 - `--bell`: ring the terminal bell when a session transitions into an attention state.
