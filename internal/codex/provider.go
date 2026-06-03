@@ -119,14 +119,22 @@ func (p *Provider) Start(ctx context.Context, sink provider.Sink) error {
 //   - The poll refreshes title/dir/lastActivity/existence from disk.
 //   - The hook overlay (statusType, hasPermission, lastError) is preserved
 //     across poll cycles — a poll tick NEVER wipes hook-driven attention.
-//   - Sessions that have disappeared from disk are removed from both maps.
+//   - A session is pruned only when it is BOTH absent from disk AND has no
+//     live hook overlay (empty overlay with zero lastActivity). This prevents
+//     a hook that arrives before the rollout file is flushed from being wiped
+//     by the next poll.
 func (p *Provider) poll(sink provider.Sink) {
 	sessions, err := ReadSessions(p.codexHome)
 	if err != nil {
 		p.logger.Warn("codex: failed to read sessions", "err", err)
 		return
 	}
+	p.pollOnce(sink, sessions)
+}
 
+// pollOnce is the testable core of poll. It accepts the already-read session
+// slice so tests can call it deterministically without touching the filesystem.
+func (p *Provider) pollOnce(sink provider.Sink, sessions []Session) {
 	p.mu.Lock()
 
 	// Build a set of current session IDs from disk.
@@ -136,12 +144,19 @@ func (p *Provider) poll(sink provider.Sink) {
 		p.sessions[s.ID] = s
 	}
 
-	// Remove sessions that have disappeared from disk (also clear their overlays).
+	// Prune sessions that have disappeared from disk, but only when they also
+	// have no live hook overlay. A hook-seeded entry (not yet on disk) must
+	// survive until its overlay goes stale or a subsequent poll finds it on disk.
 	for id := range p.sessions {
-		if _, ok := current[id]; !ok {
+		if _, onDisk := current[id]; onDisk {
+			continue
+		}
+		ov := p.overlays[id]
+		if ov.lastActivity.IsZero() && !ov.hasPermission && ov.statusType == "" && ov.lastError.IsZero() {
 			delete(p.sessions, id)
 			delete(p.overlays, id)
 		}
+		// Otherwise: keep the hook-seeded entry alive until the next disk flush.
 	}
 
 	// Snapshot the merged state for emission (under the lock).
@@ -220,27 +235,16 @@ func (p *Provider) handleHookFrame(raw []byte, sink provider.Sink) {
 	}
 
 	p.overlays[sessionID] = ov
-	sess, hasSess := p.sessions[sessionID]
-	p.mu.Unlock()
 
-	if !hasSess {
-		// Session not yet known from a poll — emit a minimal update so the
-		// hook-driven attention is visible immediately.
-		u := provider.SessionUpdate{
-			Provider:      harness.KindCodex,
-			InstanceID:    InstanceID,
-			InstanceName:  InstanceID,
-			SessionID:     sessionID,
-			Directory:     ev.CWD,
-			StatusType:    ov.statusType,
-			HasPermission: ov.hasPermission,
-			LastError:     ov.lastError,
-			LastActivity:  now,
-			Source:        "live",
-		}
-		sink.ApplyUpdate(u)
-		return
+	// Seed a minimal p.sessions entry when the hook arrives before the rollout
+	// file is flushed to disk. This ensures the next poll cycle includes the
+	// session in its merge and does not drop the live hook overlay.
+	if _, known := p.sessions[sessionID]; !known {
+		p.sessions[sessionID] = Session{ID: sessionID, Dir: ev.CWD, LastActivity: now}
 	}
+
+	sess := p.sessions[sessionID]
+	p.mu.Unlock()
 
 	sink.ApplyUpdate(p.mergeToUpdate(sess, ov, now))
 }
@@ -300,5 +304,3 @@ func (p *Provider) mergeToUpdate(s Session, ov hookOverlay, now time.Time) provi
 		Source:        src,
 	}
 }
-
-

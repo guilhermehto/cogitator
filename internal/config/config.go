@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strings"
 	"time"
 )
 
@@ -47,6 +48,13 @@ type Config struct {
 	CodexRecencyWindow time.Duration
 }
 
+// codexEnabledFromEnv returns true when CODEX_ENABLED is set to "true" or "1"
+// (case-insensitive). Any other value (including unset) leaves Codex disabled.
+func codexEnabledFromEnv() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("CODEX_ENABLED")))
+	return v == "true" || v == "1"
+}
+
 func Default() *Config {
 	return &Config{
 		RecentWindow:            30 * time.Minute,
@@ -65,7 +73,7 @@ func Default() *Config {
 		UnreachableThreshold:    3,
 		InactiveHideAfter:       5 * time.Minute,
 
-		CodexEnabled:       false,
+		CodexEnabled:       codexEnabledFromEnv(),
 		CodexHome:          os.Getenv("CODEX_HOME"),
 		CodexPollInterval:  5 * time.Second,
 		CodexRecencyWindow: 30 * time.Minute,

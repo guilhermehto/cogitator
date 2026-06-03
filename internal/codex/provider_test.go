@@ -356,18 +356,24 @@ func TestProvider_HookDrivenAttention(t *testing.T) {
 }
 
 // TestProvider_PollDoesNotWipeHookOverlay is the CRITICAL INTEGRATION HAZARD
-// test: a PermissionRequest hook fires, then a poll cycle runs over rollout
-// fixtures (which carry no permission info) — the hook overlay MUST survive.
+// test: a PermissionRequest hook fires for a session NOT present on disk, then
+// a poll cycle runs over fixtures that do NOT include that session — the hook
+// overlay MUST survive without re-firing the hook.
+//
+// This exercises the exact race: hook arrives before rollout file is flushed →
+// next poll would previously clear the session → attention disappears.
 func TestProvider_PollDoesNotWipeHookOverlay(t *testing.T) {
-	sessionID := "aaaabbbb-cccc-dddd-eeee-000000000077"
-	lastActivity := time.Now().Add(-2 * time.Minute)
-	home := buildFixtureHome(t, sessionID, lastActivity)
+	// Build a fixture home with a DIFFERENT session so the hook session is
+	// absent from disk during the poll.
+	otherSessionID := "aaaabbbb-cccc-dddd-eeee-000000000088"
+	hookSessionID := "aaaabbbb-cccc-dddd-eeee-000000000077"
+	home := buildFixtureHome(t, otherSessionID, time.Now().Add(-2*time.Minute))
 
 	// Use a short XDG dir so the socket path is short enough for macOS.
 	sockDir := shortXDGDir(t)
 	t.Setenv("XDG_RUNTIME_DIR", sockDir)
 
-	// Use a very long poll interval so we control when polls happen.
+	// Use a very long poll interval so we control when polls happen via pollOnce.
 	p := codex.NewProvider(home, 10*time.Second, 30*time.Minute, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -377,102 +383,53 @@ func TestProvider_PollDoesNotWipeHookOverlay(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- p.Start(ctx, sink) }()
 
-	// Wait for the initial poll.
+	// Wait for the initial poll to populate the session map (otherSessionID only).
 	time.Sleep(200 * time.Millisecond)
 
 	sockPath := codex.HookSocketPath()
 
-	// Fire a PermissionRequest hook.
+	// Fire a PermissionRequest hook for hookSessionID — NOT present on disk.
 	conn, err := net.Dial("unix", sockPath)
 	if err != nil {
 		t.Fatalf("dial hook socket: %v", err)
 	}
-	if err := codex.WriteFrame(conn, []byte(`{"hook_event_name":"PermissionRequest","session_id":"`+sessionID+`"}`)); err != nil {
+	if err := codex.WriteFrame(conn, []byte(`{"hook_event_name":"PermissionRequest","session_id":"`+hookSessionID+`","cwd":"/tmp/hook-session"}`)); err != nil {
 		conn.Close()
 		t.Fatalf("WriteFrame: %v", err)
 	}
 	conn.Close()
 
-	// Wait for the hook to be processed.
+	// Wait for the hook to be processed and HasPermission to be set.
 	deadline := time.Now().Add(2 * time.Second)
-	var permUpdate provider.SessionUpdate
 	for time.Now().Before(deadline) {
-		if u, ok := sink.latestForSession(sessionID); ok && u.HasPermission {
-			permUpdate = u
+		if u, ok := sink.latestForSession(hookSessionID); ok && u.HasPermission {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if !permUpdate.HasPermission {
+	u, ok := sink.latestForSession(hookSessionID)
+	if !ok || !u.HasPermission {
 		t.Fatal("PermissionRequest hook: HasPermission not set before poll cycle")
 	}
 
-	// Now simulate a poll cycle by cancelling and restarting — but since we
-	// can't call poll() directly, we use a new provider with a very short
-	// interval and verify the overlay survives. Instead, we directly verify
-	// the invariant: the provider's internal state must preserve the overlay
-	// across a poll. We do this by starting a second provider instance that
-	// shares the same home but has a short poll interval, and checking that
-	// after the poll the permission is still set.
-	//
-	// The real test: cancel the first provider, start a new one with the same
-	// home and a short poll interval, fire the hook again, then let a poll run.
-	cancel()
-	<-done
-
-	// Start a fresh provider with a short poll interval.
-	sockDir2 := shortXDGDir(t)
-	t.Setenv("XDG_RUNTIME_DIR", sockDir2)
-
-	p2 := codex.NewProvider(home, 50*time.Millisecond, 30*time.Minute, nil)
-	ctx2, cancel2 := context.WithCancel(context.Background())
-	defer cancel2()
-
-	sink2 := &hookSink{}
-	done2 := make(chan error, 1)
-	go func() { done2 <- p2.Start(ctx2, sink2) }()
-
-	// Wait for the initial poll.
-	time.Sleep(100 * time.Millisecond)
-
-	sockPath2 := codex.HookSocketPath()
-
-	// Fire PermissionRequest.
-	conn2, err := net.Dial("unix", sockPath2)
+	// Now run a poll cycle deterministically WITHOUT re-firing the hook.
+	// The fixture home still only has otherSessionID on disk — hookSessionID
+	// is absent. The overlay MUST survive.
+	diskSessions, err := codex.ReadSessionsForTest(home)
 	if err != nil {
-		t.Fatalf("dial hook socket (p2): %v", err)
+		t.Fatalf("ReadSessionsForTest: %v", err)
 	}
-	if err := codex.WriteFrame(conn2, []byte(`{"hook_event_name":"PermissionRequest","session_id":"`+sessionID+`"}`)); err != nil {
-		conn2.Close()
-		t.Fatalf("WriteFrame (p2): %v", err)
-	}
-	conn2.Close()
+	p.PollOnceForTest(sink, diskSessions)
 
-	// Wait for the hook to be processed.
-	deadline2 := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline2) {
-		if u, ok := sink2.latestForSession(sessionID); ok && u.HasPermission {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	u, ok := sink2.latestForSession(sessionID)
-	if !ok || !u.HasPermission {
-		t.Fatal("PermissionRequest hook not reflected before poll cycle (p2)")
-	}
-
-	// Now wait for at least one more poll cycle (50ms interval + buffer).
-	time.Sleep(200 * time.Millisecond)
-
-	// The overlay MUST survive the poll cycle.
-	u2, ok2 := sink2.latestForSession(sessionID)
+	// The hook-seeded session must still be present with HasPermission==true.
+	u2, ok2 := sink.latestForSession(hookSessionID)
 	if !ok2 {
-		t.Fatal("no update found after poll cycle")
+		t.Fatal("HAZARD: hook session absent after poll cycle — was wiped")
 	}
 	if !u2.HasPermission {
 		t.Error("HAZARD: poll cycle wiped hook overlay — HasPermission = false after poll, want true")
 	}
 
-	cancel2()
-	<-done2
+	cancel()
+	<-done
 }

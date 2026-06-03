@@ -26,6 +26,12 @@ const (
 
 	// hookReadTimeout is the per-frame read deadline on the listener side.
 	hookReadTimeout = 5 * time.Second
+
+	// maxFrameSize is the upper bound on a single hook frame payload. Hook
+	// payloads are small JSON objects; 1 MiB is generous. Enforced before
+	// allocation so a corrupt or malicious length prefix cannot cause a ~4 GiB
+	// allocation.
+	maxFrameSize = 1 << 20 // 1 MiB
 )
 
 // HookSocketPath returns the Unix-domain socket path used by both the
@@ -87,6 +93,14 @@ func Listen(ctx context.Context, sockPath string, handler func(raw []byte), logg
 		if err != nil {
 			return noop, fmt.Errorf("codex hook: listen after stale removal %s: %w", sockPath, err)
 		}
+	}
+
+	// Restrict the socket to the owner only. Without this, any local user can
+	// connect and inject framed hook JSON when the socket falls back to
+	// os.TempDir() (the macOS default when $XDG_RUNTIME_DIR is unset).
+	if err := os.Chmod(sockPath, 0o600); err != nil {
+		ln.Close()
+		return noop, fmt.Errorf("codex hook: chmod socket %s: %w", sockPath, err)
 	}
 
 	done := make(chan struct{})
@@ -237,12 +251,17 @@ func WriteFrame(w io.Writer, payload []byte) error {
 
 // ReadFrame reads a length-prefixed frame from r and returns the payload.
 // It is the counterpart to WriteFrame and is exported for use by the listener.
+// Returns an error if the declared frame size exceeds maxFrameSize (1 MiB) to
+// prevent a corrupt or malicious length prefix from causing a huge allocation.
 func ReadFrame(r io.Reader) ([]byte, error) {
 	var hdr [4]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return nil, err
 	}
 	size := binary.BigEndian.Uint32(hdr[:])
+	if size > maxFrameSize {
+		return nil, fmt.Errorf("codex hook: frame size %d exceeds maximum %d", size, maxFrameSize)
+	}
 	payload := make([]byte, size)
 	if _, err := io.ReadFull(r, payload); err != nil {
 		return nil, err
@@ -281,20 +300,20 @@ type HookEvent struct {
 // hookEventNames maps both PascalCase and snake_case wire names to a canonical
 // snake_case form. Unknown names are passed through as-is (lowercased).
 var hookEventNames = map[string]string{
-	"SessionStart":      "session_start",
-	"session_start":     "session_start",
-	"UserPromptSubmit":  "user_prompt_submit",
+	"SessionStart":       "session_start",
+	"session_start":      "session_start",
+	"UserPromptSubmit":   "user_prompt_submit",
 	"user_prompt_submit": "user_prompt_submit",
-	"PreToolUse":        "pre_tool_use",
-	"pre_tool_use":      "pre_tool_use",
-	"PostToolUse":       "post_tool_use",
-	"post_tool_use":     "post_tool_use",
-	"PermissionRequest": "permission_request",
+	"PreToolUse":         "pre_tool_use",
+	"pre_tool_use":       "pre_tool_use",
+	"PostToolUse":        "post_tool_use",
+	"post_tool_use":      "post_tool_use",
+	"PermissionRequest":  "permission_request",
 	"permission_request": "permission_request",
-	"Notification":      "notification",
-	"notification":      "notification",
-	"Stop":              "stopped",
-	"stopped":           "stopped",
+	"Notification":       "notification",
+	"notification":       "notification",
+	"Stop":               "stopped",
+	"stopped":            "stopped",
 }
 
 // ParseHookEvent parses a raw hook JSON payload into a HookEvent.

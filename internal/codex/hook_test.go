@@ -3,6 +3,7 @@ package codex_test
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"net"
 	"os"
@@ -59,7 +60,7 @@ func TestFrameRoundTrip(t *testing.T) {
 		[]byte(`{"hook_event_name":"SessionStart","session_id":"abc"}`),
 		[]byte(`{}`),
 		[]byte(strings.Repeat("x", 65536)), // large payload
-		[]byte{},                            // empty payload
+		[]byte{},                           // empty payload
 	}
 
 	for _, payload := range cases {
@@ -441,5 +442,52 @@ func TestSendHook_DeliverPayload(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for payload")
+	}
+}
+
+// TestReadFrame_OversizedLength verifies that ReadFrame returns a clean error
+// when the length prefix exceeds maxFrameSize (1 MiB) without allocating a
+// huge buffer or panicking.
+func TestReadFrame_OversizedLength(t *testing.T) {
+	// Craft a frame header declaring 0xFFFFFFFF bytes (~4 GiB).
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], 0xFFFFFFFF)
+
+	// Provide only the 4-byte header; ReadFrame must reject it before reading
+	// any payload bytes.
+	r := bytes.NewReader(hdr[:])
+	_, err := codex.ReadFrame(r)
+	if err == nil {
+		t.Fatal("ReadFrame with oversized length: expected error, got nil")
+	}
+	// The error must mention the size or "maximum" so it is diagnosable.
+	if !strings.Contains(err.Error(), "frame size") && !strings.Contains(err.Error(), "maximum") {
+		t.Errorf("ReadFrame oversized error = %q; want it to mention frame size or maximum", err.Error())
+	}
+}
+
+// TestListen_SocketPermissions verifies that the bound Unix socket is
+// accessible only by the owner (mode 0600).
+func TestListen_SocketPermissions(t *testing.T) {
+	dir := shortXDGDir(t)
+	sockPath := filepath.Join(dir, "cog-perms.sock")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cleanup, err := codex.Listen(ctx, sockPath, func(_ []byte) {}, nil)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer cleanup()
+
+	info, err := os.Stat(sockPath)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+	// Mask to permission bits only (strip file-type bits).
+	perm := info.Mode().Perm()
+	if perm != 0o600 {
+		t.Errorf("socket permissions = %04o, want 0600", perm)
 	}
 }
