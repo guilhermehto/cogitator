@@ -1,6 +1,6 @@
-# Codex live attention (opt-in)
+# Codex live attention
 
-cogitator can display live attention signals for [Codex](https://openai.com/codex) sessions running on the same machine, using the Codex lifecycle hooks system. This is an opt-in feature; cogitator behaves exactly as before if it is not enabled.
+cogitator can display live attention signals for [Codex](https://openai.com/codex) sessions running on the same machine, using the Codex lifecycle hooks system. Codex monitoring is **auto-enabled** when `~/.codex` (or `$CODEX_HOME`) exists on disk; cogitator behaves exactly as before on machines without a Codex installation.
 
 ## How it works
 
@@ -26,18 +26,26 @@ cogitator reads its configuration from `internal/config/config.go`. The relevant
 
 | Config field | Default | How to override |
 | --- | --- | --- |
-| `CodexEnabled` | `false` | Set `CODEX_ENABLED=true` in the environment that launches cogitator, **or** modify `Default()` in `config.go` to return `true` (for a source build). |
+| `CodexEnabled` | auto-detected (see below) | Set `CODEX_ENABLED=true/1` or `CODEX_ENABLED=false/0` to force on or off. |
 | `CodexHome` | `""` (resolves to `~/.codex`) | Set `CODEX_HOME=/path/to/codex/home` in the environment. |
 
-> **Note:** `CodexEnabled` defaults to `false`. cogitator will not start the Codex session monitor until this is set to `true`.
+**Auto-detection:** cogitator enables Codex monitoring automatically when the resolved Codex home directory (`$CODEX_HOME` if set, otherwise `~/.codex`) exists and is a directory. No environment variable is needed on a machine that has Codex installed.
 
-For a quick one-off test:
+**Explicit override:** `CODEX_ENABLED` takes precedence over auto-detection:
+
+| `CODEX_ENABLED` value | Result |
+| --- | --- |
+| `true` or `1` (case-insensitive) | Always ON, even if `~/.codex` does not exist |
+| `false` or `0` (case-insensitive) | Always OFF, even if `~/.codex` exists |
+| unset or any other value | Auto-detect from directory presence |
+
+For a quick one-off test on a machine without `~/.codex`:
 
 ```sh
 CODEX_ENABLED=true cogitator
 ```
 
-To make it permanent, export `CODEX_ENABLED=true` in your shell profile (`.zshrc`, `.bashrc`, etc.) before launching cogitator.
+To permanently disable on a machine that has `~/.codex` but where you do not want cogitator to monitor Codex, export `CODEX_ENABLED=false` in your shell profile (`.zshrc`, `.bashrc`, etc.).
 
 ---
 
@@ -153,4 +161,4 @@ After trusting, the hook fires on every subsequent Codex session without further
 
 ## Verification
 
-With cogitator running (`CODEX_ENABLED=true cogitator`) and the hooks wired and trusted, start a Codex session in any directory. You should see a new Codex session appear in the cogitator Sessions pane. When Codex requests a permission, the session's attention indicator should change to the permission-pending state.
+With cogitator running (auto-enabled when `~/.codex` exists, or `CODEX_ENABLED=true cogitator` to force it on) and the hooks wired and trusted, start a Codex session in any directory. You should see a new Codex session appear in the cogitator Sessions pane. When Codex requests a permission, the session's attention indicator should change to the permission-pending state.

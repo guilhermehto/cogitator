@@ -48,11 +48,42 @@ type Config struct {
 	CodexRecencyWindow time.Duration
 }
 
-// codexEnabledFromEnv returns true when CODEX_ENABLED is set to "true" or "1"
-// (case-insensitive). Any other value (including unset) leaves Codex disabled.
-func codexEnabledFromEnv() bool {
+// codexEnabled resolves whether Codex monitoring should be active.
+//
+// Precedence:
+//  1. CODEX_ENABLED explicitly set to a recognized value: "true"/"1" → ON,
+//     "false"/"0" → OFF (case-insensitive; this wins over auto-detection).
+//  2. CODEX_ENABLED unset or unrecognized: auto-detect by checking whether
+//     the resolved Codex home directory exists on disk.
+//
+// The Codex home is resolved as: $CODEX_HOME when non-empty, else ~/.codex.
+// If os.UserHomeDir() errors, auto-detection treats the directory as absent.
+func codexEnabled() bool {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv("CODEX_ENABLED")))
-	return v == "true" || v == "1"
+	switch v {
+	case "true", "1":
+		return true
+	case "false", "0":
+		return false
+	}
+	// Auto-detect: ON when the Codex home directory exists.
+	return codexHomeDirExists()
+}
+
+// codexHomeDirExists reports whether the resolved Codex home directory exists
+// and is a directory. It mirrors the resolution logic used by the Codex
+// provider: $CODEX_HOME when set, otherwise ~/.codex.
+func codexHomeDirExists() bool {
+	dir := os.Getenv("CODEX_HOME")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false
+		}
+		dir = home + "/.codex"
+	}
+	info, err := os.Stat(dir)
+	return err == nil && info.IsDir()
 }
 
 func Default() *Config {
@@ -73,7 +104,7 @@ func Default() *Config {
 		UnreachableThreshold:    3,
 		InactiveHideAfter:       5 * time.Minute,
 
-		CodexEnabled:       codexEnabledFromEnv(),
+		CodexEnabled:       codexEnabled(),
 		CodexHome:          os.Getenv("CODEX_HOME"),
 		CodexPollInterval:  5 * time.Second,
 		CodexRecencyWindow: 30 * time.Minute,

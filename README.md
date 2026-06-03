@@ -115,7 +115,7 @@ cogitator can display live attention signals for [Codex](https://openai.com/code
 
 **Quick start:**
 
-1. Enable Codex monitoring: `CODEX_ENABLED=true cogitator` (or export it in your shell profile).
+1. Codex monitoring is **auto-enabled** when `~/.codex` exists. To force it on without `~/.codex`: `CODEX_ENABLED=true cogitator`. To force it off: `CODEX_ENABLED=false cogitator`.
 2. Wire the hooks in `~/.codex/hooks.json`:
 
 ```json
