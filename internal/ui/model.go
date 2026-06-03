@@ -23,6 +23,14 @@ import (
 
 type snapshotMsg state.Snapshot
 
+// workspaceRowsMsg is returned by buildWorkspaceRowsCmd when the background
+// workspace-row build completes. It carries the merged row list and the
+// resolved tmux launch mode so the Update handler can apply them atomically.
+type workspaceRowsMsg struct {
+	rows       []workspace.Row
+	launchMode tmuxctl.LaunchMode
+}
+
 // tickMsg is sent by tickCmd on each relative-time refresh interval.
 // It carries the current time so View() can compute fresh relative timestamps
 // without calling time.Now() directly (easier to test).
@@ -290,6 +298,14 @@ type model struct {
 	// workspace config. Refreshed on each buildWorkspaceRows so config edits
 	// take effect without a restart. Zero value (ModeWindow) is safe.
 	launchMode tmuxctl.LaunchMode
+	// rowsBuilding is true while a background buildWorkspaceRowsCmd is in
+	// flight. Only one build runs at a time; a second snapshotMsg while a
+	// build is in flight sets rowsDirty instead of starting a second build.
+	rowsBuilding bool
+	// rowsDirty is set when a snapshotMsg arrives while rowsBuilding is true.
+	// When the in-flight build completes, one follow-up build is dispatched
+	// using the latest m.snap at that moment (coalesced, not stale).
+	rowsDirty bool
 
 	// Repo finder ('A') state, meaningful only while prompt == promptAddRepo.
 	// repoFinderScanning is true between opening the finder and the scan result
@@ -1156,10 +1172,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case snapshotMsg:
 		m.snap = state.Snapshot(msg)
-		// Rebuild workspace rows on every snapshot so running/stopped state
-		// stays in sync with live session changes.
-		m.workspaceRows, m.launchMode = buildWorkspaceRows(m.snap, m.cfg)
-		// Clear launching overlay for any dir that is now confirmed running.
+		// Re-arm the snapshot listener and handle bell transitions immediately;
+		// the workspace-row build is offloaded to a background Cmd so git/tmux
+		// shell-outs never block Update.
+		next := waitSnapshot(m.snaps)
+		var bellC tea.Cmd
+		if m.bellEnabled {
+			fired := processBellTransitions(m.snap.Sessions, m.bellSent)
+			bellC = bellCmd(len(fired))
+		}
+		var buildC tea.Cmd
+		if m.rowsBuilding {
+			// A build is already in flight; mark dirty so the completion
+			// handler dispatches one follow-up build with the latest snap.
+			m.rowsDirty = true
+		} else {
+			m.rowsBuilding = true
+			buildC = buildWorkspaceRowsCmd(m.snap, m.cfg)
+		}
+		return m, tea.Batch(next, bellC, buildC)
+
+	case workspaceRowsMsg:
+		m.workspaceRows = msg.rows
+		m.launchMode = msg.launchMode
+		// Clear launching overlay for any dir now confirmed running.
 		if m.launching != nil {
 			for dir := range m.launching {
 				for _, row := range m.workspaceRows {
@@ -1176,12 +1212,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.sessionCursor >= n {
 			m.sessionCursor = n - 1
 		}
-		next := waitSnapshot(m.snaps)
-		if !m.bellEnabled {
-			return m, next
+		m.rowsBuilding = false
+		if m.rowsDirty {
+			m.rowsDirty = false
+			m.rowsBuilding = true
+			return m, buildWorkspaceRowsCmd(m.snap, m.cfg)
 		}
-		fired := processBellTransitions(m.snap.Sessions, m.bellSent)
-		return m, tea.Batch(next, bellCmd(len(fired)))
+		return m, nil
 
 	case tickMsg:
 		// Re-arm the ticker and record the current time so View() can render
@@ -1436,6 +1473,17 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 		lastMutationErr:  nil,
 		lastMutationOp:   "",
 		mutationInFlight: false,
+	}
+}
+
+// buildWorkspaceRowsCmd returns a tea.Cmd that runs buildWorkspaceRows in the
+// background and delivers the result as a workspaceRowsMsg. snap and cfg are
+// captured by value at dispatch time so the closure is not affected by later
+// mutations to the model.
+func buildWorkspaceRowsCmd(snap state.Snapshot, cfg *config.Config) tea.Cmd {
+	return func() tea.Msg {
+		rows, mode := buildWorkspaceRows(snap, cfg)
+		return workspaceRowsMsg{rows: rows, launchMode: mode}
 	}
 }
 
