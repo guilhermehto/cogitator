@@ -32,6 +32,10 @@ var (
 
 	statusBusyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 
+	// providerStyle renders the provider badge (e.g. "[opencode]") in a muted
+	// colour so it is visible but does not compete with the session title.
+	providerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
+
 	// taskActiveStyle highlights a running Taskwarrior task. Bold + green so
 	// the running row is distinguishable from the cursor (reverse-video) and
 	// from the priority glyph palette.
@@ -322,6 +326,11 @@ func formatRow(now time.Time, sv state.SessionView, width int, child bool) strin
 		agentTag = agentColor(sv.Agent).Render("@" + sv.Agent)
 	}
 
+	providerBadge := ""
+	if sv.Provider != "" {
+		providerBadge = providerStyle.Render("[" + string(sv.Provider) + "]")
+	}
+
 	titleRender := title
 	if sv.Source == state.SourceRecent {
 		titleRender = dimStyle.Render(title)
@@ -329,6 +338,9 @@ func formatRow(now time.Time, sv state.SessionView, width int, child bool) strin
 	sessionContent := prefix + titleRender
 	if agentTag != "" {
 		sessionContent = prefix + agentTag + " " + titleRender
+	}
+	if providerBadge != "" {
+		sessionContent += " " + providerBadge
 	}
 	if !child && sv.Directory != "" {
 		sessionContent += "  " + dimStyle.Render(shortenDirectory(sv.Directory))

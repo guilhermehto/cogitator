@@ -8,7 +8,9 @@ import (
 
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/discovery"
+	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/oc"
+	"github.com/guilhermehto/cogitator/internal/provider"
 	"github.com/guilhermehto/cogitator/internal/state"
 )
 
@@ -149,4 +151,55 @@ func (s *Supervisor) run(ctx context.Context, inst discovery.Instance) {
 		attempt++
 		oc.SleepBackoff(ctx, s.cfg, attempt)
 	}
+}
+
+// OpenCodeProvider wraps Supervisor so it satisfies provider.Provider.
+// It owns the discovery.Browse loop: when Start is called it begins mDNS
+// browsing and feeds Add/Remove events into the supervisor. The supervisor
+// continues to use the existing oc pipeline (oc.NewClient, ApplyEvent, etc.)
+// and feeds the store via its own ApplyEvent path — this wrapper is a
+// lifecycle/wiring adapter only, not a re-route through provider.Sink.
+//
+// The sink parameter is accepted to satisfy the provider.Provider interface
+// contract; the opencode pipeline writes directly to the *state.Store it was
+// constructed with (via Supervisor.run → store.ApplyEvent). Future refactors
+// may route through sink instead, but that is out of scope for this step.
+type OpenCodeProvider struct {
+	sup    *Supervisor
+	cfg    *config.Config
+	logger *slog.Logger
+}
+
+// NewOpenCodeProvider constructs an OpenCodeProvider backed by the given
+// Supervisor. cfg and logger may be nil; defaults are applied.
+func NewOpenCodeProvider(sup *Supervisor, cfg *config.Config, logger *slog.Logger) *OpenCodeProvider {
+	if cfg == nil {
+		cfg = config.Default()
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &OpenCodeProvider{sup: sup, cfg: cfg, logger: logger}
+}
+
+// Kind implements provider.Provider.
+func (p *OpenCodeProvider) Kind() harness.Kind { return harness.Kind("opencode") }
+
+// Start implements provider.Provider. It begins mDNS browsing and dispatches
+// Add/Remove events to the supervisor until ctx is cancelled. It blocks until
+// the discovery channel closes (i.e. until ctx is done).
+func (p *OpenCodeProvider) Start(ctx context.Context, _ provider.Sink) error {
+	events, err := discovery.Browse(ctx, p.cfg)
+	if err != nil {
+		return err
+	}
+	for ev := range events {
+		switch {
+		case ev.Added != nil:
+			p.sup.OnAdd(ctx, *ev.Added)
+		case ev.Removed != nil:
+			p.sup.OnRemove(ev.Removed.ID)
+		}
+	}
+	return nil
 }

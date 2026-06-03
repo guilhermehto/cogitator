@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/guilhermehto/cogitator/internal/config"
+	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/taskwarrior"
 )
@@ -100,6 +101,7 @@ func demoSessions(now time.Time) []state.SessionView {
 			Attention:    state.AttnActive,
 			LastActivity: mins(0),
 			Created:      hours(2),
+			Provider:     harness.Kind("opencode"),
 		},
 		// Live root waiting on permission, with a generating child.
 		{
@@ -113,6 +115,7 @@ func demoSessions(now time.Time) []state.SessionView {
 			Attention:    state.AttnPermissionPending,
 			LastActivity: mins(1),
 			Created:      hours(1),
+			Provider:     harness.Kind("opencode"),
 		},
 		{
 			InstanceID:   "demo-laptop",
@@ -126,8 +129,9 @@ func demoSessions(now time.Time) []state.SessionView {
 			Attention:    state.AttnActive,
 			LastActivity: mins(0),
 			Created:      mins(40),
+			Provider:     harness.Kind("opencode"),
 		},
-		// Live, awaiting an answer.
+		// Live, awaiting an answer (codex — exercises the provider badge).
 		{
 			InstanceID:   "demo-server",
 			InstanceName: "server",
@@ -139,6 +143,7 @@ func demoSessions(now time.Time) []state.SessionView {
 			Attention:    state.AttnQuestionPending,
 			LastActivity: mins(2),
 			Created:      hours(3),
+			Provider:     harness.Kind("codex"),
 		},
 		// Live, errored.
 		{
@@ -152,6 +157,7 @@ func demoSessions(now time.Time) []state.SessionView {
 			Attention:    state.AttnErrored,
 			LastActivity: mins(5),
 			Created:      hours(4),
+			Provider:     harness.Kind("opencode"),
 		},
 		// Live, inactive (idle long enough to dim).
 		{
@@ -165,6 +171,7 @@ func demoSessions(now time.Time) []state.SessionView {
 			Attention:    state.AttnInactive,
 			LastActivity: mins(35),
 			Created:      hours(6),
+			Provider:     harness.Kind("opencode"),
 		},
 		// Recent (collapsed group expanded in RunDemo for visibility).
 		{
@@ -178,6 +185,7 @@ func demoSessions(now time.Time) []state.SessionView {
 			Attention:    state.AttnInactive,
 			LastActivity: mins(45),
 			Created:      hours(5),
+			Provider:     harness.Kind("opencode"),
 		},
 		{
 			InstanceID:   "demo-laptop",
@@ -190,6 +198,7 @@ func demoSessions(now time.Time) []state.SessionView {
 			Attention:    state.AttnInactive,
 			LastActivity: mins(58),
 			Created:      hours(7),
+			Provider:     harness.Kind("opencode"),
 		},
 	}
 }

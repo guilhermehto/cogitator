@@ -171,6 +171,10 @@ func (f *fakeHarnessOps) Get(kind harness.Kind) (harness.Harness, error) {
 	return &fakeHarness{argv: f.argv}, nil
 }
 
+func (f *fakeHarnessOps) Kinds() []harness.Kind {
+	return []harness.Kind{"fake"}
+}
+
 type fakeHarness struct{ argv []string }
 
 func (h *fakeHarness) Kind() harness.Kind                 { return "fake" }

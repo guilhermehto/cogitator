@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/guilhermehto/cogitator/internal/config"
+	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/state"
 )
 
@@ -272,5 +273,90 @@ func TestLegendLineZeroWidthIncludesTaskGlyphs(t *testing.T) {
 	got := legendLine(0)
 	if !strings.Contains(got, "high") {
 		t.Fatalf("expected task priority glyphs when width=0 (unconstrained), got %q", got)
+	}
+}
+
+// TestStyledStatusCodexStrings verifies that every status string the Codex
+// provider emits renders legibly (non-blank for "busy"; blank for idle/empty)
+// and that the existing opencode strings are unaffected.
+func TestStyledStatusCodexStrings(t *testing.T) {
+	cases := []struct {
+		name      string
+		status    string
+		wantBlank bool // true → rendered output should be empty/whitespace
+	}{
+		// Codex-emitted strings.
+		{name: "codex busy renders non-blank", status: "busy", wantBlank: false},
+		{name: "codex idle renders blank", status: "idle", wantBlank: true},
+		{name: "codex empty renders blank", status: "", wantBlank: true},
+		// opencode-only strings — regression guard.
+		{name: "opencode generating renders non-blank", status: "generating", wantBlank: false},
+		{name: "opencode retry renders non-blank", status: "retry", wantBlank: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := styledStatus(tc.status)
+			blank := strings.TrimSpace(got) == ""
+			if blank != tc.wantBlank {
+				t.Fatalf("styledStatus(%q) = %q, wantBlank=%v", tc.status, got, tc.wantBlank)
+			}
+		})
+	}
+}
+
+// TestFormatRowShowsProviderBadge verifies that a SessionView with a non-empty
+// Provider renders a "[<provider>]" badge in the row output.
+func TestFormatRowShowsProviderBadge(t *testing.T) {
+	now := time.Now()
+	sv := state.SessionView{
+		SessionID:    "s1",
+		Title:        "My Task",
+		Source:       state.SourceLive,
+		Attention:    state.AttnActive,
+		Provider:     harness.Kind("opencode"),
+		LastActivity: now,
+	}
+	got := formatRow(now, sv, 120, false)
+	if !strings.Contains(got, "[opencode]") {
+		t.Errorf("formatRow output %q does not contain provider badge [opencode]", got)
+	}
+}
+
+// TestFormatRowShowsCodexProviderBadge verifies that a codex session renders
+// "[codex]" in the row output (not "[opencode]").
+func TestFormatRowShowsCodexProviderBadge(t *testing.T) {
+	now := time.Now()
+	sv := state.SessionView{
+		SessionID:    "s2",
+		Title:        "Codex Task",
+		Source:       state.SourceLive,
+		Attention:    state.AttnActive,
+		Provider:     harness.Kind("codex"),
+		LastActivity: now,
+	}
+	got := formatRow(now, sv, 120, false)
+	if !strings.Contains(got, "[codex]") {
+		t.Errorf("formatRow output %q does not contain provider badge [codex]", got)
+	}
+	if strings.Contains(got, "[opencode]") {
+		t.Errorf("formatRow output %q must not contain [opencode] for a codex session", got)
+	}
+}
+
+// TestFormatRowNoProviderBadgeWhenEmpty verifies that a SessionView with an
+// empty Provider does not render any "[...]" badge.
+func TestFormatRowNoProviderBadgeWhenEmpty(t *testing.T) {
+	now := time.Now()
+	sv := state.SessionView{
+		SessionID:    "s3",
+		Title:        "No Provider",
+		Source:       state.SourceLive,
+		Attention:    state.AttnActive,
+		LastActivity: now,
+		// Provider is zero value (empty)
+	}
+	got := formatRow(now, sv, 120, false)
+	if strings.Contains(got, "[") {
+		t.Errorf("formatRow output %q must not contain a provider badge when Provider is empty", got)
 	}
 }

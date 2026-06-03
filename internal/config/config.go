@@ -1,6 +1,10 @@
 package config
 
-import "time"
+import (
+	"os"
+	"strings"
+	"time"
+)
 
 // Config centralizes runtime tunables. Values are currently static defaults;
 // no env or file-based overrides are wired yet.
@@ -24,6 +28,62 @@ type Config struct {
 	// attention (permission, question, error) are never hidden regardless
 	// of age. A non-positive value disables the rule.
 	InactiveHideAfter time.Duration
+
+	// CodexEnabled enables the polled Codex session monitor. Default false.
+	// When false, no Codex provider is started and cogitator behaves exactly
+	// as before Codex support was added.
+	CodexEnabled bool
+
+	// CodexHome is the path to the Codex home directory (CODEX_HOME). When
+	// empty the provider defaults to ~/.codex (resolved by the reader).
+	// Populated from the CODEX_HOME environment variable in Default().
+	CodexHome string
+
+	// CodexPollInterval is how often the Codex provider polls CODEX_HOME.
+	CodexPollInterval time.Duration
+
+	// CodexRecencyWindow is the duration within which a session's last
+	// activity is considered "live" (SourceLive). Sessions older than this
+	// window are labelled SourceRecent.
+	CodexRecencyWindow time.Duration
+}
+
+// codexEnabled resolves whether Codex monitoring should be active.
+//
+// Precedence:
+//  1. CODEX_ENABLED explicitly set to a recognized value: "true"/"1" → ON,
+//     "false"/"0" → OFF (case-insensitive; this wins over auto-detection).
+//  2. CODEX_ENABLED unset or unrecognized: auto-detect by checking whether
+//     the resolved Codex home directory exists on disk.
+//
+// The Codex home is resolved as: $CODEX_HOME when non-empty, else ~/.codex.
+// If os.UserHomeDir() errors, auto-detection treats the directory as absent.
+func codexEnabled() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("CODEX_ENABLED")))
+	switch v {
+	case "true", "1":
+		return true
+	case "false", "0":
+		return false
+	}
+	// Auto-detect: ON when the Codex home directory exists.
+	return codexHomeDirExists()
+}
+
+// codexHomeDirExists reports whether the resolved Codex home directory exists
+// and is a directory. It mirrors the resolution logic used by the Codex
+// provider: $CODEX_HOME when set, otherwise ~/.codex.
+func codexHomeDirExists() bool {
+	dir := os.Getenv("CODEX_HOME")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false
+		}
+		dir = home + "/.codex"
+	}
+	info, err := os.Stat(dir)
+	return err == nil && info.IsDir()
 }
 
 func Default() *Config {
@@ -43,5 +103,10 @@ func Default() *Config {
 		SessionLookupTimeout:    5 * time.Second,
 		UnreachableThreshold:    3,
 		InactiveHideAfter:       5 * time.Minute,
+
+		CodexEnabled:       codexEnabled(),
+		CodexHome:          os.Getenv("CODEX_HOME"),
+		CodexPollInterval:  5 * time.Second,
+		CodexRecencyWindow: 30 * time.Minute,
 	}
 }

@@ -230,6 +230,10 @@ func (r *Recorder) loop(ctx context.Context, snapshots <-chan state.Snapshot) {
 
 // applySnapshot upserts an entry for every top-level SessionView (ParentID
 // empty) with a non-empty Directory. Returns true if any entry changed.
+//
+// The Harness field is preserved from the existing roster entry when one
+// exists, so a create-time write (e.g. for a Codex worktree) is not silently
+// overwritten by a live-discovery snapshot that only knows "opencode".
 func (r *Recorder) applySnapshot(m map[string]RosterEntry, snap state.Snapshot) bool {
 	changed := false
 	for _, sv := range snap.Sessions {
@@ -241,9 +245,20 @@ func (r *Recorder) applySnapshot(m map[string]RosterEntry, snap state.Snapshot) 
 			// Unresolvable path — skip rather than storing a bad key.
 			continue
 		}
+		// Derive the harness kind from the session's Provider field; fall back
+		// to "opencode" when unset (zero value). Preserve any harness already
+		// recorded for this directory (e.g. codex set at create time) so a
+		// snapshot never silently downgrades the kind.
+		harnessKind := string(sv.Provider)
+		if harnessKind == "" {
+			harnessKind = "opencode"
+		}
+		if cur, ok := m[canonical]; ok && cur.Harness != "" {
+			harnessKind = cur.Harness
+		}
 		entry := RosterEntry{
 			Dir:          canonical,
-			Harness:      "opencode",
+			Harness:      harnessKind,
 			SessionID:    sv.SessionID,
 			Title:        sv.Title,
 			LastActivity: sv.LastActivity,

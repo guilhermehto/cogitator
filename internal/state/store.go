@@ -19,7 +19,9 @@ import (
 
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/discovery"
+	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/oc"
+	"github.com/guilhermehto/cogitator/internal/provider"
 )
 
 type Source string
@@ -47,6 +49,9 @@ type SessionView struct {
 	// that doesn't shuffle on every message tick. Zero until the
 	// /session/{id} fetch resolves for an SSE-discovered session.
 	Created time.Time
+	// Provider identifies which coding-agent harness produced this session.
+	// Defaults to "opencode" for sessions discovered via the opencode SSE path.
+	Provider harness.Kind
 }
 
 type Snapshot struct {
@@ -86,14 +91,37 @@ type instanceState struct {
 	consecutiveFailures int
 }
 
+// providerSessionKey is the collision-safe dedup key for provider-sourced rows.
+// It combines the provider kind and the provider-scoped session id so that a
+// Codex session id that happens to match an opencode session id does not shadow
+// either row.
+type providerSessionKey struct {
+	provider  harness.Kind
+	sessionID string
+}
+
+// providerRow holds the neutral state for one provider-sourced session.
+type providerRow struct {
+	update provider.SessionUpdate
+}
+
+// providerInstanceKey identifies one instance within a provider.
+type providerInstanceKey struct {
+	provider   harness.Kind
+	instanceID string
+}
+
 type Store struct {
 	mu        sync.Mutex
 	instances map[string]*instanceState
-	listeners []chan Snapshot
-	now       func() time.Time
-	lookupCtx context.Context
-	cfg       *config.Config
-	logger    *slog.Logger
+	// providerSessions holds sessions ingested via ApplyUpdate (the neutral
+	// provider seam). Keyed by (provider, sessionID) for collision safety.
+	providerSessions map[providerSessionKey]*providerRow
+	listeners        []chan Snapshot
+	now              func() time.Time
+	lookupCtx        context.Context
+	cfg              *config.Config
+	logger           *slog.Logger
 }
 
 func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) *Store {
@@ -104,11 +132,12 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) *Store {
 		logger = slog.Default()
 	}
 	return &Store{
-		instances: map[string]*instanceState{},
-		now:       time.Now,
-		lookupCtx: ctx,
-		cfg:       cfg,
-		logger:    logger,
+		instances:        map[string]*instanceState{},
+		providerSessions: map[providerSessionKey]*providerRow{},
+		now:              time.Now,
+		lookupCtx:        ctx,
+		cfg:              cfg,
+		logger:           logger,
 	}
 }
 
@@ -274,6 +303,56 @@ func (s *Store) SyncPermissions(instanceID string, perms []oc.PermissionRequest)
 }
 
 func (s *Store) Republish() { s.publish() }
+
+// ApplyUpdate implements provider.Sink. It ingests a neutral SessionUpdate,
+// builds a SessionView via Classify, and publishes a new snapshot if anything
+// changed. The dedup key is (provider, sessionID) so sessions from different
+// providers with colliding ids never shadow each other.
+func (s *Store) ApplyUpdate(u provider.SessionUpdate) {
+	key := providerSessionKey{provider: u.Provider, sessionID: u.SessionID}
+	s.mu.Lock()
+	existing, ok := s.providerSessions[key]
+	changed := !ok || existing.update != u
+	if changed {
+		s.providerSessions[key] = &providerRow{update: u}
+	}
+	s.mu.Unlock()
+	if changed {
+		s.publish()
+	}
+}
+
+// RemoveProviderSession implements provider.Sink. It removes a single session
+// from the provider-sourced store. A no-op if the session is not present.
+func (s *Store) RemoveProviderSession(providerKind harness.Kind, instanceID, sessionID string) {
+	key := providerSessionKey{provider: providerKind, sessionID: sessionID}
+	s.mu.Lock()
+	_, ok := s.providerSessions[key]
+	if ok {
+		delete(s.providerSessions, key)
+	}
+	s.mu.Unlock()
+	if ok {
+		s.publish()
+	}
+}
+
+// ClearProviderInstance implements provider.Sink. It removes all sessions for
+// a provider instance (e.g. when an opencode process disappears from mDNS).
+func (s *Store) ClearProviderInstance(providerKind harness.Kind, instanceID string) {
+	s.mu.Lock()
+	changed := false
+	for key, row := range s.providerSessions {
+		if key.provider == providerKind && row.update.InstanceID == instanceID {
+			delete(s.providerSessions, key)
+			changed = true
+		}
+	}
+	s.mu.Unlock()
+	if changed {
+		s.publish()
+	}
+}
 
 func (s *Store) ApplyEvent(instanceID string, evt oc.Event) {
 	s.mu.Lock()
@@ -649,15 +728,19 @@ func (s *Store) snapshot() Snapshot {
 	// Multiple opencode processes started in the same project directory
 	// expose the same project-scoped session list, so the same SessionID
 	// can appear under several InstanceStates. Dedupe to one row per
-	// SessionID, preferring the live source (it has the SSE-derived
-	// status/activity the recent-only row lacks). Within the same source,
-	// pick the row with the most recent activity.
+	// (provider, sessionID) pair — the provider dimension prevents a Codex
+	// session id that collides with an opencode session id from shadowing
+	// either row. Within the opencode provider, prefer the live source (it
+	// has the SSE-derived status/activity the recent-only row lacks); within
+	// the same source, pick the row with the most recent activity.
 	type candidate struct {
 		view    SessionView
 		live    bool
 		healthy bool
 	}
-	best := map[string]candidate{}
+	best := map[providerSessionKey]candidate{}
+
+	// opencode-sourced sessions (existing oc pipeline).
 	for _, inst := range s.instances {
 		healthy := inst.consecutiveFailures < threshold
 		for _, row := range inst.sessions {
@@ -679,34 +762,77 @@ func (s *Store) snapshot() Snapshot {
 				Attention:    Classify(row.status.Type, row.hasPerm, row.hasQuestion, row.lastError, row.lastActivity),
 				LastActivity: row.lastActivity,
 				Created:      created,
+				Provider:     harness.Kind("opencode"),
 			}
+			key := providerSessionKey{provider: sv.Provider, sessionID: sv.SessionID}
 			cand := candidate{view: sv, live: row.source == SourceLive, healthy: healthy}
-			cur, ok := best[sv.SessionID]
+			cur, ok := best[key]
 			if !ok {
-				best[sv.SessionID] = cand
+				best[key] = cand
 				continue
 			}
 			if cand.healthy != cur.healthy {
 				if cand.healthy {
-					best[sv.SessionID] = cand
+					best[key] = cand
 				}
 				continue
 			}
 			if cand.live && !cur.live {
-				best[sv.SessionID] = cand
+				best[key] = cand
 				continue
 			}
 			if cand.live == cur.live && sv.LastActivity.After(cur.view.LastActivity) {
-				best[sv.SessionID] = cand
+				best[key] = cand
 			}
 		}
+	}
+
+	// Provider-sourced sessions (neutral seam: Codex, future providers).
+	// Each update is already the authoritative state for its (provider,
+	// sessionID) pair — no multi-instance dedup needed here.
+	for key, row := range s.providerSessions {
+		u := row.update
+		src := Source(u.Source)
+		if src != SourceLive && src != SourceRecent {
+			src = SourceRecent
+		}
+		instanceName := u.InstanceName
+		if instanceName == "" {
+			instanceName = u.InstanceID
+		}
+		sv := SessionView{
+			InstanceID:   u.InstanceID,
+			InstanceName: instanceName,
+			SessionID:    u.SessionID,
+			Title:        u.Title,
+			Slug:         u.Slug,
+			Directory:    u.Directory,
+			ParentID:     u.ParentID,
+			Agent:        u.Agent,
+			StatusType:   u.StatusType,
+			Source:       src,
+			Attention:    Classify(u.StatusType, u.HasPermission, u.HasQuestion, u.LastError, u.LastActivity),
+			LastActivity: u.LastActivity,
+			Created:      u.Created,
+			Provider:     u.Provider,
+		}
+		best[key] = candidate{view: sv, live: src == SourceLive, healthy: true}
 	}
 
 	rows := make([]SessionView, 0, len(best))
 	for _, c := range best {
 		rows = append(rows, c.view)
 	}
+	// Sort deterministically with a mixed provider+instance id set.
+	// Primary: provider kind (groups all opencode rows before all codex rows,
+	// or vice versa — stable alphabetic order). Secondary: instance id within
+	// the provider (groups host:port opencode instances; "codex" forms one
+	// stable group regardless of string-compare against host:port values).
+	// Tertiary: most-recent activity DESC; tie-break by session id ASC.
 	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Provider != rows[j].Provider {
+			return rows[i].Provider < rows[j].Provider
+		}
 		if rows[i].InstanceID != rows[j].InstanceID {
 			return rows[i].InstanceID < rows[j].InstanceID
 		}
