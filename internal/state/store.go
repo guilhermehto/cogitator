@@ -354,6 +354,48 @@ func (s *Store) ClearProviderInstance(providerKind harness.Kind, instanceID stri
 	}
 }
 
+// ReplaceProviderInstance implements provider.Sink. It atomically replaces the
+// full session set for (providerKind, instanceID) with updates, publishing
+// exactly one snapshot when the set changes and zero when it is identical.
+// Sessions belonging to other providers or instances are never touched.
+func (s *Store) ReplaceProviderInstance(providerKind harness.Kind, instanceID string, updates []provider.SessionUpdate) {
+	// Build the desired set indexed by sessionID for O(1) lookup.
+	desired := make(map[string]provider.SessionUpdate, len(updates))
+	for _, u := range updates {
+		desired[u.SessionID] = u
+	}
+
+	s.mu.Lock()
+	changed := false
+
+	// Remove rows that belong to this (provider, instance) but are absent
+	// from the desired set.
+	for key, row := range s.providerSessions {
+		if key.provider != providerKind || row.update.InstanceID != instanceID {
+			continue
+		}
+		if _, keep := desired[key.sessionID]; !keep {
+			delete(s.providerSessions, key)
+			changed = true
+		}
+	}
+
+	// Upsert rows that differ from what is already stored.
+	for sid, u := range desired {
+		key := providerSessionKey{provider: providerKind, sessionID: sid}
+		existing, ok := s.providerSessions[key]
+		if !ok || existing.update != u {
+			s.providerSessions[key] = &providerRow{update: u}
+			changed = true
+		}
+	}
+
+	s.mu.Unlock()
+	if changed {
+		s.publish()
+	}
+}
+
 func (s *Store) ApplyEvent(instanceID string, evt oc.Event) {
 	s.mu.Lock()
 	inst := s.instances[instanceID]

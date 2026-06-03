@@ -36,6 +36,8 @@ func (f *fakeSink) ClearProviderInstance(_ harness.Kind, _ string) {
 	f.mu.Unlock()
 }
 
+func (f *fakeSink) ReplaceProviderInstance(_ harness.Kind, _ string, _ []provider.SessionUpdate) {}
+
 func (f *fakeSink) snapshot() ([]provider.SessionUpdate, int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -240,6 +242,8 @@ func (h *hookSink) ClearProviderInstance(_ harness.Kind, _ string) {
 	h.clears++
 	h.mu.Unlock()
 }
+
+func (h *hookSink) ReplaceProviderInstance(_ harness.Kind, _ string, _ []provider.SessionUpdate) {}
 
 // latestForSession returns the most recent update for the given session ID.
 func (h *hookSink) latestForSession(sessionID string) (provider.SessionUpdate, bool) {
