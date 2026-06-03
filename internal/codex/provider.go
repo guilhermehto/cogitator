@@ -171,13 +171,15 @@ func (p *Provider) pollOnce(sink provider.Sink, sessions []Session) {
 
 	p.mu.Unlock()
 
-	// Clear the prior snapshot so vanished sessions are removed from the view.
-	sink.ClearProviderInstance(harness.KindCodex, InstanceID)
-
+	// Emit the full merged snapshot atomically so the UI never sees a blank
+	// intermediate state. ReplaceProviderInstance replaces the prior snapshot
+	// in one shot; if merged is empty the view is cleared without a flash.
 	now := time.Now()
+	updates := make([]provider.SessionUpdate, 0, len(merged))
 	for _, e := range merged {
-		sink.ApplyUpdate(p.mergeToUpdate(e.session, e.overlay, now))
+		updates = append(updates, p.mergeToUpdate(e.session, e.overlay, now))
 	}
+	sink.ReplaceProviderInstance(harness.KindCodex, InstanceID, updates)
 }
 
 // handleHookFrame parses a raw hook frame, updates the in-memory overlay for

@@ -14,12 +14,13 @@ import (
 	"github.com/guilhermehto/cogitator/internal/provider"
 )
 
-// fakeSink records every ApplyUpdate call and the most recent
-// ClearProviderInstance call so tests can assert on emitted updates.
+// fakeSink records every ApplyUpdate call, every ReplaceProviderInstance call,
+// and the ClearProviderInstance count so tests can assert on emitted updates.
 type fakeSink struct {
-	mu      sync.Mutex
-	updates []provider.SessionUpdate
-	clears  int
+	mu       sync.Mutex
+	updates  []provider.SessionUpdate
+	replaces [][]provider.SessionUpdate // one entry per ReplaceProviderInstance call
+	clears   int
 }
 
 func (f *fakeSink) ApplyUpdate(u provider.SessionUpdate) {
@@ -36,7 +37,13 @@ func (f *fakeSink) ClearProviderInstance(_ harness.Kind, _ string) {
 	f.mu.Unlock()
 }
 
-func (f *fakeSink) ReplaceProviderInstance(_ harness.Kind, _ string, _ []provider.SessionUpdate) {}
+func (f *fakeSink) ReplaceProviderInstance(_ harness.Kind, _ string, us []provider.SessionUpdate) {
+	cp := make([]provider.SessionUpdate, len(us))
+	copy(cp, us)
+	f.mu.Lock()
+	f.replaces = append(f.replaces, cp)
+	f.mu.Unlock()
+}
 
 func (f *fakeSink) snapshot() ([]provider.SessionUpdate, int) {
 	f.mu.Lock()
@@ -44,6 +51,19 @@ func (f *fakeSink) snapshot() ([]provider.SessionUpdate, int) {
 	cp := make([]provider.SessionUpdate, len(f.updates))
 	copy(cp, f.updates)
 	return cp, f.clears
+}
+
+// snapshotReplaces returns a copy of all recorded ReplaceProviderInstance batches.
+func (f *fakeSink) snapshotReplaces() [][]provider.SessionUpdate {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([][]provider.SessionUpdate, len(f.replaces))
+	for i, batch := range f.replaces {
+		cp := make([]provider.SessionUpdate, len(batch))
+		copy(cp, batch)
+		out[i] = cp
+	}
+	return out
 }
 
 // buildFixtureHome creates a temporary CODEX_HOME with one rollout file whose
@@ -120,16 +140,18 @@ func TestProvider_RecencyMapping(t *testing.T) {
 			cancel()
 			<-done
 
-			updates, _ := sink.snapshot()
+			replaces := sink.snapshotReplaces()
 			var found *provider.SessionUpdate
-			for i := range updates {
-				if updates[i].SessionID == sessionID {
-					found = &updates[i]
-					break
+			for _, batch := range replaces {
+				for i := range batch {
+					if batch[i].SessionID == sessionID {
+						u := batch[i]
+						found = &u
+					}
 				}
 			}
 			if found == nil {
-				t.Fatalf("no update emitted for session %q; got %d updates", sessionID, len(updates))
+				t.Fatalf("no update emitted for session %q; got %d replace batches", sessionID, len(replaces))
 			}
 			if found.Source != tc.wantSource {
 				t.Errorf("Source = %q, want %q", found.Source, tc.wantSource)
@@ -139,8 +161,8 @@ func TestProvider_RecencyMapping(t *testing.T) {
 }
 
 // TestProvider_EmitsOneUpdatePerSession verifies that a poll cycle emits
-// exactly one SessionUpdate per fixture session under instance id "codex"
-// with Provider=codex.
+// exactly one ReplaceProviderInstance call carrying all fixture sessions, with
+// no ClearProviderInstance calls and no blank intermediate emissions.
 func TestProvider_EmitsOneUpdatePerSession(t *testing.T) {
 	home := filepath.Join("testdata")
 
@@ -160,14 +182,27 @@ func TestProvider_EmitsOneUpdatePerSession(t *testing.T) {
 	cancel()
 	<-done
 
-	updates, clears := sink.snapshot()
-	if clears < 1 {
-		t.Errorf("ClearProviderInstance called %d times, want ≥1", clears)
+	_, clears := sink.snapshot()
+	if clears != 0 {
+		t.Errorf("ClearProviderInstance called %d times, want 0 (poll must use ReplaceProviderInstance)", clears)
 	}
 
-	// Count updates from the first poll cycle (before the second tick fires).
-	// All updates must have Provider=codex and InstanceID="codex".
-	for _, u := range updates {
+	replaces := sink.snapshotReplaces()
+	if len(replaces) < 1 {
+		t.Fatalf("ReplaceProviderInstance called %d times, want ≥1", len(replaces))
+	}
+
+	// No replace batch should be empty — that would flash a blank list.
+	for i, batch := range replaces {
+		if len(batch) == 0 {
+			t.Errorf("replace[%d] is empty — would flash a blank list", i)
+		}
+	}
+
+	// Inspect the first replace batch: all updates must have the correct
+	// Provider and InstanceID, and no empty SessionID.
+	first := replaces[0]
+	for _, u := range first {
 		if u.Provider != harness.KindCodex {
 			t.Errorf("update.Provider = %q, want %q", u.Provider, harness.KindCodex)
 		}
@@ -180,9 +215,9 @@ func TestProvider_EmitsOneUpdatePerSession(t *testing.T) {
 	}
 
 	// The testdata directory has at least 2 fixture sessions (well-formed +
-	// truncated). Verify we got at least that many updates.
-	if len(updates) < 2 {
-		t.Errorf("got %d updates, want ≥2 (one per fixture session)", len(updates))
+	// truncated). Verify the first replace batch carries at least that many.
+	if len(first) < 2 {
+		t.Errorf("first replace batch has %d sessions, want ≥2 (one per fixture session)", len(first))
 	}
 }
 
