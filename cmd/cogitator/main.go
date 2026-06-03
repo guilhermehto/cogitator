@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -24,6 +25,11 @@ func main() {
 	// misinterpreted as unknown flags.
 	if len(os.Args) > 1 && os.Args[1] == "codex-hook" {
 		if err := codex.SendHook(context.Background(), os.Stdin); err != nil {
+			// A closed cogitator TUI is the expected case, not a failure:
+			// exit 0 silently so Codex never shows a "hook failed" banner.
+			if errors.Is(err, codex.ErrListenerUnavailable) {
+				return
+			}
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

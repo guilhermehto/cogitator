@@ -167,6 +167,11 @@ func TestSendHook_NoListener(t *testing.T) {
 	if err == nil {
 		t.Error("SendHook: expected non-nil error when no listener present, got nil")
 	}
+	// The error must be classifiable as a benign "listener unavailable" so the
+	// codex-hook command can exit 0 instead of surfacing a failure to Codex.
+	if !errors.Is(err, codex.ErrListenerUnavailable) {
+		t.Errorf("SendHook error = %v, want wrapping ErrListenerUnavailable", err)
+	}
 	// Must return well within the combined dial+write timeout (4s). Allow 3.5s
 	// to avoid flakiness on slow CI while still catching hangs.
 	if elapsed > 3500*time.Millisecond {

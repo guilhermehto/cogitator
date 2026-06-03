@@ -52,6 +52,12 @@ func HookSocketPath() string {
 // owns the socket. The caller should run without the hook listener.
 var ErrListenerOwned = errors.New("codex hook socket owned by another instance")
 
+// ErrListenerUnavailable is returned (wrapped) by SendHook when the hook
+// listener socket cannot be dialled — the expected, benign case where no
+// cogitator TUI is running. The codex-hook command treats this as success and
+// exits 0 so Codex never surfaces a "hook failed" banner for an absent monitor.
+var ErrListenerUnavailable = errors.New("codex hook listener unavailable")
+
 // Listen binds the Unix-domain socket at HookSocketPath() and calls handler
 // for each framed message received. It returns ErrListenerOwned when another
 // live cogitator already owns the socket (the caller should log and continue
@@ -217,7 +223,10 @@ func SendHook(ctx context.Context, stdin io.Reader) error {
 	var d net.Dialer
 	conn, err := d.DialContext(dialCtx, "unix", sockPath)
 	if err != nil {
-		return fmt.Errorf("codex-hook: dial %s: %w", sockPath, err)
+		// No live listener (socket missing, connection refused, or timeout).
+		// Mark with ErrListenerUnavailable so the caller can exit 0 — a closed
+		// TUI is not a failure the Codex user should ever see.
+		return fmt.Errorf("codex-hook: dial %s: %w: %w", sockPath, ErrListenerUnavailable, err)
 	}
 	defer conn.Close()
 

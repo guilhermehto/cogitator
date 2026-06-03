@@ -133,7 +133,7 @@ cogitator can display live attention signals for [Codex](https://openai.com/code
 
 3. Trust the hook: start `codex`, run `/hooks`, and confirm trust for `cogitator codex-hook`. Until trusted, Codex skips the hook silently.
 
-Hooks are enabled by default in Codex (`codex features list | grep hooks`). If cogitator is not running when a hook fires, `cogitator codex-hook` exits 1 and Codex continues — it never blocks your tool calls.
+Hooks are enabled by default in Codex (`codex features list | grep hooks`). If cogitator is not running when a hook fires, `cogitator codex-hook` exits 0 silently — Codex shows no failure and never blocks your tool calls.
 
 See [docs/codex.md](docs/codex.md) for the full setup guide, inline TOML alternative, minimal hook variant, and `CODEX_HOME` override.
 

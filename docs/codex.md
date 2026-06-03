@@ -14,7 +14,7 @@ Each Codex lifecycle event (session start, tool use, permission request, stop) f
 | `PermissionRequest` | permission-pending |
 | `Stop` | idle / awaiting |
 
-**If cogitator is not running**, `cogitator codex-hook` exits with code 1 (never 2). Codex marks the hook run as failed and **continues** — it never blocks your tool calls or turns. Only one cogitator instance owns the socket; a second instance runs without the live hook listener.
+**If cogitator is not running**, `cogitator codex-hook` exits **0** silently — a closed monitor is the expected case, not a failure, so Codex shows no "hook failed" banner and your tool calls and turns are never blocked. The hook only exits non-zero on a genuine, unexpected fault (e.g. it cannot read its stdin). Only one cogitator instance owns the socket; a second instance runs without the live hook listener.
 
 `PreToolUse` and `PostToolUse` fire on every tool call. If you want less process churn, wire only `SessionStart`, `PermissionRequest`, and `Stop` (see the minimal snippet below).
 
