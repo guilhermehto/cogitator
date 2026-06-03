@@ -139,6 +139,7 @@ type tmuxOps interface {
 	Select(target tmuxctl.Target) error
 	SelectSession(target tmuxctl.Target) error
 	KillWindow(target tmuxctl.Target) error
+	KillSession(target tmuxctl.Target) error
 }
 
 // realTmuxOps delegates to the package-level tmuxctl functions.
@@ -165,6 +166,9 @@ func (realTmuxOps) SelectSession(target tmuxctl.Target) error {
 	return tmuxctl.SelectSession(target)
 }
 func (realTmuxOps) KillWindow(target tmuxctl.Target) error { return tmuxctl.KillWindow(target) }
+func (realTmuxOps) KillSession(target tmuxctl.Target) error {
+	return tmuxctl.KillSession(target)
+}
 
 // launchModeFor maps the workspace config's LaunchMode to the tmuxctl mode used
 // by the action Cmds. LaunchSession maps to ModeSession; everything else
@@ -440,10 +444,10 @@ func mergeStatusCmd(gitOp gitOps, repo, branch, path string) tea.Cmd {
 }
 
 // deleteWorktreeCmd removes the worktree at path (belonging to repo) via git,
-// then best-effort closes its tmux window so no dead pane is left pointing at a
-// missing directory. The git removal is the only step that can fail the
-// operation; the window kill is advisory and its error is ignored.
-func deleteWorktreeCmd(ops tmuxOps, gitOp gitOps, repo, path string) tea.Cmd {
+// then best-effort closes its attached tmux window/session so no dead pane is
+// left pointing at a missing directory. The git removal is the only step that
+// can fail the operation; tmux cleanup is advisory and its error is ignored.
+func deleteWorktreeCmd(ops tmuxOps, gitOp gitOps, repo, path string, mode tmuxctl.LaunchMode) tea.Cmd {
 	return func() tea.Msg {
 		var removeFn func(string, string) error
 		if gitOp != nil {
@@ -455,11 +459,15 @@ func deleteWorktreeCmd(ops tmuxOps, gitOp gitOps, repo, path string) tea.Cmd {
 			return worktreeDeletedMsg{path: path, err: err}
 		}
 
-		// Best-effort cleanup of the worktree's tmux window. Failures here do
-		// not undo the successful removal — the directory is already gone.
+		// Best-effort cleanup of the worktree's tmux attachment. Failures here
+		// do not undo the successful removal — the directory is already gone.
 		if ops != nil && ops.Available() {
 			if target, err := ops.FindWindowByDir(path); err == nil {
-				_ = ops.KillWindow(target)
+				if mode == tmuxctl.ModeSession {
+					_ = ops.KillSession(target)
+				} else {
+					_ = ops.KillWindow(target)
+				}
 			}
 		}
 		return worktreeDeletedMsg{path: path}
@@ -687,7 +695,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.prompt = promptIdle
 					m.deleteTarget = workspace.Row{}
 					m.deleteMergeInfo = ""
-					return m, deleteWorktreeCmd(m.tmux, m.gitOp, target.Repo, target.Worktree)
+					return m, deleteWorktreeCmd(m.tmux, m.gitOp, target.Repo, target.Worktree, m.launchMode)
 				}
 				m.prompt = promptIdle
 				m.deleteTarget = workspace.Row{}
