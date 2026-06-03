@@ -322,6 +322,33 @@ func TestEnsureWindowMode_CreatesNewSession(t *testing.T) {
 	assertCall(t, r, 3, "set-option", "-w", "-t", "repo-branch:0", "@cog_dir")
 }
 
+func TestEnsureWindowMode_DuplicateSessionReusesExistingSession(t *testing.T) {
+	withTMUX(t)
+
+	r := &fakeRunner{}
+	// Dedup by @cog_dir does not find older/untagged tmux windows.
+	r.push("main:0 /other/path\n", nil)
+	// Creating the session fails because a session with the derived name already exists.
+	r.push("", errors.New("tmux new-session: duplicate session: repo/branch"))
+	// Fallback resolves the existing session to one of its windows.
+	r.push("main:0\nrepo/branch:2\nrepo/branch:3\n", nil)
+
+	target, err := EnsureWindowModeWith(r, "/private/tmp/newwt", "repo/branch", []string{"sleep", "60"}, ModeSession)
+	if err != nil {
+		t.Fatalf("EnsureWindowModeWith: unexpected error: %v", err)
+	}
+	if target != "repo/branch:2" {
+		t.Errorf("target = %q, want %q", target, "repo/branch:2")
+	}
+
+	assertCall(t, r, 0, "list-windows", "-a", "-F", "#{session_name}:#{window_index} #{@cog_dir}")
+	assertCall(t, r, 1, "new-session", "-d", "-s", "repo/branch", "-c", "/private/tmp/newwt")
+	assertCall(t, r, 2, "list-windows", "-a", "-F", "#{session_name}:#{window_index}")
+	if len(r.calls) != 3 {
+		t.Errorf("expected no set-option calls when reusing existing session, got %d calls: %v", len(r.calls), r.calls)
+	}
+}
+
 func TestEnsureWindowMode_SessionSanitizesName(t *testing.T) {
 	withTMUX(t)
 
