@@ -252,6 +252,16 @@ func newSessionWith(r Runner, canonical, name string, argv []string) (Target, er
 
 	out, err := r.Run(args...)
 	if err != nil {
+		// Older or manually-created sessions may not have @cog_dir set, so the
+		// dedup lookup above can miss them. If tmux says the requested session
+		// already exists, reuse it instead of surfacing a launch failure.
+		if isDuplicateSessionError(err, session) {
+			target, findErr := findWindowBySessionWith(r, session)
+			if findErr != nil {
+				return "", fmt.Errorf("tmuxctl: find duplicate session %q: %w", session, findErr)
+			}
+			return target, nil
+		}
 		return "", fmt.Errorf("tmuxctl: new-session: %w", err)
 	}
 
@@ -272,6 +282,44 @@ func newSessionWith(r Runner, canonical, name string, argv []string) (Target, er
 	}
 
 	return target, nil
+}
+
+func isDuplicateSessionError(err error, session string) bool {
+	if err == nil || session == "" {
+		return false
+	}
+
+	const marker = "duplicate session:"
+	msg := err.Error()
+	i := strings.LastIndex(msg, marker)
+	if i < 0 {
+		return false
+	}
+	duplicate := strings.TrimSpace(msg[i+len(marker):])
+	return duplicate == session
+}
+
+func findWindowBySessionWith(r Runner, session string) (Target, error) {
+	out, err := r.Run(
+		"list-windows", "-a",
+		"-F", "#{session_name}:#{window_index}",
+	)
+	if err != nil {
+		return "", fmt.Errorf("list-windows: %w", err)
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		target := Target(line)
+		if sessionOf(target) == session {
+			return target, nil
+		}
+	}
+
+	return "", ErrWindowNotFound
 }
 
 // sanitizeSessionName replaces tmux-reserved characters ("." and ":") with "-"

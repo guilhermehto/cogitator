@@ -322,14 +322,41 @@ func TestEnsureWindowMode_CreatesNewSession(t *testing.T) {
 	assertCall(t, r, 3, "set-option", "-w", "-t", "repo-branch:0", "@cog_dir")
 }
 
+func TestEnsureWindowMode_DuplicateSessionReusesExistingSession(t *testing.T) {
+	withTMUX(t)
+
+	r := &fakeRunner{}
+	// Dedup by @cog_dir does not find older/untagged tmux windows.
+	r.push("main:0 /other/path\n", nil)
+	// Creating the session fails because a session with the derived name already exists.
+	r.push("", errors.New("tmux new-session: duplicate session: repo/branch"))
+	// Fallback resolves the existing session to one of its windows.
+	r.push("main:0\nrepo/branch:2\nrepo/branch:3\n", nil)
+
+	target, err := EnsureWindowModeWith(r, "/private/tmp/newwt", "repo/branch", []string{"sleep", "60"}, ModeSession)
+	if err != nil {
+		t.Fatalf("EnsureWindowModeWith: unexpected error: %v", err)
+	}
+	if target != "repo/branch:2" {
+		t.Errorf("target = %q, want %q", target, "repo/branch:2")
+	}
+
+	assertCall(t, r, 0, "list-windows", "-a", "-F", "#{session_name}:#{window_index} #{@cog_dir}")
+	assertCall(t, r, 1, "new-session", "-d", "-s", "repo/branch", "-c", "/private/tmp/newwt")
+	assertCall(t, r, 2, "list-windows", "-a", "-F", "#{session_name}:#{window_index}")
+	if len(r.calls) != 3 {
+		t.Errorf("expected no set-option calls when reusing existing session, got %d calls: %v", len(r.calls), r.calls)
+	}
+}
+
 func TestEnsureWindowMode_SessionSanitizesName(t *testing.T) {
 	withTMUX(t)
 
 	r := &fakeRunner{}
-	r.push("", nil)                 // dedup: no window
+	r.push("", nil)                     // dedup: no window
 	r.push("my-repo-1-2-feat:0\n", nil) // new-session target
-	r.push("", nil)                 // remain-on-exit
-	r.push("", nil)                 // @cog_dir
+	r.push("", nil)                     // remain-on-exit
+	r.push("", nil)                     // @cog_dir
 
 	_, err := EnsureWindowModeWith(r, "/private/tmp/wt", "my.repo:1.2/feat", []string{"sleep", "60"}, ModeSession)
 	if err != nil {
@@ -473,10 +500,10 @@ func TestSelectSession_NotAvailable(t *testing.T) {
 
 func TestSessionOf(t *testing.T) {
 	cases := map[Target]string{
-		"repo-a:2":      "repo-a",
-		"my/repo:0":     "my/repo",
-		"weird:1:2":     "weird:1",
-		"bare-session":  "bare-session",
+		"repo-a:2":     "repo-a",
+		"my/repo:0":    "my/repo",
+		"weird:1:2":    "weird:1",
+		"bare-session": "bare-session",
 	}
 	for in, want := range cases {
 		if got := sessionOf(in); got != want {
@@ -489,7 +516,7 @@ func TestSelect_SwitchClientErrorPropagates(t *testing.T) {
 	withTMUX(t)
 
 	r := &fakeRunner{}
-	r.push("", nil)                                  // select-window succeeds
+	r.push("", nil)                              // select-window succeeds
 	r.push("", errors.New("can't find session")) // switch-client fails
 
 	err := SelectWith(r, "main:5")
