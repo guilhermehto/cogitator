@@ -126,7 +126,14 @@ func Listen(ctx context.Context, sockPath string, handler func(raw []byte), logg
 					return
 				}
 			}
-			go serveHookConn(conn, handler, logger)
+			// serveHookConn is called synchronously (not in a goroutine) so
+			// that frames are read and dispatched in the order connections
+			// arrive. Each hook sender writes exactly one frame and closes the
+			// connection, so the read completes quickly (bounded by
+			// hookReadTimeout). Serialising here prevents a later hook event
+			// from being processed before an earlier one when two senders
+			// connect in rapid succession.
+			serveHookConn(conn, handler, logger)
 		}
 	}()
 
