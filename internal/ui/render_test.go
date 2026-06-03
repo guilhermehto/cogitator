@@ -276,6 +276,34 @@ func TestLegendLineZeroWidthIncludesTaskGlyphs(t *testing.T) {
 	}
 }
 
+// TestStyledStatusCodexStrings verifies that every status string the Codex
+// provider emits renders legibly (non-blank for "busy"; blank for idle/empty)
+// and that the existing opencode strings are unaffected.
+func TestStyledStatusCodexStrings(t *testing.T) {
+	cases := []struct {
+		name      string
+		status    string
+		wantBlank bool // true → rendered output should be empty/whitespace
+	}{
+		// Codex-emitted strings.
+		{name: "codex busy renders non-blank", status: "busy", wantBlank: false},
+		{name: "codex idle renders blank", status: "idle", wantBlank: true},
+		{name: "codex empty renders blank", status: "", wantBlank: true},
+		// opencode-only strings — regression guard.
+		{name: "opencode generating renders non-blank", status: "generating", wantBlank: false},
+		{name: "opencode retry renders non-blank", status: "retry", wantBlank: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := styledStatus(tc.status)
+			blank := strings.TrimSpace(got) == ""
+			if blank != tc.wantBlank {
+				t.Fatalf("styledStatus(%q) = %q, wantBlank=%v", tc.status, got, tc.wantBlank)
+			}
+		})
+	}
+}
+
 // TestFormatRowShowsProviderBadge verifies that a SessionView with a non-empty
 // Provider renders a "[<provider>]" badge in the row output.
 func TestFormatRowShowsProviderBadge(t *testing.T) {
