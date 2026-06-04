@@ -96,6 +96,52 @@ func TestRenderWorkspaceRowsRunningRowShowsBranch(t *testing.T) {
 	}
 }
 
+// TestRenderWorkspaceRowsBranchLeadsSessionTitle asserts the worktree branch is
+// rendered before the session title — the branch is the primary, navigable
+// identity for a row, so it leads.
+func TestRenderWorkspaceRowsBranchLeadsSessionTitle(t *testing.T) {
+	m := model{width: 200}
+	rows := []workspace.Row{
+		makeRow("/repo/a", "/repo/a", "feat/login", "running session", workspace.StateRunning, state.AttnActive, fixedNow),
+	}
+	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
+	line := wsStripANSI(wsRowLineContaining(got, "running session"))
+	if line == "" {
+		t.Fatal("running row not found")
+	}
+	branchPos := strings.Index(line, "feat/login")
+	titlePos := strings.Index(line, "running session")
+	if branchPos < 0 || titlePos < 0 {
+		t.Fatalf("row must show both branch and title, got %q", line)
+	}
+	if branchPos >= titlePos {
+		t.Fatalf("branch must lead the session title: branch=%d title=%d in %q", branchPos, titlePos, line)
+	}
+}
+
+// TestRenderWorkspaceRowsLongSessionTitleTruncated asserts a long session title
+// is capped with an ellipsis while the branch is shown in full.
+func TestRenderWorkspaceRowsLongSessionTitleTruncated(t *testing.T) {
+	m := model{width: 200}
+	longTitle := "This is a very long session title that must be truncated"
+	rows := []workspace.Row{
+		makeRow("/repo/a", "/repo/a", "feat/auth", longTitle, workspace.StateRunning, state.AttnActive, fixedNow),
+	}
+	got := wsStripANSI(m.renderWorkspaceRows(200, rows, 0, fixedNow))
+	if strings.Contains(got, longTitle) {
+		t.Fatalf("long session title must be truncated, but full title appeared in %q", got)
+	}
+	if !strings.Contains(got, "…") {
+		t.Fatalf("truncated session title must end with an ellipsis, got %q", got)
+	}
+	if !strings.Contains(got, "feat/auth") {
+		t.Fatalf("branch must be shown in full, got %q", got)
+	}
+	if !strings.Contains(got, "This is a") {
+		t.Fatalf("a leading portion of the session title must still be shown, got %q", got)
+	}
+}
+
 func TestRenderWorkspaceRowsRepoHeaderShowsRepoPath(t *testing.T) {
 	m := model{width: 200}
 	rows := []workspace.Row{
