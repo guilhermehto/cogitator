@@ -11,6 +11,18 @@ import (
 	"github.com/guilhermehto/cogitator/internal/state"
 )
 
+func TestAttnLabelFinishedUsesFinishedGlyph(t *testing.T) {
+	got := attnLabel(state.AttnFinished, state.SourceLive)
+	if !strings.Contains(got, glyphFinished) {
+		t.Fatalf("finished label %q must contain finished glyph", got)
+	}
+	// Finished must win over the source-recent fallback.
+	got = attnLabel(state.AttnFinished, state.SourceRecent)
+	if !strings.Contains(got, glyphFinished) {
+		t.Fatalf("finished label (recent source) %q must contain finished glyph", got)
+	}
+}
+
 func TestRenderAllSessionsRedactsInstanceHostPort(t *testing.T) {
 	m := model{}
 	rows := []state.SessionView{

@@ -29,6 +29,7 @@ var (
 	attnErrStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
 	attnInactiveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	attnActiveStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
+	attnFinishedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true)
 
 	statusBusyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 
@@ -66,6 +67,7 @@ const (
 	glyphQuestion   = "\U000f0625" // 󰘥
 	glyphPermission = "\U000f033e" // 󰌾
 	glyphError      = "\U000f0026" // 󰀦
+	glyphFinished   = "\U000f012c" // 󰄬 check — agent finished, awaiting your return
 	// glyphTaskActive marks a running Taskwarrior task in the ST column.
 	// When active, it replaces the priority glyph for that row.
 	glyphTaskActive = "\U000f040a" // 󰐊 play
@@ -133,6 +135,8 @@ func attnLabel(a state.Attention, source state.Source) string {
 		return attnQuestionStyle.Render(glyphQuestion) + " "
 	case state.AttnErrored:
 		return attnErrStyle.Render(glyphError) + " "
+	case state.AttnFinished:
+		return attnFinishedStyle.Render(glyphFinished) + " "
 	}
 	if source == state.SourceRecent {
 		return recentStyle.Render(glyphRecent) + " "
@@ -178,6 +182,7 @@ func legendLine(width int) string {
 	sessionParts := []string{
 		dimStyle.Render("legend:"),
 		attnActiveStyle.Render(glyphActive) + " " + dimStyle.Render("active"),
+		attnFinishedStyle.Render(glyphFinished) + " " + dimStyle.Render("finished"),
 		attnInactiveStyle.Render(glyphInactive) + " " + dimStyle.Render("inactive"),
 		recentStyle.Render(glyphRecent) + " " + dimStyle.Render("recent"),
 		attnQuestionStyle.Render(glyphQuestion) + " " + dimStyle.Render("question"),

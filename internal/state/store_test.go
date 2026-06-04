@@ -9,7 +9,9 @@ import (
 
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/discovery"
+	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/oc"
+	"github.com/guilhermehto/cogitator/internal/provider"
 )
 
 func newTestStore(ctx context.Context) *Store {
@@ -345,5 +347,157 @@ func TestSnapshotDedupePrefersHealthyInstance(t *testing.T) {
 	}
 	if len(snap.UnreachableInstances) != 1 || snap.UnreachableInstances[0].InstanceID != instA.ID {
 		t.Fatalf("expected only instA in unreachable list, got %+v", snap.UnreachableInstances)
+	}
+}
+
+// status drives the oc-row attention through busy then idle.
+func applyStatus(t *testing.T, s *Store, instID, sid, statusType string) {
+	t.Helper()
+	s.ApplyEvent(instID, oc.Event{
+		Type:       "session.status",
+		Properties: mustJSON(t, oc.SessionStatusEvt{SessionID: sid, Status: oc.Status{Type: statusType}}),
+	})
+}
+
+func attentionOf(t *testing.T, s *Store, sid string) Attention {
+	t.Helper()
+	for _, sv := range s.snapshot().Sessions {
+		if sv.SessionID == sid {
+			return sv.Attention
+		}
+	}
+	t.Fatalf("session %q not found in snapshot", sid)
+	return ""
+}
+
+func TestFinishedLifecycleOpenCode(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(ctx)
+	inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
+	s.AddInstance(inst)
+	s.SyncRecent(inst.ID, []oc.Session{makeSession("S1", 1_000)})
+
+	// Idle from discovery, never active → must not show finished.
+	if got := attentionOf(t, s, "S1"); got != AttnInactive {
+		t.Fatalf("fresh idle: got %q, want %q", got, AttnInactive)
+	}
+
+	// User requested something: agent goes busy.
+	applyStatus(t, s, inst.ID, "S1", "busy")
+	if got := attentionOf(t, s, "S1"); got != AttnActive {
+		t.Fatalf("busy: got %q, want %q", got, AttnActive)
+	}
+
+	// Agent finishes → idle. Now finished, because it was active.
+	applyStatus(t, s, inst.ID, "S1", "idle")
+	if got := attentionOf(t, s, "S1"); got != AttnFinished {
+		t.Fatalf("active→idle: got %q, want %q", got, AttnFinished)
+	}
+
+	// User views the session → finished clears back to inactive.
+	s.MarkViewed("opencode", inst.ID, "S1")
+	if got := attentionOf(t, s, "S1"); got != AttnInactive {
+		t.Fatalf("after MarkViewed: got %q, want %q", got, AttnInactive)
+	}
+
+	// Loop repeats: active again, idle again → finished again.
+	applyStatus(t, s, inst.ID, "S1", "busy")
+	applyStatus(t, s, inst.ID, "S1", "idle")
+	if got := attentionOf(t, s, "S1"); got != AttnFinished {
+		t.Fatalf("second loop: got %q, want %q", got, AttnFinished)
+	}
+}
+
+func TestFinishedMarkViewedScansAllInstancesWhenIDEmpty(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(ctx)
+	inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
+	s.AddInstance(inst)
+	s.SyncRecent(inst.ID, []oc.Session{makeSession("S1", 1_000)})
+	applyStatus(t, s, inst.ID, "S1", "busy")
+	applyStatus(t, s, inst.ID, "S1", "idle")
+	if got := attentionOf(t, s, "S1"); got != AttnFinished {
+		t.Fatalf("precondition: got %q, want %q", got, AttnFinished)
+	}
+	// The workspace Row carries no instance id; MarkViewed must still find it.
+	s.MarkViewed("opencode", "", "S1")
+	if got := attentionOf(t, s, "S1"); got != AttnInactive {
+		t.Fatalf("empty-instance MarkViewed: got %q, want %q", got, AttnInactive)
+	}
+}
+
+func TestFinishedSupersededByPendingRequest(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(ctx)
+	inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
+	s.AddInstance(inst)
+	s.SyncRecent(inst.ID, []oc.Session{makeSession("S1", 1_000)})
+	applyStatus(t, s, inst.ID, "S1", "busy")
+	applyStatus(t, s, inst.ID, "S1", "idle")
+	if got := attentionOf(t, s, "S1"); got != AttnFinished {
+		t.Fatalf("precondition: got %q, want %q", got, AttnFinished)
+	}
+	// A pending permission is the live reason to look — it must win over finished.
+	s.ApplyEvent(inst.ID, oc.Event{
+		Type:       "permission.asked",
+		Properties: mustJSON(t, oc.PermissionRequest{ID: "p1", SessionID: "S1"}),
+	})
+	if got := attentionOf(t, s, "S1"); got != AttnPermissionPending {
+		t.Fatalf("pending perm over finished: got %q, want %q", got, AttnPermissionPending)
+	}
+}
+
+func TestFinishedLifecycleProvider(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(ctx)
+
+	apply := func(statusType string) {
+		s.ApplyUpdate(provider.SessionUpdate{
+			Provider:   harness.Kind("codex"),
+			InstanceID: "codex",
+			SessionID:  "C1",
+			StatusType: statusType,
+			Source:     string(SourceLive),
+		})
+	}
+
+	apply("busy")
+	if got := attentionOf(t, s, "C1"); got != AttnActive {
+		t.Fatalf("provider busy: got %q, want %q", got, AttnActive)
+	}
+	apply("idle")
+	if got := attentionOf(t, s, "C1"); got != AttnFinished {
+		t.Fatalf("provider active→idle: got %q, want %q", got, AttnFinished)
+	}
+	s.MarkViewed("codex", "codex", "C1")
+	if got := attentionOf(t, s, "C1"); got != AttnInactive {
+		t.Fatalf("provider MarkViewed: got %q, want %q", got, AttnInactive)
+	}
+}
+
+func TestFinishedProviderSurvivesReplace(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(ctx)
+	codex := harness.Kind("codex")
+
+	mk := func(statusType string) provider.SessionUpdate {
+		return provider.SessionUpdate{
+			Provider:   codex,
+			InstanceID: "codex",
+			SessionID:  "C1",
+			StatusType: statusType,
+			Source:     string(SourceLive),
+		}
+	}
+
+	s.ReplaceProviderInstance(codex, "codex", []provider.SessionUpdate{mk("busy")})
+	s.ReplaceProviderInstance(codex, "codex", []provider.SessionUpdate{mk("idle")})
+	if got := attentionOf(t, s, "C1"); got != AttnFinished {
+		t.Fatalf("provider replace active→idle: got %q, want %q", got, AttnFinished)
+	}
+	// A subsequent identical-idle refresh must not lose the finished badge.
+	s.ReplaceProviderInstance(codex, "codex", []provider.SessionUpdate{mk("idle")})
+	if got := attentionOf(t, s, "C1"); got != AttnFinished {
+		t.Fatalf("finished lost on identical refresh: got %q, want %q", got, AttnFinished)
 	}
 }
