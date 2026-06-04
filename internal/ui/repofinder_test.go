@@ -328,3 +328,119 @@ func TestRepoAddMsg_ErrorSetsHint(t *testing.T) {
 		t.Errorf("hint: got %q, want add-repo-failed", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// removeRepoCmd
+// ---------------------------------------------------------------------------
+
+func TestRemoveRepoCmd_RemovesThenNoop(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	repo := initGitRepoForUI(t)
+	want, err := pathnorm.Canonical(repo)
+	if err != nil {
+		t.Fatalf("canonical: %v", err)
+	}
+	if _, err := workspace.AddRepo(repo); err != nil {
+		t.Fatalf("AddRepo: %v", err)
+	}
+
+	msg := removeRepoCmd(want)().(repoRemoveMsg)
+	if !msg.removed || msg.removeErr != nil || msg.repoPath != want {
+		t.Fatalf("first remove: unexpected %+v (want removed, path %q)", msg, want)
+	}
+
+	// Second remove of the now-untracked path is a no-op.
+	msg2 := removeRepoCmd(want)().(repoRemoveMsg)
+	if msg2.removed || msg2.removeErr != nil {
+		t.Errorf("second remove should be a no-op; got %+v", msg2)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 'R' key + confirmation flow
+// ---------------------------------------------------------------------------
+
+func TestRemoveRepoKey_OpensConfirm(t *testing.T) {
+	m := model{
+		width:         120,
+		workspaceRows: []workspace.Row{{Repo: "/home/me/myrepo", Worktree: "/home/me/myrepo"}},
+	}
+	updated, cmd := m.Update(keyMsg("R"))
+	m2 := updated.(model)
+	if m2.prompt != promptConfirmRemoveRepo {
+		t.Errorf("'R' must open the remove confirmation; got prompt %v", m2.prompt)
+	}
+	if m2.removeRepoTarget != "/home/me/myrepo" {
+		t.Errorf("removeRepoTarget: got %q, want %q", m2.removeRepoTarget, "/home/me/myrepo")
+	}
+	if cmd != nil {
+		t.Errorf("'R' must not dispatch a cmd until confirmed")
+	}
+}
+
+func TestRemoveRepoKey_NoRowsNoop(t *testing.T) {
+	m := model{width: 120}
+	updated, _ := m.Update(keyMsg("R"))
+	if updated.(model).prompt != promptIdle {
+		t.Errorf("'R' with no rows must stay idle")
+	}
+}
+
+func TestRemoveRepoConfirm_YDispatches(t *testing.T) {
+	m := model{width: 120, prompt: promptConfirmRemoveRepo, removeRepoTarget: "/home/me/myrepo"}
+	updated, cmd := m.Update(keyMsg("y"))
+	m2 := updated.(model)
+	if m2.prompt != promptIdle {
+		t.Errorf("'y' must close the confirmation; got prompt %v", m2.prompt)
+	}
+	if m2.removeRepoTarget != "" {
+		t.Errorf("'y' must clear removeRepoTarget; got %q", m2.removeRepoTarget)
+	}
+	if cmd == nil {
+		t.Errorf("'y' must dispatch the remove cmd")
+	}
+}
+
+func TestRemoveRepoConfirm_OtherKeyCancels(t *testing.T) {
+	m := model{width: 120, prompt: promptConfirmRemoveRepo, removeRepoTarget: "/home/me/myrepo"}
+	updated, cmd := m.Update(keyMsg("n"))
+	m2 := updated.(model)
+	if m2.prompt != promptIdle {
+		t.Errorf("any other key must cancel; got prompt %v", m2.prompt)
+	}
+	if m2.removeRepoTarget != "" {
+		t.Errorf("cancel must clear removeRepoTarget; got %q", m2.removeRepoTarget)
+	}
+	if cmd != nil {
+		t.Errorf("cancel must not dispatch a cmd")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// repoRemoveMsg handling
+// ---------------------------------------------------------------------------
+
+func TestRepoRemoveMsg_RemovedSetsHint(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := model{width: 120}
+	updated, _ := m.Update(repoRemoveMsg{removed: true, repoPath: "/home/me/myrepo"})
+	if got := updated.(model).tmuxHint; got != "removed repo: myrepo" {
+		t.Errorf("hint: got %q, want %q", got, "removed repo: myrepo")
+	}
+}
+
+func TestRepoRemoveMsg_NotTrackedSetsHint(t *testing.T) {
+	m := model{width: 120}
+	updated, _ := m.Update(repoRemoveMsg{removed: false, repoPath: "/home/me/myrepo"})
+	if got := updated.(model).tmuxHint; got != "repo not tracked: myrepo" {
+		t.Errorf("hint: got %q, want %q", got, "repo not tracked: myrepo")
+	}
+}
+
+func TestRepoRemoveMsg_ErrorSetsHint(t *testing.T) {
+	m := model{width: 120}
+	updated, _ := m.Update(repoRemoveMsg{removeErr: errScanTest, repoPath: "/home/me/x"})
+	if got := updated.(model).tmuxHint; !strings.Contains(got, "remove repo failed") {
+		t.Errorf("hint: got %q, want remove-repo-failed", got)
+	}
+}

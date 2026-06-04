@@ -50,6 +50,30 @@ type repoAddMsg struct {
 	addErr   error
 }
 
+// repoRemoveMsg reports the outcome of untracking a repository.
+//
+//   - removed:                          repoPath was dropped from the config.
+//   - removed == false, removeErr == nil: the repo was not configured (no-op).
+//   - removeErr != nil:                 persistence failed.
+type repoRemoveMsg struct {
+	repoPath  string
+	removed   bool
+	removeErr error
+}
+
+// removeRepoCmd untracks path from the workspace config off the UI goroutine
+// (it writes the config file). It only forgets the repo; nothing on disk is
+// touched. The result is a repoRemoveMsg.
+func removeRepoCmd(path string) tea.Cmd {
+	return func() tea.Msg {
+		removed, err := workspace.RemoveRepo(path)
+		if err != nil {
+			return repoRemoveMsg{repoPath: path, removeErr: err}
+		}
+		return repoRemoveMsg{repoPath: path, removed: removed}
+	}
+}
+
 // scanReposCmd discovers git repositories under root off the UI goroutine and
 // returns a repoScanMsg. Discovery is filesystem-bound, so it must never run
 // inline in Update. Repos already present in the config are filtered out so the

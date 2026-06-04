@@ -443,6 +443,9 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 		if m.prompt == promptConfirmDeleteWorktree || m.prompt == promptConfirmDeleteWorktree2 {
 			b.WriteString("\n" + m.worktreeDeletePromptLine())
 		}
+		if m.prompt == promptConfirmRemoveRepo {
+			b.WriteString("\n" + m.repoRemovePromptLine())
+		}
 		return b.String()
 	}
 
@@ -509,7 +512,23 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 		b.WriteString(m.worktreeDeletePromptLine() + "\n")
 	}
 
+	// Render the repo-untrack confirmation as the last visible line so it
+	// reads as the active modal.
+	if m.prompt == promptConfirmRemoveRepo {
+		b.WriteString(m.repoRemovePromptLine() + "\n")
+	}
+
 	return b.String()
+}
+
+// repoRemovePromptLine returns the styled confirmation line shown while the
+// user is confirming that a repo should be untracked ('R'). It spells out that
+// the repo is only forgotten by cogitator — nothing on disk is removed — and
+// that any key other than 'y' cancels.
+func (m model) repoRemovePromptLine() string {
+	name := filepath.Base(m.removeRepoTarget)
+	return wtHintStyle.Render(fmt.Sprintf(
+		"stop tracking repo [%s]? worktrees stay on disk · y to confirm · any other key cancels", name))
 }
 
 // worktreePromptLine returns the styled prompt line shown in the sessions pane
