@@ -175,11 +175,12 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) *Store {
 //
 // Seeding alone never creates snapshot rows — the restored map is only
 // consulted by the snapshot override added in step 3.
-func (s *Store) RestoreSessions(sessions map[providerSessionKey]RestoredSession) {
+func (s *Store) RestoreSessions(sessions []RestoredSession) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for k, v := range sessions {
+	for _, v := range sessions {
 		if v.Attention.isSticky() {
+			k := providerSessionKey{provider: v.Provider, sessionID: v.SessionID}
 			s.restored[k] = v
 		}
 	}

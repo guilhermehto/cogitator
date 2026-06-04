@@ -509,13 +509,13 @@ func TestRestoreSessionsPopulatesMap(t *testing.T) {
 	s := newTestStore(ctx)
 
 	codex := harness.Kind("codex")
-	input := map[providerSessionKey]RestoredSession{
-		{provider: codex, sessionID: "S1"}: {Provider: codex, SessionID: "S1", Attention: AttnFinished},
-		{provider: codex, sessionID: "S2"}: {Provider: codex, SessionID: "S2", Attention: AttnErrored},
-		{provider: codex, sessionID: "S3"}: {Provider: codex, SessionID: "S3", Attention: AttnPermissionPending},
-		{provider: codex, sessionID: "S4"}: {Provider: codex, SessionID: "S4", Attention: AttnQuestionPending},
-		{provider: codex, sessionID: "S5"}: {Provider: codex, SessionID: "S5", Attention: AttnActive},
-		{provider: codex, sessionID: "S6"}: {Provider: codex, SessionID: "S6", Attention: AttnInactive},
+	input := []RestoredSession{
+		{Provider: codex, SessionID: "S1", Attention: AttnFinished},
+		{Provider: codex, SessionID: "S2", Attention: AttnErrored},
+		{Provider: codex, SessionID: "S3", Attention: AttnPermissionPending},
+		{Provider: codex, SessionID: "S4", Attention: AttnQuestionPending},
+		{Provider: codex, SessionID: "S5", Attention: AttnActive},
+		{Provider: codex, SessionID: "S6", Attention: AttnInactive},
 	}
 	s.RestoreSessions(input)
 
@@ -546,9 +546,9 @@ func TestRestoreSeedOnlyYieldsZeroRows(t *testing.T) {
 	s := newTestStore(ctx)
 
 	codex := harness.Kind("codex")
-	s.RestoreSessions(map[providerSessionKey]RestoredSession{
-		{provider: codex, sessionID: "S1"}: {Provider: codex, SessionID: "S1", Attention: AttnFinished},
-		{provider: codex, sessionID: "S2"}: {Provider: codex, SessionID: "S2", Attention: AttnErrored},
+	s.RestoreSessions([]RestoredSession{
+		{Provider: codex, SessionID: "S1", Attention: AttnFinished},
+		{Provider: codex, SessionID: "S2", Attention: AttnErrored},
 	})
 
 	snap := s.snapshot()
@@ -564,10 +564,10 @@ func TestRestoreApplyAndClear(t *testing.T) {
 	ocKind := harness.Kind("opencode")
 	codex := harness.Kind("codex")
 
-	// seed builds a single-entry restored map for convenience.
-	seed := func(prov harness.Kind, sessionID string, attn Attention) map[providerSessionKey]RestoredSession {
-		return map[providerSessionKey]RestoredSession{
-			{provider: prov, sessionID: sessionID}: {Provider: prov, SessionID: sessionID, Attention: attn},
+	// seed builds a single-entry restored slice for convenience.
+	seed := func(prov harness.Kind, sessionID string, attn Attention) []RestoredSession {
+		return []RestoredSession{
+			{Provider: prov, SessionID: sessionID, Attention: attn},
 		}
 	}
 
@@ -704,9 +704,9 @@ func TestRestoreApplyAndClear(t *testing.T) {
 		inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
 		s.AddInstance(inst)
 		// Seed both opencode and codex for the same logical session id.
-		s.RestoreSessions(map[providerSessionKey]RestoredSession{
-			{provider: ocKind, sessionID: "S1"}:  {Provider: ocKind, SessionID: "S1", Attention: AttnFinished},
-			{provider: codex, sessionID: "S1"}: {Provider: codex, SessionID: "S1", Attention: AttnErrored},
+		s.RestoreSessions([]RestoredSession{
+			{Provider: ocKind, SessionID: "S1", Attention: AttnFinished},
+			{Provider: codex, SessionID: "S1", Attention: AttnErrored},
 		})
 		s.SyncRecent(inst.ID, []oc.Session{makeSession("S1", 1_000)})
 		// Also add a codex provider row so it appears in the snapshot.

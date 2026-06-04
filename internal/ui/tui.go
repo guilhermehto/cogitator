@@ -28,6 +28,17 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 
 	store := state.New(ctx, cfg, logger)
 
+	// Seed the store with last-known attention from the persisted roster so
+	// badges (finished, errored, permission, question) survive restarts.
+	// workspace.Load prunes missing dirs and returns an empty map when the
+	// file is absent; on any other error we fall back to an empty seed rather
+	// than aborting startup.
+	if roster, err := workspace.Load(); err == nil {
+		store.RestoreSessions(rosterToRestored(roster))
+	} else {
+		logger.Warn("roster load failed; starting without restored badges", "err", err)
+	}
+
 	// Boot providers through the generic manager. The opencode provider owns
 	// its own mDNS discovery loop (discovery.Browse) and feeds the supervisor
 	// via OnAdd/OnRemove. The manager starts each provider in its own goroutine.
