@@ -41,6 +41,8 @@ var (
 	// the running row is distinguishable from the cursor (reverse-video) and
 	// from the priority glyph palette.
 	taskActiveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Bold(true)
+
+	cellLineBreakReplacer = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ")
 )
 
 var agentPalette = []string{
@@ -260,6 +262,7 @@ func (m model) renderAllSessions(width int, rows []state.SessionView, recentByIn
 }
 
 func padCell(s string, cellWidth int, align lipgloss.Position) string {
+	s = singleLineCell(s)
 	w := lipgloss.Width(s)
 	if w >= cellWidth {
 		return s
@@ -269,6 +272,15 @@ func padCell(s string, cellWidth int, align lipgloss.Position) string {
 		return pad + s
 	}
 	return s + pad
+}
+
+// singleLineCell folds hard line breaks out of table cells. Session titles come
+// from providers and may be multiline; rows must stay one terminal line tall.
+func singleLineCell(s string) string {
+	if !strings.ContainsAny(s, "\r\n") {
+		return s
+	}
+	return cellLineBreakReplacer.Replace(s)
 }
 
 func columnHeader(width int) string {
@@ -643,6 +655,7 @@ func branchLabel(row workspace.Row) string {
 // to follow the branch on a worktree row. The branch leads, so the title is
 // capped to maxSessionTitleW and de-emphasised. Empty titles add nothing.
 func sessionTitleSuffix(title string) string {
+	title = singleLineCell(title)
 	if title == "" {
 		return ""
 	}
