@@ -94,6 +94,11 @@ const (
 	// (including esc/enter) aborts. This double-gate guards a destructive,
 	// irreversible action.
 	promptConfirmDeleteWorktree2
+	// promptConfirmRemoveRepo confirms untracking the repo under the cursor
+	// ('R'). 'y' proceeds; any other key (including esc) cancels. A single
+	// gate is enough: removal only forgets the repo from cogitator's config —
+	// the repo and its worktrees stay on disk and can be re-added with 'A'.
+	promptConfirmRemoveRepo
 )
 
 // launchingTimeout is how long a row stays in the optimistic "launching" state
@@ -312,6 +317,10 @@ type model struct {
 	// delete confirmation prompts (e.g. "merged into main"). Empty until the
 	// async probe (mergeStatusCmd) returns; rendered as "checking…" meanwhile.
 	deleteMergeInfo string
+	// removeRepoTarget is the canonical repo path captured when the user
+	// presses 'R' to untrack the repo under the cursor. Empty when no removal
+	// is in progress; cleared on cancel and on dispatch of removeRepoCmd.
+	removeRepoTarget string
 	// launchMode is the resolved tmux launch mode (window vs session) read from
 	// workspace config. Refreshed on each buildWorkspaceRows so config edits
 	// take effect without a restart. Zero value (ModeWindow) is safe.
@@ -829,6 +838,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.deleteTarget = workspace.Row{}
 				m.deleteMergeInfo = ""
 				return m, nil
+
+			case promptConfirmRemoveRepo:
+				// Single confirmation. 'y' untracks the repo; any other key
+				// (including esc) cancels. Non-destructive: the repo stays on
+				// disk, so one gate is sufficient.
+				if msg.String() == "y" || msg.String() == "Y" {
+					target := m.removeRepoTarget
+					m.prompt = promptIdle
+					m.removeRepoTarget = ""
+					return m, removeRepoCmd(target)
+				}
+				m.prompt = promptIdle
+				m.removeRepoTarget = ""
+				return m, nil
 			}
 		}
 
@@ -962,6 +985,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.deleteMergeInfo = ""
 				m.prompt = promptConfirmDeleteWorktree
 				return m, mergeStatusCmd(m.gitOp, row.Repo, row.Branch, row.Worktree)
+
+			case "R":
+				// Untrack repo: drop the repo under the cursor from cogitator's
+				// config. Non-destructive — the repo and its worktrees stay on
+				// disk — so a single confirmation gates it.
+				if len(m.workspaceRows) == 0 {
+					return m, nil
+				}
+				row := m.workspaceRows[m.sessionCursor]
+				if row.Repo == "" {
+					m.tmuxHint = "no repo to remove for this row"
+					return m, nil
+				}
+				m.removeRepoTarget = row.Repo
+				m.prompt = promptConfirmRemoveRepo
+				return m, nil
 			}
 			return m, nil
 		}
@@ -1170,6 +1209,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+	case repoRemoveMsg:
+		// Outcome of untracking a repo via 'R'.
+		switch {
+		case msg.removeErr != nil:
+			m.tmuxHint = fmt.Sprintf("remove repo failed: %v", msg.removeErr)
+			return m, nil
+		case msg.removed:
+			m.tmuxHint = "removed repo: " + filepath.Base(msg.repoPath)
+			// Rebuild rows so the repo disappears immediately rather than
+			// waiting for the next snapshot.
+			m.workspaceRows, m.launchMode = buildWorkspaceRows(m.snap, m.cfg)
+			if n := len(m.workspaceRows); n == 0 {
+				m.sessionCursor = 0
+			} else if m.sessionCursor >= n {
+				m.sessionCursor = n - 1
+			}
+			return m, nil
+		default:
+			// Path was not configured (e.g. a stale row).
+			m.tmuxHint = "repo not tracked: " + filepath.Base(msg.repoPath)
+			return m, nil
+		}
+
 	case mergeStatusMsg:
 		// Annotate the active delete confirmation, but only if it still targets
 		// the same worktree the probe was launched for (guards against a stale
@@ -1374,7 +1436,7 @@ func (m model) View() string {
 
 	var headerHint string
 	if m.focus == focusSessions {
-		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s recent · A add repo · D del wt  ·  tab→tasks  ·  q quit",
+		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s recent · A add repo · R rm repo · D del wt  ·  tab→tasks  ·  q quit",
 			live, recent, recentMins, m.snap.UpdatedAt.Format("15:04:05"), toggleVerb(m.recentCollapsed))
 	} else {
 		headerHint = fmt.Sprintf("  %d pending  ·  a add · e edit · s start/stop · d done · D del · U undo · j/k move  ·  tab→sessions  ·  q quit",

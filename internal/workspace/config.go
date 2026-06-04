@@ -232,3 +232,47 @@ func AddRepo(path string) (bool, error) {
 	}
 	return true, nil
 }
+
+// removeRepoPath returns repos with the entry matching canonical dropped,
+// preserving the order of the rest, plus whether an entry was removed. Match is
+// by exact canonical path, so callers must canonicalize before calling.
+func removeRepoPath(repos []RepoConfig, canonical string) ([]RepoConfig, bool) {
+	for i, r := range repos {
+		if r.Path == canonical {
+			out := make([]RepoConfig, 0, len(repos)-1)
+			out = append(out, repos[:i]...)
+			out = append(out, repos[i+1:]...)
+			return out, true
+		}
+	}
+	return repos, false
+}
+
+// RemoveRepo canonicalizes path and drops it from the persisted config when
+// present, then saves. It returns whether the repo was removed (false when it
+// was not configured).
+//
+// RemoveRepo only untracks the repository: the repo and its worktrees are left
+// untouched on disk. It is the inverse of AddRepo.
+func RemoveRepo(path string) (bool, error) {
+	canonical, err := pathnorm.Canonical(path)
+	if err != nil {
+		return false, fmt.Errorf("canonicalize repo path %q: %w", path, err)
+	}
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		return false, err
+	}
+
+	repos, removed := removeRepoPath(cfg.Repos, canonical)
+	if !removed {
+		return false, nil
+	}
+	cfg.Repos = repos
+
+	if err := SaveConfig(cfg); err != nil {
+		return false, err
+	}
+	return true, nil
+}

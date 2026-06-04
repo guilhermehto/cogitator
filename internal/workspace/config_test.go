@@ -292,6 +292,57 @@ func TestAddRepo_PreservesExisting(t *testing.T) {
 	}
 }
 
+// TestRemoveRepo_DropsAndReportsMissing verifies that RemoveRepo untracks a
+// configured repo, preserves the others, and reports a no-op when the path was
+// never tracked.
+func TestRemoveRepo_DropsAndReportsMissing(t *testing.T) {
+	tmp := t.TempDir()
+	withConfigEnv(t, tmp)
+
+	first := filepath.Join(tmp, "first")
+	second := filepath.Join(tmp, "second")
+	for _, d := range []string{first, second} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+		if _, err := workspace.AddRepo(d); err != nil {
+			t.Fatalf("AddRepo %s: %v", d, err)
+		}
+	}
+
+	removed, err := workspace.RemoveRepo(first)
+	if err != nil {
+		t.Fatalf("RemoveRepo: %v", err)
+	}
+	if !removed {
+		t.Fatalf("RemoveRepo: expected removed=true for tracked repo")
+	}
+
+	loaded, err := workspace.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(loaded.Repos) != 1 {
+		t.Fatalf("expected 1 repo after removal, got %d", len(loaded.Repos))
+	}
+	want, err := pathnorm.Canonical(second)
+	if err != nil {
+		t.Fatalf("pathnorm.Canonical: %v", err)
+	}
+	if loaded.Repos[0].Path != want {
+		t.Errorf("surviving repo: got %q, want %q", loaded.Repos[0].Path, want)
+	}
+
+	// Removing the same path again is a no-op.
+	removed, err = workspace.RemoveRepo(first)
+	if err != nil {
+		t.Fatalf("RemoveRepo (already gone): %v", err)
+	}
+	if removed {
+		t.Errorf("RemoveRepo: expected removed=false for untracked path")
+	}
+}
+
 func TestLoadConfigDefaultsLaunchMode(t *testing.T) {
 	tmp := t.TempDir()
 	withConfigEnv(t, tmp)
