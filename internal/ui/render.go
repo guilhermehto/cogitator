@@ -456,9 +456,6 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 	repoIndex := map[string]int{} // repo path → index in groups
 	for i, row := range rows {
 		repo := row.Repo
-		if repo == "" {
-			repo = "(unconfigured)"
-		}
 		gi, ok := repoIndex[repo]
 		if !ok {
 			gi = len(groups)
@@ -470,15 +467,9 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 
 	for _, g := range groups {
 		// Repo header: bold base name, with the full (home-shortened) repo
-		// path in faded italic next to it. The synthetic "(unconfigured)"
-		// group has no real path to annotate.
-		var header string
-		if g.repo == "(unconfigured)" {
-			header = wtRepoStyle.Render("  " + g.repo)
-		} else {
-			header = wtRepoStyle.Render("  "+filepath.Base(g.repo)) +
-				"  " + wtPathStyle.Render(shortenDirectory(g.repo))
-		}
+		// path in faded italic next to it.
+		header := wtRepoStyle.Render("  "+filepath.Base(g.repo)) +
+			"  " + wtPathStyle.Render(shortenDirectory(g.repo))
 		b.WriteString(header + "\n")
 
 		for _, i := range g.rows {

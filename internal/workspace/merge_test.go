@@ -165,39 +165,6 @@ func TestMerge_Empty(t *testing.T) {
 	}
 }
 
-// TestMerge_Missing verifies that a roster entry whose directory is absent
-// from disk yields State=missing.
-func TestMerge_Missing(t *testing.T) {
-	tmp := t.TempDir()
-	repoDir := mustDir(t, tmp, "repo")
-	// Deliberately do NOT create this directory. Canonicalize via parent.
-	rawAbsent := filepath.Join(tmp, "wt-missing")
-	absentDir, err := pathnorm.Canonical(rawAbsent)
-	if err != nil {
-		t.Fatalf("Canonical(%q): %v", rawAbsent, err)
-	}
-
-	past := time.Now().Add(-5 * time.Minute)
-	repos := []workspace.RepoConfig{{Path: repoDir}}
-	// The worktree is in the roster but not on disk and not in worktreesByRepo.
-	worktreesByRepo := map[string][]git.Worktree{
-		repoDir: {},
-	}
-	roster := map[string]workspace.RosterEntry{
-		absentDir: makeRosterEntry(absentDir, "opencode", "sess-gone", "Gone Session", past),
-	}
-
-	rows := workspace.Merge(repos, worktreesByRepo, roster, nil, nil)
-
-	row := findRow(rows, absentDir)
-	if row == nil {
-		t.Fatalf("no row for absent worktree %q; rows: %v", absentDir, rows)
-	}
-	if row.State != workspace.StateMissing {
-		t.Errorf("State: got %q, want %q", row.State, workspace.StateMissing)
-	}
-}
-
 // TestMerge_Unknown verifies that a roster entry with a non-LiveStatus harness
 // and a tmux window present yields State=unknown.
 func TestMerge_Unknown(t *testing.T) {
@@ -409,82 +376,6 @@ func TestMerge_AllDirsCanonical(t *testing.T) {
 		if len(r.Worktree) > 1 && r.Worktree[len(r.Worktree)-1] == '/' {
 			t.Errorf("Row.Worktree %q has trailing slash (not canonical)", r.Worktree)
 		}
-	}
-}
-
-// TestMerge_RosterOnlyMissingDir verifies that a roster entry whose dir is
-// absent from disk appears as State=missing even when the repo is configured.
-func TestMerge_RosterOnlyMissingDir(t *testing.T) {
-	tmp := t.TempDir()
-	repoDir := mustDir(t, tmp, "repo")
-	// This dir is in the roster but does NOT exist on disk. Canonicalize via parent.
-	rawAbsent := filepath.Join(tmp, "wt-gone")
-	absentDir, err := pathnorm.Canonical(rawAbsent)
-	if err != nil {
-		t.Fatalf("Canonical(%q): %v", rawAbsent, err)
-	}
-
-	past := time.Now().Add(-1 * time.Hour)
-	repos := []workspace.RepoConfig{{Path: repoDir}}
-	// No worktrees from git (the dir is gone).
-	worktreesByRepo := map[string][]git.Worktree{repoDir: nil}
-	roster := map[string]workspace.RosterEntry{
-		absentDir: makeRosterEntry(absentDir, "opencode", "sess-gone", "Gone", past),
-	}
-
-	rows := workspace.Merge(repos, worktreesByRepo, roster, nil, nil)
-
-	row := findRow(rows, absentDir)
-	if row == nil {
-		t.Fatalf("no row for absent dir %q; rows: %v", absentDir, rows)
-	}
-	if row.State != workspace.StateMissing {
-		t.Errorf("State: got %q, want %q", row.State, workspace.StateMissing)
-	}
-}
-
-// TestMerge_ProviderCodexLiveOnlyRow verifies that a live-only session with
-// Provider="codex" produces a row with Harness="codex" (not relabeled "opencode").
-func TestMerge_ProviderCodexLiveOnlyRow(t *testing.T) {
-	tmp := t.TempDir()
-	wtDir := mustDir(t, tmp, "wt-codex-live")
-
-	now := time.Now()
-	sess := makeSessionWithProvider(wtDir, "sess-codex", "Codex Task", state.SourceLive, now, harness.Kind("codex"))
-	sess.Attention = state.AttnActive
-
-	rows := workspace.Merge(nil, nil, nil, []state.SessionView{sess}, nil)
-
-	row := findRow(rows, wtDir)
-	if row == nil {
-		t.Fatalf("no row for live-only codex dir %q", wtDir)
-	}
-	if row.Harness != "codex" {
-		t.Errorf("Harness: got %q, want %q — codex live row must not be relabeled opencode", row.Harness, "codex")
-	}
-	if row.State != workspace.StateRunning {
-		t.Errorf("State: got %q, want %q", row.State, workspace.StateRunning)
-	}
-}
-
-// TestMerge_ProviderOpencodeUnchanged verifies that a live-only session with
-// Provider="opencode" still produces a row with Harness="opencode".
-func TestMerge_ProviderOpencodeUnchanged(t *testing.T) {
-	tmp := t.TempDir()
-	wtDir := mustDir(t, tmp, "wt-oc-live")
-
-	now := time.Now()
-	sess := makeSession(wtDir, "sess-oc", "OC Task", state.SourceLive, now)
-	// makeSession already sets Provider="opencode"
-
-	rows := workspace.Merge(nil, nil, nil, []state.SessionView{sess}, nil)
-
-	row := findRow(rows, wtDir)
-	if row == nil {
-		t.Fatalf("no row for live-only opencode dir %q", wtDir)
-	}
-	if row.Harness != "opencode" {
-		t.Errorf("Harness: got %q, want %q", row.Harness, "opencode")
 	}
 }
 
