@@ -1038,12 +1038,17 @@ func (s *Store) snapshot() Snapshot {
 	rows := make([]SessionView, 0, len(best))
 	for key, c := range best {
 		view := c.view
-		// Apply the restored badge only when the row is non-live and its
-		// live-derived attention is exactly inactive. Any in-run sticky label
-		// (finished, errored, permission, question) is never AttnInactive
-		// (finishedOr/Classify guarantee this), so the == AttnInactive gate
-		// alone protects those labels without a redundant flag check.
-		if !c.live && view.Attention == AttnInactive {
+		// Apply the restored badge whenever the deduped winner's attention is
+		// exactly inactive. The == AttnInactive gate is sufficient: any live
+		// reason to look (active, permission, question, errored, in-run
+		// finished) is never AttnInactive (finishedOr/Classify guarantee
+		// this), so dropping the former !c.live guard cannot clobber a live
+		// active/blocked row. It only fills genuinely-idle rows — including
+		// live-but-idle ones that opencode promotes to live via a
+		// session.status/session.idle replay on restart — with the persisted
+		// badge until a real live event makes attention non-inactive or the
+		// user views the session (MarkViewed).
+		if view.Attention == AttnInactive {
 			if r, ok := s.restored[key]; ok && r.Attention.isSticky() {
 				view.Attention = r.Attention
 			}

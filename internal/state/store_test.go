@@ -584,21 +584,39 @@ func TestRestoreApplyAndClear(t *testing.T) {
 		}
 	})
 
-	t.Run("live event supersedes restored badge", func(t *testing.T) {
+	t.Run("live-idle row still shows restored badge", func(t *testing.T) {
 		s := newTestStore(context.Background())
 		inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
 		s.AddInstance(inst)
 		s.RestoreSessions(seed(ocKind, "S1", AttnFinished))
 		s.SyncRecent(inst.ID, []oc.Session{makeSession("S1", 1_000)})
-		// An SSE event promotes the row to live; the restored badge must not apply.
+		// An SSE event promotes the row to live but the session is idle.
+		// The restored badge must still show — opencode replays idle events on
+		// restart and the badge should persist until a real active event or
+		// MarkViewed clears it.
 		applyStatus(t, s, inst.ID, "S1", "idle")
 
-		if got := attentionOf(t, s, "S1"); got != AttnInactive {
-			t.Fatalf("live supersede: got %q, want %q", got, AttnInactive)
+		if got := attentionOf(t, s, "S1"); got != AttnFinished {
+			t.Fatalf("live-idle+restore: got %q, want %q", got, AttnFinished)
 		}
 	})
 
-	t.Run("multi-instance same session: live row wins, restored not double-applied", func(t *testing.T) {
+	t.Run("live-active row does not show restored badge", func(t *testing.T) {
+		s := newTestStore(context.Background())
+		inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
+		s.AddInstance(inst)
+		s.RestoreSessions(seed(ocKind, "S1", AttnFinished))
+		s.SyncRecent(inst.ID, []oc.Session{makeSession("S1", 1_000)})
+		// A live active event means the session is genuinely busy; the
+		// restored badge must not override the live attention.
+		applyStatus(t, s, inst.ID, "S1", "busy")
+
+		if got := attentionOf(t, s, "S1"); got != AttnActive {
+			t.Fatalf("live-active: got %q, want %q", got, AttnActive)
+		}
+	})
+
+	t.Run("multi-instance same session: live-idle winner shows restored badge", func(t *testing.T) {
 		s := newTestStore(context.Background())
 		instA := discovery.Instance{ID: "127.0.0.1:1111", Host: "127.0.0.1", Port: 1111}
 		instB := discovery.Instance{ID: "127.0.0.1:2222", Host: "127.0.0.1", Port: 2222}
@@ -608,7 +626,8 @@ func TestRestoreApplyAndClear(t *testing.T) {
 		shared := []oc.Session{makeSession("ses_dup", 1_000)}
 		s.SyncRecent(instA.ID, shared)
 		s.SyncRecent(instB.ID, shared)
-		// instB gets a live event; its row wins dedup and is live, so restored must not apply.
+		// instB gets a live idle event; its row wins dedup. The winner is
+		// live-but-idle, so the restored badge must apply.
 		applyStatus(t, s, instB.ID, "ses_dup", "idle")
 
 		snap := s.snapshot()
@@ -626,9 +645,44 @@ func TestRestoreApplyAndClear(t *testing.T) {
 		if winner.Source != SourceLive {
 			t.Fatalf("expected live source, got %q", winner.Source)
 		}
-		// Live idle row: restored badge must not override.
-		if winner.Attention != AttnInactive {
-			t.Fatalf("live row attention: got %q, want %q", winner.Attention, AttnInactive)
+		// Live-idle winner: restored badge must be applied.
+		if winner.Attention != AttnFinished {
+			t.Fatalf("live-idle winner attention: got %q, want %q", winner.Attention, AttnFinished)
+		}
+	})
+
+	t.Run("multi-instance same session: live-active winner does not show restored badge", func(t *testing.T) {
+		s := newTestStore(context.Background())
+		instA := discovery.Instance{ID: "127.0.0.1:1111", Host: "127.0.0.1", Port: 1111}
+		instB := discovery.Instance{ID: "127.0.0.1:2222", Host: "127.0.0.1", Port: 2222}
+		s.AddInstance(instA)
+		s.AddInstance(instB)
+		s.RestoreSessions(seed(ocKind, "ses_dup", AttnFinished))
+		shared := []oc.Session{makeSession("ses_dup", 1_000)}
+		s.SyncRecent(instA.ID, shared)
+		s.SyncRecent(instB.ID, shared)
+		// instB gets a live active event; its row wins dedup. The winner is
+		// live-and-active, so the restored badge must NOT apply.
+		applyStatus(t, s, instB.ID, "ses_dup", "busy")
+
+		snap := s.snapshot()
+		count := 0
+		var winner SessionView
+		for _, sv := range snap.Sessions {
+			if sv.SessionID == "ses_dup" {
+				count++
+				winner = sv
+			}
+		}
+		if count != 1 {
+			t.Fatalf("expected 1 deduped row, got %d", count)
+		}
+		if winner.Source != SourceLive {
+			t.Fatalf("expected live source, got %q", winner.Source)
+		}
+		// Live-active winner: restored badge must not override.
+		if winner.Attention != AttnActive {
+			t.Fatalf("live-active winner attention: got %q, want %q", winner.Attention, AttnActive)
 		}
 	})
 
