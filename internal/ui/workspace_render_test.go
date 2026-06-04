@@ -618,21 +618,20 @@ func TestPromptIdleDoesNotRenderWorktreePromptInSessionsPane(t *testing.T) {
 	}
 }
 
-// TestTaskPromptLineReturnsLabelForPromptNewWorktree asserts that taskPromptLine
-// returns the branch-name label (not an empty string) when promptNewWorktree is
-// active, preventing a blank reserved row in the tasks pane.
-func TestTaskPromptLineReturnsLabelForPromptNewWorktree(t *testing.T) {
+// TestTaskPromptLineOmitsWorktreePrompts asserts that taskPromptLine does NOT
+// mirror the worktree branch-name prompt: it is a sessions-pane action and must
+// render in one place only (renderWorkspaceRows), not duplicated in the tasks
+// pane.
+func TestTaskPromptLineOmitsWorktreePrompts(t *testing.T) {
 	ti := textinput.New()
 	ti.SetValue("feat/task-pane")
-	m := model{
-		prompt: promptNewWorktree,
-		input:  ti,
-	}
-	got := m.taskPromptLine()
-	if !strings.Contains(got, "new worktree branch:") {
-		t.Fatalf("taskPromptLine must contain 'new worktree branch:' for promptNewWorktree, got %q", got)
-	}
-	if !strings.Contains(got, "feat/task-pane") {
-		t.Fatalf("taskPromptLine must contain typed value for promptNewWorktree, got %q", got)
+	for _, p := range []promptMode{promptNewWorktree, promptConfirmDeleteWorktree, promptConfirmDeleteWorktree2} {
+		m := model{prompt: p, input: ti}
+		if isTaskPrompt(p) {
+			t.Fatalf("isTaskPrompt(%v) must be false", p)
+		}
+		if got := m.taskPromptLine(); got != "" {
+			t.Fatalf("taskPromptLine must be empty for sessions-pane prompt %v, got %q", p, got)
+		}
 	}
 }
