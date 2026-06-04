@@ -859,6 +859,25 @@ func (s *Store) MarkViewed(providerKind harness.Kind, instanceID, sessionID stri
 			changed = true
 		}
 	}
+	// Clear the restored seed for this session so the badge does not
+	// reappear after the user has viewed it. When instanceID is empty the
+	// call is instance-agnostic (workspace Row), so delete any restored
+	// entry whose sessionID matches regardless of provider — mirroring the
+	// cross-instance clear semantics above.
+	if instanceID == "" {
+		for k := range s.restored {
+			if k.sessionID == sessionID {
+				delete(s.restored, k)
+				changed = true
+			}
+		}
+	} else {
+		rkey := providerSessionKey{provider: providerKind, sessionID: sessionID}
+		if _, ok := s.restored[rkey]; ok {
+			delete(s.restored, rkey)
+			changed = true
+		}
+	}
 	s.mu.Unlock()
 	if changed {
 		s.publish()
@@ -1016,8 +1035,19 @@ func (s *Store) snapshot() Snapshot {
 	}
 
 	rows := make([]SessionView, 0, len(best))
-	for _, c := range best {
-		rows = append(rows, c.view)
+	for key, c := range best {
+		view := c.view
+		// Apply the restored badge only when the row is non-live and its
+		// live-derived attention is exactly inactive. Any in-run sticky label
+		// (finished, errored, permission, question) is never AttnInactive
+		// (finishedOr/Classify guarantee this), so the == AttnInactive gate
+		// alone protects those labels without a redundant flag check.
+		if !c.live && view.Attention == AttnInactive {
+			if r, ok := s.restored[key]; ok && r.Attention.isSticky() {
+				view.Attention = r.Attention
+			}
+		}
+		rows = append(rows, view)
 	}
 	// Sort deterministically with a mixed provider+instance id set.
 	// Primary: provider kind (groups all opencode rows before all codex rows,
