@@ -35,6 +35,11 @@ type RosterEntry struct {
 	Title string `json:"title,omitempty"`
 	// LastActivity is the timestamp of the most recent activity in the session.
 	LastActivity time.Time `json:"lastActivity"`
+	// Attention is the last-known attention label for the session (e.g.
+	// "finished", "errored", "inactive"). Stored as a plain string for
+	// forward/backward compatibility — older builds ignore the field, newer
+	// builds that load an entry without it get an empty string.
+	Attention string `json:"attention,omitempty"`
 }
 
 // rosterFile is the on-disk JSON representation of the roster map.
@@ -262,6 +267,7 @@ func (r *Recorder) applySnapshot(m map[string]RosterEntry, snap state.Snapshot) 
 			SessionID:    sv.SessionID,
 			Title:        sv.Title,
 			LastActivity: sv.LastActivity,
+			Attention:    string(sv.Attention),
 		}
 		if upsert(m, entry) {
 			changed = true
@@ -272,10 +278,23 @@ func (r *Recorder) applySnapshot(m map[string]RosterEntry, snap state.Snapshot) 
 
 // upsert inserts or updates entry in m, keeping the entry with the greater
 // LastActivity timestamp. Returns true if the map was modified.
+//
+// Special case: when the incoming entry is for the same session (same Dir and
+// SessionID) as the current entry and only the Attention label differs, the
+// update is applied even if LastActivity has not advanced. This ensures that
+// attention-only transitions (e.g. a view-driven revert to "inactive" or a
+// late "errored" flip) are persisted without requiring a new activity
+// timestamp. A different session with a newer LastActivity still wins per the
+// normal rule.
 func upsert(m map[string]RosterEntry, entry RosterEntry) bool {
 	cur, ok := m[entry.Dir]
 	if ok && !entry.LastActivity.After(cur.LastActivity) {
-		return false
+		// Allow an attention-only update for the same session even when
+		// LastActivity has not advanced.
+		sameSession := entry.SessionID != "" && entry.SessionID == cur.SessionID
+		if !sameSession || entry.Attention == cur.Attention {
+			return false
+		}
 	}
 	m[entry.Dir] = entry
 	return true

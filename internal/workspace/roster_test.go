@@ -266,6 +266,181 @@ func TestRecorder_TwoSnapshotsSameDirLatestWins(t *testing.T) {
 	}
 }
 
+// TestRoster_AttentionPersistsAndReverts verifies three attention-related
+// behaviours:
+//
+//  (a) A snapshot whose session has Attention "finished" is persisted with
+//      that label in the roster entry.
+//  (b) A subsequent snapshot for the SAME dir+session with equal LastActivity
+//      but a different Attention (e.g. a view-driven revert to "inactive")
+//      still forces a write — the most-recent-activity guard is bypassed for
+//      attention-only changes on the same session.
+//  (c) Loading a roster.json that was written by an older build (no
+//      "attention" field) yields entries with empty Attention and no error.
+func TestRoster_AttentionPersistsAndReverts(t *testing.T) {
+	tmp := t.TempDir()
+	withStateEnv(t, tmp)
+
+	worktree := filepath.Join(tmp, "proj")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	canonicalWorktree, err := pathnorm.Canonical(worktree)
+	if err != nil {
+		t.Fatalf("Canonical(%q): %v", worktree, err)
+	}
+
+	ts := time.Now().Truncate(time.Millisecond)
+
+	// (a) Snapshot with Attention "finished" — should be persisted.
+	snapFinished := state.Snapshot{
+		Sessions: []state.SessionView{
+			{
+				SessionID:    "sess-x",
+				Title:        "my work",
+				Directory:    worktree,
+				LastActivity: ts,
+				Attention:    state.AttnFinished,
+			},
+		},
+	}
+
+	// (b) Same dir+session, same LastActivity, attention reverts to "inactive".
+	snapReverted := state.Snapshot{
+		Sessions: []state.SessionView{
+			{
+				SessionID:    "sess-x",
+				Title:        "my work",
+				Directory:    worktree,
+				LastActivity: ts, // unchanged
+				Attention:    state.AttnInactive,
+			},
+		},
+	}
+
+	snapCh := make(chan state.Snapshot, 4)
+	snapCh <- snapFinished
+	snapCh <- snapReverted
+	close(snapCh)
+
+	rec := workspace.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		rec.RunSync(snapCh)
+	}()
+	<-done
+
+	loaded, err := workspace.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, ok := loaded[canonicalWorktree]
+	if !ok {
+		t.Fatalf("entry for %q not found", canonicalWorktree)
+	}
+	// After the revert snapshot the attention should be "inactive", not "finished".
+	if got.Attention != string(state.AttnInactive) {
+		t.Errorf("(b) Attention after revert: got %q, want %q", got.Attention, state.AttnInactive)
+	}
+
+	// (c) Load a roster.json written without the "attention" field.
+	legacyJSON := `{"entries":[{"dir":"` + canonicalWorktree + `","harness":"opencode","lastActivity":"` + ts.Format(time.RFC3339Nano) + `"}]}`
+	rosterPath, err := workspace.RosterPath()
+	if err != nil {
+		t.Fatalf("RosterPath: %v", err)
+	}
+	if err := os.WriteFile(rosterPath, []byte(legacyJSON), 0o644); err != nil {
+		t.Fatalf("write legacy roster: %v", err)
+	}
+	legacyLoaded, err := workspace.Load()
+	if err != nil {
+		t.Fatalf("Load legacy roster: %v", err)
+	}
+	legacyEntry, ok := legacyLoaded[canonicalWorktree]
+	if !ok {
+		t.Fatalf("legacy entry for %q not found", canonicalWorktree)
+	}
+	if legacyEntry.Attention != "" {
+		t.Errorf("(c) legacy entry Attention: got %q, want empty string", legacyEntry.Attention)
+	}
+}
+
+// TestRoster_AttentionFinishedPersists verifies that a snapshot with Attention
+// "finished" is recorded with that label, and that a different session with a
+// newer LastActivity still wins the dir slot (existing multi-session semantics
+// are preserved).
+func TestRoster_AttentionFinishedPersists(t *testing.T) {
+	tmp := t.TempDir()
+	withStateEnv(t, tmp)
+
+	worktree := filepath.Join(tmp, "proj2")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	canonicalWorktree, err := pathnorm.Canonical(worktree)
+	if err != nil {
+		t.Fatalf("Canonical(%q): %v", worktree, err)
+	}
+
+	t1 := time.Now().Truncate(time.Millisecond)
+	t2 := t1.Add(5 * time.Second)
+
+	// First snapshot: session A finishes.
+	snapA := state.Snapshot{
+		Sessions: []state.SessionView{
+			{
+				SessionID:    "sess-a",
+				Title:        "session A",
+				Directory:    worktree,
+				LastActivity: t1,
+				Attention:    state.AttnFinished,
+			},
+		},
+	}
+	// Second snapshot: a different session B with a newer LastActivity.
+	snapB := state.Snapshot{
+		Sessions: []state.SessionView{
+			{
+				SessionID:    "sess-b",
+				Title:        "session B",
+				Directory:    worktree,
+				LastActivity: t2,
+				Attention:    state.AttnActive,
+			},
+		},
+	}
+
+	snapCh := make(chan state.Snapshot, 4)
+	snapCh <- snapA
+	snapCh <- snapB
+	close(snapCh)
+
+	rec := workspace.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		rec.RunSync(snapCh)
+	}()
+	<-done
+
+	loaded, err := workspace.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, ok := loaded[canonicalWorktree]
+	if !ok {
+		t.Fatalf("entry for %q not found", canonicalWorktree)
+	}
+	// Session B has the greater LastActivity and must win.
+	if got.SessionID != "sess-b" {
+		t.Errorf("SessionID: got %q, want %q", got.SessionID, "sess-b")
+	}
+	if got.Attention != string(state.AttnActive) {
+		t.Errorf("Attention: got %q, want %q", got.Attention, state.AttnActive)
+	}
+}
+
 // mapKeys returns the keys of m as a slice, for diagnostic messages.
 func mapKeys(m map[string]workspace.RosterEntry) []string {
 	keys := make([]string, 0, len(m))
