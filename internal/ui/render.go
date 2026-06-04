@@ -113,6 +113,11 @@ const (
 	colStatusW   = 10
 	colActivityW = 8
 	colGap       = 2
+
+	// maxSessionTitleW caps the muted session-title annotation shown after the
+	// branch on a worktree row. The branch leads (it is what you navigate by),
+	// so the title is de-emphasised and longer titles are truncated with "…".
+	maxSessionTitleW = 48
 )
 
 // Task pane column widths. DESC takes the remainder after all fixed columns
@@ -612,6 +617,26 @@ func worktreeSessionWidth(width int) int {
 	return w
 }
 
+// branchLabel returns the worktree's branch — the primary, navigable identity
+// for a row — falling back to the worktree directory's base name when the
+// branch is unknown.
+func branchLabel(row workspace.Row) string {
+	if row.Branch != "" {
+		return row.Branch
+	}
+	return filepath.Base(row.Worktree)
+}
+
+// sessionTitleSuffix renders a session title as muted, truncated trailing text
+// to follow the branch on a worktree row. The branch leads, so the title is
+// capped to maxSessionTitleW and de-emphasised. Empty titles add nothing.
+func sessionTitleSuffix(title string) string {
+	if title == "" {
+		return ""
+	}
+	return "  " + wtPathStyle.Render(ansi.Truncate(title, maxSessionTitleW, "…"))
+}
+
 // formatWorktreeRow renders a single workspace.Row as a fixed-width line.
 //
 // Columns are status | session | activity. The status column is left-most so
@@ -629,10 +654,7 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int, isLaunching 
 	// regardless of the underlying row state.
 	if isLaunching {
 		statusCell := wtLaunchingStyle.Render(glyphWtLaunching) + " "
-		titleStr := wtLaunchingStyle.Render("launching…")
-		if row.Branch != "" {
-			titleStr += "  " + wtPathStyle.Render("["+row.Branch+"]")
-		}
+		titleStr := wtLaunchingStyle.Render(branchLabel(row) + "  launching…")
 		cells := []string{
 			padCell(statusCell, colStateW, lipgloss.Left),
 			padCell(titleStr, sessionW, lipgloss.Left),
@@ -669,39 +691,39 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int, isLaunching 
 		statusCell = glyphStyle.Render(glyph) + " "
 	}
 
-	// Title / description column.
+	// Title / description column. The branch leads each row (it is what you
+	// navigate by); the session title trails as muted, truncated text.
 	var titleStr string
 	switch row.State {
 	case workspace.StateRunning:
-		// Running: show title (or branch/worktree dir as fallback).
-		titleStr = row.Title
-		if titleStr == "" {
-			titleStr = row.Branch
-		}
-		if titleStr == "" {
+		// Running: branch leads, session title trails muted. When the branch is
+		// unknown, fall back to the title (or worktree dir) as the lead.
+		if row.Branch != "" {
+			titleStr = row.Branch + sessionTitleSuffix(row.Title)
+		} else if row.Title != "" {
+			titleStr = row.Title
+		} else {
 			titleStr = filepath.Base(row.Worktree)
 		}
 	case workspace.StateStopped:
-		// Stopped: show title dimmed.
-		titleStr = row.Title
-		if titleStr == "" {
-			titleStr = filepath.Base(row.Worktree)
+		// Stopped: same layout, dimmed lead.
+		if row.Branch != "" {
+			titleStr = wtStoppedStyle.Render(row.Branch) + sessionTitleSuffix(row.Title)
+		} else {
+			lead := row.Title
+			if lead == "" {
+				lead = filepath.Base(row.Worktree)
+			}
+			titleStr = wtStoppedStyle.Render(lead)
 		}
-		titleStr = wtStoppedStyle.Render(titleStr)
 	case workspace.StateEmpty:
-		titleStr = wtEmptyStyle.Render(filepath.Base(row.Worktree))
+		titleStr = wtEmptyStyle.Render(branchLabel(row))
 	case workspace.StateMissing:
-		titleStr = wtMissingStyle.Render(filepath.Base(row.Worktree) + " (missing)")
+		titleStr = wtMissingStyle.Render(branchLabel(row) + " (missing)")
 	case workspace.StateUnknown:
-		titleStr = wtUnknownStyle.Render("status unknown")
+		titleStr = wtUnknownStyle.Render(branchLabel(row)) + "  " + wtPathStyle.Render("status unknown")
 	default:
-		titleStr = dimStyle.Render(filepath.Base(row.Worktree))
-	}
-
-	// Branch annotation: the git worktree/branch name next to every row whose
-	// branch is known, in faded italic.
-	if row.Branch != "" {
-		titleStr += "  " + wtPathStyle.Render("["+row.Branch+"]")
+		titleStr = dimStyle.Render(branchLabel(row))
 	}
 
 	// Activity column: relative last-activity for stopped/unknown rows.
