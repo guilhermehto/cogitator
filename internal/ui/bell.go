@@ -14,7 +14,7 @@ type rowKey struct {
 }
 
 func needsAttention(a state.Attention) bool {
-	return a == state.AttnPermissionPending || a == state.AttnQuestionPending || a == state.AttnErrored
+	return a == state.AttnPermissionPending || a == state.AttnQuestionPending || a == state.AttnErrored || a == state.AttnFinished
 }
 
 // processBellTransitions diffs the current snapshot against bellSent

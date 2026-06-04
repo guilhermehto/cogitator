@@ -159,6 +159,21 @@ func demoSessions(now time.Time) []state.SessionView {
 			Created:      hours(4),
 			Provider:     harness.Kind("opencode"),
 		},
+		// Live, finished — agent completed a requested task; awaiting your return.
+		{
+			InstanceID:   "demo-server",
+			InstanceName: "server",
+			SessionID:    "ses_009",
+			Title:        "Add --bell flag docs to README",
+			Agent:        "scribe",
+			Directory:    "~/src/cogitator",
+			StatusType:   "idle",
+			Source:       state.SourceLive,
+			Attention:    state.AttnFinished,
+			LastActivity: mins(3),
+			Created:      hours(1),
+			Provider:     harness.Kind("opencode"),
+		},
 		// Live, inactive (idle long enough to dim).
 		{
 			InstanceID:   "demo-server",

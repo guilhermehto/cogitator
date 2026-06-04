@@ -76,6 +76,14 @@ type sessionRow struct {
 	source       Source
 	lastError    time.Time
 	lastActivity time.Time
+	// wasActive records that the session has been AttnActive since the user
+	// last viewed it — i.e. the user requested something and the agent began
+	// working. finished records that such an active session has since gone
+	// idle. Together they drive AttnFinished: it shows only after a real
+	// active→idle transition and clears when the user views the session
+	// (MarkViewed) or a fresher attention label supersedes it.
+	wasActive bool
+	finished  bool
 }
 
 type instanceState struct {
@@ -101,8 +109,12 @@ type providerSessionKey struct {
 }
 
 // providerRow holds the neutral state for one provider-sourced session.
+// wasActive/finished mirror the sessionRow fields and drive AttnFinished for
+// provider-sourced rows, derived from StatusType transitions across updates.
 type providerRow struct {
-	update provider.SessionUpdate
+	update    provider.SessionUpdate
+	wasActive bool
+	finished  bool
 }
 
 // providerInstanceKey identifies one instance within a provider.
@@ -312,9 +324,16 @@ func (s *Store) ApplyUpdate(u provider.SessionUpdate) {
 	key := providerSessionKey{provider: u.Provider, sessionID: u.SessionID}
 	s.mu.Lock()
 	existing, ok := s.providerSessions[key]
-	changed := !ok || existing.update != u
+	updateChanged := !ok || existing.update != u
+	row := &providerRow{update: u}
+	if ok {
+		row.wasActive = existing.wasActive
+		row.finished = existing.finished
+	}
+	finChanged := advanceFinished(&row.wasActive, &row.finished, u.StatusType, u.HasPermission, u.HasQuestion, u.LastError, u.LastActivity)
+	changed := updateChanged || finChanged
 	if changed {
-		s.providerSessions[key] = &providerRow{update: u}
+		s.providerSessions[key] = row
 	}
 	s.mu.Unlock()
 	if changed {
@@ -380,12 +399,20 @@ func (s *Store) ReplaceProviderInstance(providerKind harness.Kind, instanceID st
 		}
 	}
 
-	// Upsert rows that differ from what is already stored.
+	// Upsert rows that differ from what is already stored. Carry the
+	// finished/wasActive transition memory forward across replacements so a
+	// session that finished does not lose its badge on the next full refresh.
 	for sid, u := range desired {
 		key := providerSessionKey{provider: providerKind, sessionID: sid}
 		existing, ok := s.providerSessions[key]
-		if !ok || existing.update != u {
-			s.providerSessions[key] = &providerRow{update: u}
+		row := &providerRow{update: u}
+		if ok {
+			row.wasActive = existing.wasActive
+			row.finished = existing.finished
+		}
+		finChanged := advanceFinished(&row.wasActive, &row.finished, u.StatusType, u.HasPermission, u.HasQuestion, u.LastError, u.LastActivity)
+		if !ok || existing.update != u || finChanged {
+			s.providerSessions[key] = row
 			changed = true
 		}
 	}
@@ -457,6 +484,9 @@ func (s *Store) ApplyEvent(instanceID string, evt oc.Event) {
 					changed = true
 				}
 				row.lastActivity = now
+				if advanceFinished(&row.wasActive, &row.finished, row.status.Type, row.hasPerm, row.hasQuestion, row.lastError, row.lastActivity) {
+					changed = true
+				}
 				changed = true
 			}
 		} else {
@@ -472,6 +502,9 @@ func (s *Store) ApplyEvent(instanceID string, evt oc.Event) {
 					changed = true
 				}
 				row.lastActivity = now
+				if advanceFinished(&row.wasActive, &row.finished, row.status.Type, row.hasPerm, row.hasQuestion, row.lastError, row.lastActivity) {
+					changed = true
+				}
 				changed = true
 			}
 		} else {
@@ -711,6 +744,95 @@ func sessionHasQuestion(inst *instanceState, sid string) bool {
 	return false
 }
 
+// advanceFinished updates the (wasActive, finished) transition memory for one
+// session given its freshly-computed attention inputs. It returns true if
+// either flag changed.
+//
+// Rules:
+//   - Seeing the session AttnActive marks wasActive (the user requested
+//     something and the agent is working) and clears any stale finished flag.
+//   - A blocking/error label (permission, question, errored) is the live
+//     reason to look — it supersedes "finished"; we clear finished and leave
+//     wasActive untouched so the eventual return to idle still counts.
+//   - Going idle (AttnInactive) after having been active flips finished on and
+//     consumes wasActive.
+// finishedOr promotes a plain-inactive attention to AttnFinished when the
+// session's finished flag is set. Any non-inactive label (active, permission,
+// question, errored) is the live reason to look and is returned unchanged.
+func finishedOr(attn Attention, finished bool) Attention {
+	if finished && attn == AttnInactive {
+		return AttnFinished
+	}
+	return attn
+}
+
+func advanceFinished(wasActive, finished *bool, statusType string, hasPerm, hasQuestion bool, lastError, lastActivity time.Time) bool {
+	attn := Classify(statusType, hasPerm, hasQuestion, lastError, lastActivity)
+	before := *wasActive
+	beforeFin := *finished
+	switch attn {
+	case AttnActive:
+		*wasActive = true
+		*finished = false
+	case AttnPermissionPending, AttnQuestionPending, AttnErrored:
+		*finished = false
+	case AttnInactive:
+		if *wasActive {
+			*finished = true
+			*wasActive = false
+		}
+	}
+	return *wasActive != before || *finished != beforeFin
+}
+
+// MarkViewed clears the finished/wasActive transition memory for one session,
+// across both the opencode pipeline and the provider seam. It is the
+// user-viewed signal: once the user opens a session (via cogitator's
+// jump/resume), its "work finished" badge goes away regardless of whether they
+// acted on it. A no-op (no publish) when nothing matched or changed.
+func (s *Store) MarkViewed(providerKind harness.Kind, instanceID, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	changed := false
+	clearRow := func(row *sessionRow) {
+		if row.finished || row.wasActive {
+			row.finished = false
+			row.wasActive = false
+			changed = true
+		}
+	}
+	s.mu.Lock()
+	if instanceID != "" {
+		if inst := s.instances[instanceID]; inst != nil {
+			if row, ok := inst.sessions[sessionID]; ok {
+				clearRow(row)
+			}
+		}
+	} else {
+		// The workspace Row carries no instance id, so clear the session
+		// wherever it lives across opencode instances (the same session id can
+		// appear under several instances sharing a project database).
+		for _, inst := range s.instances {
+			if row, ok := inst.sessions[sessionID]; ok {
+				clearRow(row)
+			}
+		}
+	}
+	key := providerSessionKey{provider: providerKind, sessionID: sessionID}
+	if prow, ok := s.providerSessions[key]; ok {
+		if prow.finished || prow.wasActive {
+			prow.finished = false
+			prow.wasActive = false
+			changed = true
+		}
+	}
+	s.mu.Unlock()
+	if changed {
+		s.publish()
+	}
+}
+
 func equalStringMaps(a, b map[string]string) bool {
 	if len(a) != len(b) {
 		return false
@@ -801,7 +923,7 @@ func (s *Store) snapshot() Snapshot {
 				Agent:        row.info.Agent,
 				StatusType:   row.status.Type,
 				Source:       row.source,
-				Attention:    Classify(row.status.Type, row.hasPerm, row.hasQuestion, row.lastError, row.lastActivity),
+				Attention:    finishedOr(Classify(row.status.Type, row.hasPerm, row.hasQuestion, row.lastError, row.lastActivity), row.finished),
 				LastActivity: row.lastActivity,
 				Created:      created,
 				Provider:     harness.Kind("opencode"),
@@ -853,7 +975,7 @@ func (s *Store) snapshot() Snapshot {
 			Agent:        u.Agent,
 			StatusType:   u.StatusType,
 			Source:       src,
-			Attention:    Classify(u.StatusType, u.HasPermission, u.HasQuestion, u.LastError, u.LastActivity),
+			Attention:    finishedOr(Classify(u.StatusType, u.HasPermission, u.HasQuestion, u.LastError, u.LastActivity), row.finished),
 			LastActivity: u.LastActivity,
 			Created:      u.Created,
 			Provider:     u.Provider,

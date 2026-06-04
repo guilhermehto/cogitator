@@ -59,7 +59,7 @@ func RunStatus(cfg *config.Config, logger *slog.Logger) error {
 // formatStatusLine counts attention-bearing rows and renders a compact
 // `<glyph> <count>` summary. Empty string means no session needs eyes.
 func formatStatusLine(rows []state.SessionView) string {
-	perm, question, errored := 0, 0, 0
+	perm, question, errored, finished := 0, 0, 0, 0
 	for _, sv := range rows {
 		switch sv.Attention {
 		case state.AttnPermissionPending:
@@ -68,6 +68,8 @@ func formatStatusLine(rows []state.SessionView) string {
 			question++
 		case state.AttnErrored:
 			errored++
+		case state.AttnFinished:
+			finished++
 		}
 	}
 
@@ -80,6 +82,9 @@ func formatStatusLine(rows []state.SessionView) string {
 	}
 	if errored > 0 {
 		parts = append(parts, fmt.Sprintf("%s %d", glyphError, errored))
+	}
+	if finished > 0 {
+		parts = append(parts, fmt.Sprintf("%s %d", glyphFinished, finished))
 	}
 	return strings.Join(parts, " ")
 }

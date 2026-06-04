@@ -12,6 +12,12 @@ const (
 	AttnPermissionPending Attention = "permission"
 	AttnQuestionPending   Attention = "question"
 	AttnErrored           Attention = "errored"
+	// AttnFinished marks a session that was working on a user request and has
+	// since gone idle, but the user has not yet returned to it. Unlike the
+	// other labels it is NOT computed by Classify (which is stateless): it
+	// requires per-session transition memory and the user-viewed signal, so
+	// the store sets it directly when assembling a snapshot.
+	AttnFinished Attention = "finished"
 )
 
 // Rank is used to sort the attention pane: lower = more urgent.
@@ -22,6 +28,8 @@ func (a Attention) Rank() int {
 	case AttnQuestionPending:
 		return 0
 	case AttnErrored:
+		return 1
+	case AttnFinished:
 		return 1
 	default:
 		return 2

@@ -112,6 +112,12 @@ type launchResultMsg struct {
 	dir      string
 	launched bool
 	err      error
+	// provider, instanceID, sessionID identify the session that was selected
+	// so the Update handler can mark it viewed (clearing any AttnFinished
+	// badge). Empty when the row had no associated session.
+	provider   string
+	instanceID string
+	sessionID  string
 }
 
 // worktreeCreatedMsg is returned by newWorktreeCmd after git.AddWorktree
@@ -185,6 +191,14 @@ func (realTmuxOps) SelectSession(target tmuxctl.Target) error {
 func (realTmuxOps) KillWindow(target tmuxctl.Target) error { return tmuxctl.KillWindow(target) }
 func (realTmuxOps) KillSession(target tmuxctl.Target) error {
 	return tmuxctl.KillSession(target)
+}
+
+// viewMarker is the injectable seam through which the model tells the state
+// store a session has been viewed by the user (clearing AttnFinished).
+// *state.Store satisfies it. The interface keeps internal/ui from importing a
+// concrete store dependency into every test.
+type viewMarker interface {
+	MarkViewed(providerKind harness.Kind, instanceID, sessionID string)
 }
 
 // launchModeFor maps the workspace config's LaunchMode to the tmuxctl mode used
@@ -286,6 +300,10 @@ type model struct {
 	// into the recorder without calling workspace.Save directly. Nil when the
 	// recorder is not wired (e.g. in tests that don't need roster writes).
 	rosterUpserts chan<- workspace.RosterEntry
+	// viewMarker reports a session as viewed by the user (jump/resume) so the
+	// store can clear its AttnFinished badge. nil in tests that don't exercise
+	// the launch path; the handler guards on nil.
+	viewMarker viewMarker
 	// deleteTarget is the worktree row captured when the user presses 'D' to
 	// begin the two-step delete confirmation. Zero value when no delete is in
 	// progress. Cleared on cancel and on dispatch of the delete Cmd.
@@ -352,7 +370,19 @@ type model struct {
 //
 // The function is a tea.Cmd (runs off the UI goroutine).
 func launchCmd(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl.LaunchMode) tea.Cmd {
+	inner := launchInner(ops, row, harnOp, mode)
 	return func() tea.Msg {
+		res := inner()
+		// Stamp the session identity so the Update handler can mark it viewed
+		// (clearing AttnFinished) when the select succeeds.
+		res.provider = row.Harness
+		res.sessionID = row.SessionID
+		return res
+	}
+}
+
+func launchInner(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl.LaunchMode) func() launchResultMsg {
+	return func() launchResultMsg {
 		if ops == nil || !ops.Available() {
 			return launchResultMsg{dir: row.Worktree, err: tmuxctl.ErrNotAvailable}
 		}
@@ -1051,6 +1081,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			// Surface the error as a transient hint.
 			m.tmuxHint = fmt.Sprintf("launch error: %v", msg.err)
+		} else if m.viewMarker != nil && msg.sessionID != "" {
+			// The user successfully landed in the session — clear any
+			// "work finished" badge regardless of whether they act on it.
+			m.viewMarker.MarkViewed(harness.Kind(msg.provider), msg.instanceID, msg.sessionID)
 		}
 		return m, nil
 

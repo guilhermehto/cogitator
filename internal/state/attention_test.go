@@ -122,3 +122,24 @@ func TestClassifyKeepsPermissionAndErrorPrecedence(t *testing.T) {
 		t.Fatalf("newer activity should clear error: got %q, want %q", got, AttnActive)
 	}
 }
+
+func TestFinishedRankAndClassifyPurity(t *testing.T) {
+	// Finished ranks alongside errored: more urgent than plain active/inactive,
+	// less than a blocking prompt.
+	if AttnFinished.Rank() != AttnErrored.Rank() {
+		t.Fatalf("finished rank %d, want errored rank %d", AttnFinished.Rank(), AttnErrored.Rank())
+	}
+	if AttnFinished.Rank() <= AttnPermissionPending.Rank() {
+		t.Fatalf("finished must rank below permission")
+	}
+	if AttnFinished.Rank() >= AttnInactive.Rank() {
+		t.Fatalf("finished must rank above inactive")
+	}
+	// Classify is stateless and never returns AttnFinished on its own.
+	now := time.Now()
+	for _, st := range []string{"idle", "busy", "generating", "", "retry"} {
+		if got := Classify(st, false, false, time.Time{}, now); got == AttnFinished {
+			t.Fatalf("Classify(%q) returned AttnFinished; finished must be store-driven", st)
+		}
+	}
+}

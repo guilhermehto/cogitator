@@ -51,6 +51,8 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 	// Wire the recorder's Upserts channel so the model can inject create-time
 	// roster entries (e.g. for Codex worktrees that are never live-discovered).
 	m.rosterUpserts = rec.Upserts
+	// Wire the store so jump/resume clears the AttnFinished badge.
+	m.viewMarker = store
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
 }

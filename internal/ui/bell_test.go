@@ -52,6 +52,21 @@ func TestProcessBellTransitionsFiresAgainAfterLeavingAttention(t *testing.T) {
 	}
 }
 
+func TestProcessBellTransitionsFiresOnFinished(t *testing.T) {
+	bellSent := map[rowKey]state.Attention{}
+	row := state.SessionView{
+		InstanceID: "inst-1",
+		SessionID:  "s1",
+		Attention:  state.AttnFinished,
+	}
+	if got := processBellTransitions([]state.SessionView{row}, bellSent); len(got) != 1 {
+		t.Fatalf("finished fired %d bells, want 1", len(got))
+	}
+	if got := processBellTransitions([]state.SessionView{row}, bellSent); len(got) != 0 {
+		t.Fatalf("stable finished fired %d bells, want 0", len(got))
+	}
+}
+
 func TestProcessBellTransitionsFiresOnAttentionTypeChange(t *testing.T) {
 	bellSent := map[rowKey]state.Attention{}
 	perm := state.SessionView{
