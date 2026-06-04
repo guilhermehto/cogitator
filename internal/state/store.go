@@ -123,17 +123,30 @@ type providerInstanceKey struct {
 	instanceID string
 }
 
+// RestoredSession carries the last-known attention for one session, loaded
+// from durable storage at startup. Provider and SessionID together form the
+// lookup key; Attention must satisfy isSticky() or the entry is ignored.
+type RestoredSession struct {
+	Provider  harness.Kind
+	SessionID string
+	Attention Attention
+}
+
 type Store struct {
 	mu        sync.Mutex
 	instances map[string]*instanceState
 	// providerSessions holds sessions ingested via ApplyUpdate (the neutral
 	// provider seam). Keyed by (provider, sessionID) for collision safety.
 	providerSessions map[providerSessionKey]*providerRow
-	listeners        []chan Snapshot
-	now              func() time.Time
-	lookupCtx        context.Context
-	cfg              *config.Config
-	logger           *slog.Logger
+	// restored holds the last-known attention for sessions loaded from durable
+	// storage at startup. Keyed by (provider, sessionID). Entries are consumed
+	// by the snapshot override in step 3; this map is never used to create rows.
+	restored  map[providerSessionKey]RestoredSession
+	listeners []chan Snapshot
+	now       func() time.Time
+	lookupCtx context.Context
+	cfg       *config.Config
+	logger    *slog.Logger
 }
 
 func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) *Store {
@@ -146,10 +159,29 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) *Store {
 	return &Store{
 		instances:        map[string]*instanceState{},
 		providerSessions: map[providerSessionKey]*providerRow{},
+		restored:         map[providerSessionKey]RestoredSession{},
 		now:              time.Now,
 		lookupCtx:        ctx,
 		cfg:              cfg,
 		logger:           logger,
+	}
+}
+
+// RestoreSessions seeds the store with last-known attention values loaded from
+// durable storage. It must be called before any events arrive (typically at
+// startup, before the SSE pump starts). Only entries whose Attention is sticky
+// (finished, errored, permission, question) are stored; active/inactive are
+// transient and must be re-derived from live events.
+//
+// Seeding alone never creates snapshot rows — the restored map is only
+// consulted by the snapshot override added in step 3.
+func (s *Store) RestoreSessions(sessions map[providerSessionKey]RestoredSession) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, v := range sessions {
+		if v.Attention.isSticky() {
+			s.restored[k] = v
+		}
 	}
 }
 

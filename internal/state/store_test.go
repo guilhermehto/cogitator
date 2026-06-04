@@ -501,3 +501,58 @@ func TestFinishedProviderSurvivesReplace(t *testing.T) {
 		t.Fatalf("finished lost on identical refresh: got %q, want %q", got, AttnFinished)
 	}
 }
+
+// TestRestoreSessionsPopulatesMap verifies that RestoreSessions stores sticky
+// entries and silently drops non-sticky ones (active, inactive).
+func TestRestoreSessionsPopulatesMap(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(ctx)
+
+	codex := harness.Kind("codex")
+	input := map[providerSessionKey]RestoredSession{
+		{provider: codex, sessionID: "S1"}: {Provider: codex, SessionID: "S1", Attention: AttnFinished},
+		{provider: codex, sessionID: "S2"}: {Provider: codex, SessionID: "S2", Attention: AttnErrored},
+		{provider: codex, sessionID: "S3"}: {Provider: codex, SessionID: "S3", Attention: AttnPermissionPending},
+		{provider: codex, sessionID: "S4"}: {Provider: codex, SessionID: "S4", Attention: AttnQuestionPending},
+		{provider: codex, sessionID: "S5"}: {Provider: codex, SessionID: "S5", Attention: AttnActive},
+		{provider: codex, sessionID: "S6"}: {Provider: codex, SessionID: "S6", Attention: AttnInactive},
+	}
+	s.RestoreSessions(input)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sticky := []string{"S1", "S2", "S3", "S4"}
+	for _, id := range sticky {
+		key := providerSessionKey{provider: codex, sessionID: id}
+		if _, ok := s.restored[key]; !ok {
+			t.Errorf("expected sticky session %q to be stored, but it was not", id)
+		}
+	}
+	dropped := []string{"S5", "S6"}
+	for _, id := range dropped {
+		key := providerSessionKey{provider: codex, sessionID: id}
+		if _, ok := s.restored[key]; ok {
+			t.Errorf("expected non-sticky session %q to be dropped, but it was stored", id)
+		}
+	}
+}
+
+// TestRestoreSeedOnlyYieldsZeroRows verifies that a store seeded only via
+// RestoreSessions (no instances, no provider rows) produces an empty snapshot.
+// The seed alone must never create visible rows.
+func TestRestoreSeedOnlyYieldsZeroRows(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(ctx)
+
+	codex := harness.Kind("codex")
+	s.RestoreSessions(map[providerSessionKey]RestoredSession{
+		{provider: codex, sessionID: "S1"}: {Provider: codex, SessionID: "S1", Attention: AttnFinished},
+		{provider: codex, sessionID: "S2"}: {Provider: codex, SessionID: "S2", Attention: AttnErrored},
+	})
+
+	snap := s.snapshot()
+	if len(snap.Sessions) != 0 {
+		t.Fatalf("seed-only store: expected 0 sessions in snapshot, got %d", len(snap.Sessions))
+	}
+}
