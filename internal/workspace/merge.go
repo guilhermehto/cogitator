@@ -7,8 +7,6 @@
 package workspace
 
 import (
-	"os"
-	"sort"
 	"time"
 
 	"github.com/guilhermehto/cogitator/internal/git"
@@ -101,10 +99,13 @@ type liveCandidate struct {
 // Configured-worktree rows are exempt from InactiveHideAfter: an idle-but-
 // alive agent in a configured worktree stays State=running, not hidden.
 //
+// Only worktrees belonging to a configured repo are surfaced. Live sessions
+// and roster entries in directories that are not part of a configured repo's
+// worktrees are ignored: cogitator no longer discovers and displays arbitrary
+// sessions, only those launched into pre-registered repos.
+//
 // The returned slice is ordered: repos appear in the order given by repos;
-// worktrees within a repo appear in the order returned by worktreesByRepo;
-// roster-only rows (not in any configured repo) appear at the end, sorted by
-// canonical dir.
+// worktrees within a repo appear in the order returned by worktreesByRepo.
 func Merge(
 	repos []RepoConfig,
 	worktreesByRepo map[string][]git.Worktree,
@@ -118,10 +119,6 @@ func Merge(
 
 	// Canonicalize the tmuxDirs keys so lookups are consistent.
 	canonTmux := canonicalizeBoolMap(tmuxDirs)
-
-	// Track which canonical worktree dirs have been emitted so roster-only
-	// rows can be added at the end without duplicating configured-worktree rows.
-	emitted := make(map[string]bool)
 
 	var rows []Row
 
@@ -156,86 +153,10 @@ func Merge(
 			if err != nil {
 				dir = wt.Path
 			}
-			emitted[dir] = true
 
 			row := buildRow(repoKey, dir, wt.Branch, roster, liveByDir, canonTmux)
 			rows = append(rows, row)
 		}
-	}
-
-	// --- Roster-only rows (dirs not in any configured worktree) ---
-	// Collect and sort for deterministic output.
-	var rosterOnlyDirs []string
-	for dir := range roster {
-		// Canonicalize the roster key.
-		canonDir, err := pathnorm.Canonical(dir)
-		if err != nil {
-			canonDir = dir
-		}
-		if !emitted[canonDir] {
-			rosterOnlyDirs = append(rosterOnlyDirs, canonDir)
-			emitted[canonDir] = true // prevent duplicates if multiple raw keys map to same canonical
-		}
-	}
-	sort.Strings(rosterOnlyDirs)
-
-	for _, dir := range rosterOnlyDirs {
-		// Look up the roster entry by canonical dir or by the original key.
-		entry, ok := roster[dir]
-		if !ok {
-			// The canonical form may differ from the stored key; find it.
-			for k, v := range roster {
-				if k2, err := pathnorm.Canonical(k); err == nil && k2 == dir {
-					entry = v
-					ok = true
-					break
-				}
-			}
-		}
-		if !ok {
-			continue
-		}
-
-		// Determine if the dir exists on disk.
-		if _, statErr := os.Stat(dir); statErr != nil {
-			// Dir is absent from disk → missing row.
-			rows = append(rows, missingRow("", dir, entry))
-			continue
-		}
-
-		row := buildRow("", dir, "", roster, liveByDir, canonTmux)
-		rows = append(rows, row)
-	}
-
-	// --- Live-only rows (live sessions in dirs not yet emitted) ---
-	// These are sessions in dirs that are neither in a configured worktree nor
-	// in the roster. Collect and sort for deterministic output.
-	var liveOnlyDirs []string
-	for dir := range liveByDir {
-		if !emitted[dir] {
-			liveOnlyDirs = append(liveOnlyDirs, dir)
-		}
-	}
-	sort.Strings(liveOnlyDirs)
-
-	for _, dir := range liveOnlyDirs {
-		cand := liveByDir[dir]
-		harnessKind := string(cand.view.Provider)
-		if harnessKind == "" {
-			harnessKind = "opencode"
-		}
-		row := Row{
-			Repo:         "",
-			Worktree:     dir,
-			Branch:       "",
-			Harness:      harnessKind,
-			Title:        cand.view.Title,
-			SessionID:    cand.view.SessionID,
-			State:        StateRunning,
-			Attention:    cand.view.Attention,
-			LastActivity: cand.view.LastActivity,
-		}
-		rows = append(rows, row)
 	}
 
 	return rows
@@ -388,22 +309,4 @@ func rosterLookup(roster map[string]RosterEntry, canonDir string) (RosterEntry, 
 	return RosterEntry{}, false
 }
 
-// MergeMissing appends rows for roster entries whose worktree directory is
-// absent from disk. These entries are pruned by Load, so callers that want
-// missing rows must pass a pre-pruned roster (i.e. loaded before pruning).
-// In normal operation, Load prunes missing entries; this helper is provided
-// for callers that explicitly track missing entries separately.
-//
-// dir is the canonical path; it is absent from disk (os.Stat returns ENOENT).
-func missingRow(repo, dir string, entry RosterEntry) Row {
-	return Row{
-		Repo:         repo,
-		Worktree:     dir,
-		Branch:       "",
-		Harness:      entry.Harness,
-		Title:        entry.Title,
-		SessionID:    entry.SessionID,
-		State:        StateMissing,
-		LastActivity: entry.LastActivity,
-	}
-}
+
