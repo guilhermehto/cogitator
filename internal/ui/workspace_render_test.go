@@ -142,6 +142,22 @@ func TestRenderWorkspaceRowsLongSessionTitleTruncated(t *testing.T) {
 	}
 }
 
+func TestRenderWorkspaceRowsMultilineSessionTitleStaysOneRow(t *testing.T) {
+	m := model{width: 200}
+	rows := []workspace.Row{
+		makeRow("/repo/a", "/repo/a", "feat/auth", "first line\nsecond line", workspace.StateRunning, state.AttnActive, fixedNow),
+	}
+
+	got := wsStripANSI(m.renderWorkspaceRows(200, rows, 0, fixedNow))
+	lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("multiline session title must not add rendered rows; got %d lines in %q", len(lines), got)
+	}
+	if !strings.Contains(lines[2], "first line second line") {
+		t.Fatalf("row = %q, want folded session title", lines[2])
+	}
+}
+
 func TestRenderWorkspaceRowsRepoHeaderShowsRepoPath(t *testing.T) {
 	m := model{width: 200}
 	rows := []workspace.Row{
