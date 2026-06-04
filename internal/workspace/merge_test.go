@@ -160,8 +160,8 @@ func TestMerge_Empty(t *testing.T) {
 	if row == nil {
 		t.Fatalf("no row for worktree %q", wtDir)
 	}
-	if row.State != workspace.StateEmpty {
-		t.Errorf("State: got %q, want %q", row.State, workspace.StateEmpty)
+	if row.State != workspace.StateStopped {
+		t.Errorf("State: got %q, want %q", row.State, workspace.StateStopped)
 	}
 }
 
@@ -342,8 +342,8 @@ func TestMerge_EmptyRepo(t *testing.T) {
 	if rows[0].Repo != repoDir {
 		t.Errorf("Repo: got %q, want %q", rows[0].Repo, repoDir)
 	}
-	if rows[0].State != workspace.StateEmpty {
-		t.Errorf("State: got %q, want %q", rows[0].State, workspace.StateEmpty)
+	if rows[0].State != workspace.StateStopped {
+		t.Errorf("State: got %q, want %q", rows[0].State, workspace.StateStopped)
 	}
 }
 

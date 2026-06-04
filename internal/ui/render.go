@@ -61,8 +61,8 @@ func agentColor(name string) lipgloss.Style {
 }
 
 const (
-	glyphActive     = "\U000f09de" // 󰧞
-	glyphInactive   = "\U000f0764" // 󰝤
+	glyphActive     = "\U000f0765" // 󰝥 filled circle
+	glyphInactive   = "\U000f0766" // 󰝦 hollow circle
 	glyphRecent     = "\U000f02da" // 󰋚
 	glyphQuestion   = "\U000f0625" // 󰘥
 	glyphPermission = "\U000f033e" // 󰌾
@@ -73,8 +73,7 @@ const (
 	glyphTaskActive = "\U000f040a" // 󰐊 play
 
 	// Workspace / worktree row glyphs.
-	glyphWtStopped   = "\U000f0764" // 󰝤 same as glyphInactive — agent stopped
-	glyphWtEmpty     = "○"          // no session ever launched here
+	glyphWtStopped   = "\U000f0766" // 󰝦 same as glyphInactive — agent stopped
 	glyphWtMissing   = "\U000f0e7a" // 󰹺 directory absent from disk
 	glyphWtUnknown   = "?"          // harness has no LiveStatus, tmux window present
 	glyphWtLaunching = "⟳"          // optimistic launching overlay — harness starting
@@ -83,8 +82,6 @@ const (
 var (
 	// wtStoppedStyle dims a stopped worktree row.
 	wtStoppedStyle = dimStyle
-	// wtEmptyStyle renders an empty worktree row (no session ever launched).
-	wtEmptyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	// wtMissingStyle renders a missing worktree row (directory absent).
 	wtMissingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Italic(true)
 	// wtUnknownStyle renders an unknown worktree row.
@@ -671,9 +668,6 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int, isLaunching 
 		case workspace.StateStopped:
 			glyph = glyphWtStopped
 			glyphStyle = wtStoppedStyle
-		case workspace.StateEmpty:
-			glyph = glyphWtEmpty
-			glyphStyle = wtEmptyStyle
 		case workspace.StateMissing:
 			glyph = glyphWtMissing
 			glyphStyle = wtMissingStyle
@@ -712,8 +706,6 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int, isLaunching 
 			}
 			titleStr = wtStoppedStyle.Render(lead)
 		}
-	case workspace.StateEmpty:
-		titleStr = wtEmptyStyle.Render(branchLabel(row))
 	case workspace.StateMissing:
 		titleStr = wtMissingStyle.Render(branchLabel(row) + " (missing)")
 	case workspace.StateUnknown:

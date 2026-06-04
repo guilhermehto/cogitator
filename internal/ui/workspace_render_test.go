@@ -176,7 +176,7 @@ func TestRenderWorkspaceRowsStoppedRowShowsTitleDimmed(t *testing.T) {
 func TestRenderWorkspaceRowsEmptyRowShowsWorktreeBase(t *testing.T) {
 	m := model{width: 200}
 	rows := []workspace.Row{
-		makeRow("/repo/a", "/repo/a/worktrees/feat-x", "feat-x", "", workspace.StateEmpty, state.AttnInactive, time.Time{}),
+		makeRow("/repo/a", "/repo/a/worktrees/feat-x", "feat-x", "", workspace.StateStopped, state.AttnInactive, time.Time{}),
 	}
 	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
 	if !strings.Contains(got, "feat-x") {

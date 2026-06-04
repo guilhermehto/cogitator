@@ -248,7 +248,7 @@ func TestEnterShowsHintWhenTmuxUnavailable(t *testing.T) {
 func TestNShowsHintWhenTmuxUnavailable(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: false}
 	m := makeTestModel(tmuxFake, nil, nil, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "row-a", workspace.StateEmpty, state.AttnInactive, time.Time{}),
+		makeRow("/r", "/r/a", "main", "row-a", workspace.StateStopped, state.AttnInactive, time.Time{}),
 	})
 
 	updated, cmd := m.Update(keyMsg("n"))
@@ -706,7 +706,7 @@ func TestEnterOnMissingRowShowsHint(t *testing.T) {
 func TestNKeyOpensNewWorktreePrompt(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: true}
 	m := makeTestModel(tmuxFake, nil, nil, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "row-a", workspace.StateEmpty, state.AttnInactive, time.Time{}),
+		makeRow("/r", "/r/a", "main", "row-a", workspace.StateStopped, state.AttnInactive, time.Time{}),
 	})
 
 	updated, _ := m.Update(keyMsg("n"))
@@ -723,7 +723,7 @@ func TestNKeyOpensNewWorktreePrompt(t *testing.T) {
 func TestNKeyEscCancelsPrompt(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: true}
 	m := makeTestModel(tmuxFake, nil, nil, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "row-a", workspace.StateEmpty, state.AttnInactive, time.Time{}),
+		makeRow("/r", "/r/a", "main", "row-a", workspace.StateStopped, state.AttnInactive, time.Time{}),
 	})
 
 	// Open the prompt.
@@ -923,7 +923,7 @@ func TestRenderWorkspaceRowsShowsTmuxHint(t *testing.T) {
 		tmuxHint: "tmux not available — start cogitator inside a tmux session",
 	}
 	rows := []workspace.Row{
-		makeRow("/r", "/r/a", "main", "row-a", workspace.StateEmpty, state.AttnInactive, time.Time{}),
+		makeRow("/r", "/r/a", "main", "row-a", workspace.StateStopped, state.AttnInactive, time.Time{}),
 	}
 	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
 	if !strings.Contains(got, "tmux not available") {
