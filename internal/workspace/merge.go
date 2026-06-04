@@ -24,10 +24,6 @@ const (
 	// StateStopped: the worktree is in the roster, the harness has LiveStatus,
 	// but no live session is present. The agent was running and has stopped.
 	StateStopped RowState = "stopped"
-	// StateEmpty: the worktree exists on disk but has no roster entry and no
-	// live session. Nothing has ever been launched here (or the roster was
-	// pruned).
-	StateEmpty RowState = "empty"
 	// StateMissing: the roster has an entry for this worktree but the directory
 	// is absent from disk. Resume is disabled until the directory reappears.
 	StateMissing RowState = "missing"
@@ -141,7 +137,7 @@ func Merge(
 			rows = append(rows, Row{
 				Repo:     repoKey,
 				Worktree: repoKey,
-				State:    StateEmpty,
+				State:    StateStopped,
 			})
 			continue
 		}
@@ -263,8 +259,8 @@ func buildRow(
 
 	// No live session. Determine state from roster + harness capabilities + tmux.
 	if !inRoster {
-		// Worktree on disk, no roster, no live → empty.
-		row.State = StateEmpty
+		// Worktree on disk, no roster, no live → treat as stopped.
+		row.State = StateStopped
 		return row
 	}
 
@@ -308,5 +304,3 @@ func rosterLookup(roster map[string]RosterEntry, canonDir string) (RosterEntry, 
 	}
 	return RosterEntry{}, false
 }
-
-

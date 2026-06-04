@@ -98,7 +98,7 @@ func makeChooserModel(harnOp harnessOps, rows []workspace.Row) model {
 func TestEnterOnBranchPromptOpensChooser(t *testing.T) {
 	ops := &fakeHarnessOpsWithKinds{kinds: []harness.Kind{"codex", "opencode"}}
 	m := makeChooserModel(ops, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "a", workspace.StateEmpty, state.AttnInactive, time.Time{}),
+		makeRow("/r", "/r/a", "main", "a", workspace.StateStopped, state.AttnInactive, time.Time{}),
 	})
 
 	updated, _ := m.Update(keyMsg("enter"))
