@@ -109,6 +109,27 @@ func TestDiscoverRepos_SkipsNoiseAndHiddenDirs(t *testing.T) {
 	}
 }
 
+func TestDiscoverRepos_FindsHiddenRepo(t *testing.T) {
+	root := t.TempDir()
+	// A hidden directory that is itself a repo (e.g. ~/.dotfiles) must be
+	// discovered, even though hidden non-repo dirs are not descended into.
+	mkRepo(t, filepath.Join(root, ".dotfiles"))
+	// A repo nested one level under a hidden, non-repo dir stays skipped: we
+	// report hidden repos but do not crawl hidden trees.
+	mkRepo(t, filepath.Join(root, ".config", "buried"))
+
+	got, err := workspace.DiscoverRepos(root)
+	if err != nil {
+		t.Fatalf("DiscoverRepos: %v", err)
+	}
+	if !contains(got, canon(t, filepath.Join(root, ".dotfiles"))) {
+		t.Errorf("expected hidden repo '.dotfiles'; got %v", got)
+	}
+	if r := canon(t, filepath.Join(root, ".config", "buried")); contains(got, r) {
+		t.Errorf("repo nested under hidden dir must be skipped; got %v", got)
+	}
+}
+
 func TestDiscoverRepos_RespectsDepthCap(t *testing.T) {
 	root := t.TempDir()
 	// Build a path deeper than the cap (7 levels of nesting) with a repo at
