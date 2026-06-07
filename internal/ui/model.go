@@ -101,18 +101,10 @@ const (
 	promptConfirmRemoveRepo
 )
 
-// launchingTimeout is how long a row stays in the optimistic "launching" state
-// before the overlay is cleared and the row re-derives its real state from the
-// next merge. This covers the case where the harness exits immediately or mDNS
-// never advertises.
-const launchingTimeout = 30 * time.Second
-
 // launchResultMsg is returned by launchCmd / resumeCmd after the tmux
 // operations complete (or fail). dir is the canonical worktree directory.
 // launched reports whether a harness process was actually started or
-// relaunched (vs. merely selecting an already-live window). Only a genuine
-// launch warrants keeping the optimistic overlay until a session confirms
-// running; a pure jump/select has nothing new to wait for.
+// relaunched (vs. merely selecting an already-live window).
 type launchResultMsg struct {
 	dir      string
 	launched bool
@@ -280,11 +272,6 @@ type model struct {
 	// timestamps. Updated on each tickMsg. Zero value causes View() to fall
 	// back to time.Now().
 	tickNow time.Time
-	// launching is the optimistic overlay for rows that have been launched or
-	// resumed but not yet confirmed running by the next merge. Keyed by
-	// canonical worktree dir; value is the deadline after which the overlay
-	// is cleared and the row re-derives its real state. Zero value (nil) is safe.
-	launching map[string]time.Time
 	// tmuxHint is a transient one-line message shown when tmux is unavailable
 	// or an action cannot be performed. Cleared on the next key press.
 	tmuxHint string
@@ -903,27 +890,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				row := m.workspaceRows[m.sessionCursor]
-				dir := row.Worktree
-
-				// If the row is already in the launching overlay, jump/no-op
-				// rather than launching again.
-				if _, launching := m.launching[dir]; launching {
-					// Try to select the window if it exists; otherwise no-op.
-					return m, launchCmd(m.tmux, row, m.harnOp, m.launchMode)
-				}
 
 				// Missing rows cannot be resumed (directory absent from disk).
 				if row.State == workspace.StateMissing {
 					m.tmuxHint = "worktree directory is missing — cannot resume"
 					return m, nil
 				}
-
-				// Set optimistic launching overlay.
-				deadline := time.Now().Add(launchingTimeout)
-				if m.launching == nil {
-					m.launching = make(map[string]time.Time)
-				}
-				m.launching[dir] = deadline
 
 				return m, launchCmd(m.tmux, row, m.harnOp, m.launchMode)
 
@@ -1105,18 +1077,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case launchResultMsg:
 		// A launch/resume Cmd completed.
-		//   - error: clear the overlay so the row re-derives its real state.
-		//   - success + launched: a harness process was (re)started; keep the
-		//     overlay until the next merge confirms the row is running.
-		//   - success + !launched: we only selected an already-live window
-		//     (jump/resume of an inactive session). There is no new agent to
-		//     wait for, so clear the overlay immediately — otherwise the row
-		//     would sit in "launching…" until the 30s timeout.
-		if msg.err != nil || !msg.launched {
-			if m.launching != nil {
-				delete(m.launching, msg.dir)
-			}
-		}
 		if msg.err != nil {
 			// Surface the error as a transient hint.
 			m.tmuxHint = fmt.Sprintf("launch error: %v", msg.err)
@@ -1128,22 +1088,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case worktreeCreatedMsg:
-		// A new-worktree Cmd completed. On success, set the launching overlay
-		// keyed by the post-create canonical dest and write a create-time roster
+		// A new-worktree Cmd completed. On success, write a create-time roster
 		// entry so the harness kind is persisted before any live-discovery
 		// snapshot arrives (Codex sessions are never live-discovered, so without
 		// this write the roster would never record the harness kind).
 		if msg.err != nil {
-			if msg.canonDest != "" && m.launching != nil {
-				delete(m.launching, msg.canonDest)
-			}
 			m.tmuxHint = fmt.Sprintf("new worktree error: %v", msg.err)
 		} else if msg.canonDest != "" {
-			deadline := time.Now().Add(launchingTimeout)
-			if m.launching == nil {
-				m.launching = make(map[string]time.Time)
-			}
-			m.launching[msg.canonDest] = deadline
 			// Write a create-time roster entry via the recorder's Upserts
 			// channel so the recorder's in-memory map is updated atomically
 			// with the next Save. Non-blocking: if the channel is full the
@@ -1261,9 +1212,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.sessionCursor >= n {
 			m.sessionCursor = n - 1
 		}
-		if m.launching != nil {
-			delete(m.launching, msg.path)
-		}
 		return m, nil
 
 	case snapshotMsg:
@@ -1291,17 +1239,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case workspaceRowsMsg:
 		m.workspaceRows = msg.rows
 		m.launchMode = msg.launchMode
-		// Clear launching overlay for any dir now confirmed running.
-		if m.launching != nil {
-			for dir := range m.launching {
-				for _, row := range m.workspaceRows {
-					if row.Worktree == dir && row.State == workspace.StateRunning {
-						delete(m.launching, dir)
-						break
-					}
-				}
-			}
-		}
 		// Clamp cursor so it never points past the end of the new row list.
 		if n := len(m.workspaceRows); n == 0 {
 			m.sessionCursor = 0
@@ -1320,16 +1257,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Re-arm the ticker and record the current time so View() can render
 		// fresh relative timestamps without calling time.Now() on every frame.
 		m.tickNow = time.Time(msg)
-		// Expire any launching overlays whose deadline has passed. The row
-		// will re-derive its real state from the next merge.
-		now := time.Time(msg)
-		if m.launching != nil {
-			for dir, deadline := range m.launching {
-				if now.After(deadline) {
-					delete(m.launching, dir)
-				}
-			}
-		}
 		return m, tickCmd()
 	}
 	return m, nil

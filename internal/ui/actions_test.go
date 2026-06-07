@@ -1,7 +1,7 @@
 package ui
 
-// actions_test.go — unit tests for the enter/n action dispatch, launching
-// overlay, and $TMUX-unset degradation.
+// actions_test.go — unit tests for the enter/n action dispatch and
+// $TMUX-unset degradation.
 //
 // All tmux, git, and harness operations are injected via fakes so no real
 // tmux server, git repo, or opencode binary is required.
@@ -521,157 +521,17 @@ func TestEnterOnStoppedRowNoWindowCallsEnsureWindowThenSelect(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Launching overlay: enter sets overlay; re-enter on launching row does not
-// re-launch (jumps instead)
+// launchResultMsg error surfaces a transient hint
 // ---------------------------------------------------------------------------
 
-func TestEnterSetsLaunchingOverlay(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{
-		available:          true,
-		findWindowErr:      tmuxctl.ErrWindowNotFound,
-		ensureWindowResult: "main:5",
-	}
-	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "row-a", workspace.StateStopped, state.AttnInactive, fixedNow),
-	})
-
-	updated, _ := m.Update(keyMsg("enter"))
-	m2 := updated.(model)
-
-	if m2.launching == nil || m2.launching["/r/a"] == (time.Time{}) {
-		t.Error("enter must set launching overlay for the row's dir")
-	}
-}
-
-func TestEnterOnLaunchingRowDoesNotSetNewOverlay(t *testing.T) {
-	// Pre-set the launching overlay for the row.
-	deadline := time.Now().Add(30 * time.Second)
-	tmuxFake := &fakeTmuxOps{
-		available:        true,
-		findWindowResult: "main:5",
-		findWindowErr:    nil,
-		processAlive:     true,
-	}
-	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "row-a", workspace.StateStopped, state.AttnInactive, fixedNow),
-	})
-	m.launching = map[string]time.Time{"/r/a": deadline}
-
-	// Press enter again — should jump (Select) not re-launch.
-	_, cmd := m.Update(keyMsg("enter"))
-	msg := runCmd(cmd)
-
-	// The cmd should be a launchCmd (jump), not a new EnsureWindow.
-	if _, ok := msg.(launchResultMsg); !ok {
-		t.Fatalf("expected launchResultMsg on re-enter of launching row, got %T", msg)
-	}
-	// EnsureWindow must NOT have been called (we jumped, not launched).
-	if len(tmuxFake.ensureWindowCalls) != 0 {
-		t.Errorf("re-enter on launching row must not call EnsureWindow, got %d calls", len(tmuxFake.ensureWindowCalls))
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Launching overlay: cleared on launchResultMsg error
-// ---------------------------------------------------------------------------
-
-func TestLaunchResultMsgErrorClearsOverlay(t *testing.T) {
-	m := model{
-		width: 120,
-		launching: map[string]time.Time{
-			"/r/a": time.Now().Add(30 * time.Second),
-		},
-	}
+func TestLaunchResultMsgErrorSetsHint(t *testing.T) {
+	m := model{width: 120}
 
 	updated, _ := m.Update(launchResultMsg{dir: "/r/a", err: errors.New("tmux error")})
 	m2 := updated.(model)
 
-	if m2.launching["/r/a"] != (time.Time{}) {
-		t.Error("launchResultMsg with error must clear the launching overlay")
-	}
 	if m2.tmuxHint == "" {
 		t.Error("launchResultMsg with error must set tmuxHint")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Launching overlay: cleared on tickMsg timeout
-// ---------------------------------------------------------------------------
-
-func TestTickMsgExpiresLaunchingOverlay(t *testing.T) {
-	// Set a deadline in the past so the tick expires it.
-	pastDeadline := time.Now().Add(-1 * time.Second)
-	m := model{
-		width: 120,
-		launching: map[string]time.Time{
-			"/r/a": pastDeadline,
-		},
-	}
-
-	tick := time.Now()
-	updated, _ := m.Update(tickMsg(tick))
-	m2 := updated.(model)
-
-	if m2.launching["/r/a"] != (time.Time{}) {
-		t.Error("tickMsg must expire launching overlay past its deadline")
-	}
-}
-
-func TestTickMsgDoesNotExpireActiveLaunchingOverlay(t *testing.T) {
-	// Set a deadline in the future — should NOT be expired.
-	futureDeadline := time.Now().Add(30 * time.Second)
-	m := model{
-		width: 120,
-		launching: map[string]time.Time{
-			"/r/a": futureDeadline,
-		},
-	}
-
-	tick := time.Now()
-	updated, _ := m.Update(tickMsg(tick))
-	m2 := updated.(model)
-
-	if m2.launching["/r/a"] == (time.Time{}) {
-		t.Error("tickMsg must not expire launching overlay before its deadline")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Launching overlay: success-path clearing depends on the launched flag
-// ---------------------------------------------------------------------------
-
-func TestLaunchResultMsgSelectOnlyClearsOverlay(t *testing.T) {
-	// A pure jump/select (launched=false) resumes an already-live window.
-	// There is no new agent to wait for, so the overlay must clear at once —
-	// otherwise the row sits in "launching…" until the 30s timeout.
-	m := model{
-		width: 120,
-		launching: map[string]time.Time{
-			"/r/a": time.Now().Add(30 * time.Second),
-		},
-	}
-
-	updated, _ := m.Update(launchResultMsg{dir: "/r/a", launched: false, err: nil})
-	m2 := updated.(model)
-	if m2.launching["/r/a"] != (time.Time{}) {
-		t.Error("select-only launchResultMsg must clear the overlay immediately")
-	}
-}
-
-func TestLaunchResultMsgLaunchedKeepsOverlay(t *testing.T) {
-	// A genuine (re)launch (launched=true) keeps the overlay until the next
-	// merge confirms the row is running.
-	m := model{
-		width: 120,
-		launching: map[string]time.Time{
-			"/r/a": time.Now().Add(30 * time.Second),
-		},
-	}
-
-	updated, _ := m.Update(launchResultMsg{dir: "/r/a", launched: true, err: nil})
-	m2 := updated.(model)
-	if m2.launching["/r/a"] == (time.Time{}) {
-		t.Error("launched launchResultMsg must keep the overlay until confirmed running")
 	}
 }
 
@@ -848,19 +708,8 @@ func TestNewWorktreeCmdTmuxUnavailableReturnsMsg(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// worktreeCreatedMsg: sets launching overlay on success
+// worktreeCreatedMsg: error surfaces a hint
 // ---------------------------------------------------------------------------
-
-func TestWorktreeCreatedMsgSetsLaunchingOverlay(t *testing.T) {
-	m := model{width: 120}
-
-	updated, _ := m.Update(worktreeCreatedMsg{canonDest: "/r/feat", err: nil})
-	m2 := updated.(model)
-
-	if m2.launching == nil || m2.launching["/r/feat"] == (time.Time{}) {
-		t.Error("worktreeCreatedMsg success must set launching overlay for canonDest")
-	}
-}
 
 func TestWorktreeCreatedMsgErrorSetsHint(t *testing.T) {
 	m := model{width: 120}
@@ -871,45 +720,20 @@ func TestWorktreeCreatedMsgErrorSetsHint(t *testing.T) {
 	if m2.tmuxHint == "" {
 		t.Error("worktreeCreatedMsg error must set tmuxHint")
 	}
-	if m2.launching != nil && m2.launching["/r/feat"] != (time.Time{}) {
-		t.Error("worktreeCreatedMsg error must not set launching overlay")
-	}
 }
 
 // ---------------------------------------------------------------------------
-// Render: launching row shows "launching…" glyph
+// Render: stopped row shows its title
 // ---------------------------------------------------------------------------
 
-func TestRenderWorkspaceRowsLaunchingRowShowsLaunchingText(t *testing.T) {
-	m := model{
-		width: 200,
-		launching: map[string]time.Time{
-			"/r/a": time.Now().Add(30 * time.Second),
-		},
-	}
-	rows := []workspace.Row{
-		makeRow("/r", "/r/a", "main", "row-a", workspace.StateStopped, state.AttnInactive, fixedNow),
-	}
-	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
-	if !strings.Contains(got, "launching") {
-		t.Fatalf("launching row must show 'launching' text, got %q", got)
-	}
-}
-
-func TestRenderWorkspaceRowsNonLaunchingRowNotAffected(t *testing.T) {
-	m := model{
-		width: 200,
-		// No launching overlay.
-	}
+func TestRenderWorkspaceRowsStoppedRowShowsTitle(t *testing.T) {
+	m := model{width: 200}
 	rows := []workspace.Row{
 		makeRow("/r", "/r/a", "main", "stopped session", workspace.StateStopped, state.AttnInactive, fixedNow),
 	}
 	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
-	if strings.Contains(got, "launching") {
-		t.Fatalf("non-launching row must not show 'launching' text, got %q", got)
-	}
 	if !strings.Contains(got, "stopped session") {
-		t.Fatalf("non-launching stopped row must show title, got %q", got)
+		t.Fatalf("stopped row must show title, got %q", got)
 	}
 }
 

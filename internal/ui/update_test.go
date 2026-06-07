@@ -8,7 +8,6 @@ package ui
 
 import (
 	"testing"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -209,27 +208,6 @@ func TestWorkspaceRowsMsgCursorZeroOnEmptyRows(t *testing.T) {
 
 	if m2.sessionCursor != 0 {
 		t.Errorf("cursor must be 0 on empty rows; got %d", m2.sessionCursor)
-	}
-}
-
-// TestWorkspaceRowsMsgClearsLaunchingOverlayForRunningRow asserts that the
-// launching overlay entry is removed when the corresponding row is now running.
-func TestWorkspaceRowsMsgClearsLaunchingOverlayForRunningRow(t *testing.T) {
-	ch := make(chan state.Snapshot, 1)
-	m := snapshotModel(ch)
-	m.rowsBuilding = true
-	m.launching = map[string]time.Time{
-		"/r/a": fixedNow.Add(30 * time.Second),
-	}
-
-	rows := []workspace.Row{
-		makeRow("/r", "/r/a", "main", "running", workspace.StateRunning, state.AttnActive, fixedNow),
-	}
-	updated, _ := m.Update(workspaceRowsMsg{rows: rows})
-	m2 := updated.(model)
-
-	if _, still := m2.launching["/r/a"]; still {
-		t.Error("launching overlay must be cleared for a row now confirmed running")
 	}
 }
 
