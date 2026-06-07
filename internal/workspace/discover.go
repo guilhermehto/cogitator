@@ -37,8 +37,11 @@ var repoScanSkipDirs = map[string]bool{
 //   - it descends at most repoScanMaxDepth levels below root;
 //   - it never descends into a discovered repository, so nested worktrees and
 //     submodules are not reported as separate top-level repos;
-//   - it skips hidden directories (names beginning with ".") and a small set of
-//     known-noisy directories (node_modules, vendor, …).
+//   - a hidden directory that is itself a repo (e.g. ~/.dotfiles) is reported,
+//     but hidden directories that are not repos are not descended into — they
+//     are dominated by large caches (~/.cache, ~/.cargo, …) that would blow the
+//     scan budget;
+//   - it skips a small set of known-noisy directories (node_modules, vendor, …).
 //
 // Permission and transient IO errors on individual entries are swallowed so a
 // single unreadable subtree never aborts the scan; only a hard error on root
@@ -68,16 +71,18 @@ func DiscoverRepos(root string) ([]string, error) {
 			return fs.SkipDir
 		}
 
-		// Prune noise and hidden directories, but never the root itself even
-		// when the user pointed us at a hidden or skipped path explicitly.
-		if path != root {
-			base := filepath.Base(path)
-			if repoScanSkipDirs[base] || isHiddenName(base) {
-				return fs.SkipDir
-			}
+		isRoot := path == root
+		base := filepath.Base(path)
+
+		// Prune known-noisy directories, but never the root itself even when
+		// the user pointed us at a skipped path explicitly.
+		if !isRoot && repoScanSkipDirs[base] {
+			return fs.SkipDir
 		}
 
-		// A ".git" entry (dir or file) marks a repository.
+		// A ".git" entry (dir or file) marks a repository. This check runs
+		// before the hidden-directory prune below so a hidden repo such as
+		// ~/.dotfiles is still discovered.
 		if _, statErr := os.Stat(filepath.Join(path, ".git")); statErr == nil {
 			canonical, cErr := pathnorm.Canonical(path)
 			if cErr != nil {
@@ -88,6 +93,13 @@ func DiscoverRepos(root string) ([]string, error) {
 				found = append(found, canonical)
 			}
 			// Do not descend into a repo's working tree.
+			return fs.SkipDir
+		}
+
+		// A hidden directory that is not itself a repo is not descended into:
+		// these are dominated by large caches whose contents are not user
+		// repositories, and crawling them would blow the scan budget.
+		if !isRoot && isHiddenName(base) {
 			return fs.SkipDir
 		}
 		return nil
