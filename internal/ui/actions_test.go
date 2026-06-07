@@ -930,6 +930,14 @@ func TestDeleteWorktreeFullConfirmFlowDispatchesRemove(t *testing.T) {
 	if m3.prompt != promptIdle {
 		t.Fatalf("after second y, prompt = %v, want promptIdle", m3.prompt)
 	}
+	// The row must vanish the instant deletion is confirmed, before the
+	// (potentially slow) git removal finishes, and be tracked as pending.
+	if len(m3.workspaceRows) != 0 {
+		t.Errorf("row not optimistically removed: %d rows remain", len(m3.workspaceRows))
+	}
+	if _, ok := m3.pendingDeletes["/r/a"]; !ok {
+		t.Errorf("/r/a not recorded in pendingDeletes: %+v", m3.pendingDeletes)
+	}
 	result, ok := runCmd(cmd).(worktreeDeletedMsg)
 	if !ok {
 		t.Fatalf("expected worktreeDeletedMsg")
@@ -1056,6 +1064,66 @@ func TestWorktreeDeletedMsgErrorSetsHintKeepsRow(t *testing.T) {
 	}
 	if !strings.Contains(m2.tmuxHint, "delete failed") {
 		t.Errorf("error must set a 'delete failed' hint, got %q", m2.tmuxHint)
+	}
+}
+
+// A failed deletion of an optimistically-removed row must restore that row and
+// clear the pending entry so the worktree reappears in the table.
+func TestWorktreeDeletedMsgErrorRestoresPendingRow(t *testing.T) {
+	saved := makeRow("/r", "/r/a", "feat", "a", workspace.StateStopped, state.AttnInactive, fixedNow)
+	m := model{
+		width:          120,
+		workspaceRows:  nil, // row was already optimistically removed
+		pendingDeletes: map[string]workspace.Row{"/r/a": saved},
+	}
+
+	updated, _ := m.Update(worktreeDeletedMsg{path: "/r/a", err: errors.New("modified files")})
+	m2 := updated.(model)
+
+	if len(m2.workspaceRows) != 1 || m2.workspaceRows[0].Worktree != "/r/a" {
+		t.Fatalf("failed deletion must restore the optimistically removed row, got %+v", m2.workspaceRows)
+	}
+	if _, ok := m2.pendingDeletes["/r/a"]; ok {
+		t.Errorf("pending entry must clear after a failed deletion")
+	}
+	if !strings.Contains(m2.tmuxHint, "delete failed") {
+		t.Errorf("error must set a 'delete failed' hint, got %q", m2.tmuxHint)
+	}
+}
+
+// A successful deletion must clear the pending entry so a later snapshot
+// rebuild is no longer filtered for that path.
+func TestWorktreeDeletedMsgSuccessClearsPending(t *testing.T) {
+	m := model{
+		width:          120,
+		workspaceRows:  nil,
+		pendingDeletes: map[string]workspace.Row{"/r/a": makeRow("/r", "/r/a", "feat", "a", workspace.StateStopped, state.AttnInactive, fixedNow)},
+	}
+
+	updated, _ := m.Update(worktreeDeletedMsg{path: "/r/a"})
+	m2 := updated.(model)
+
+	if _, ok := m2.pendingDeletes["/r/a"]; ok {
+		t.Errorf("pending entry must clear after a successful deletion")
+	}
+}
+
+// A snapshot-driven rebuild that still lists a pending worktree (git has not
+// finished removing it) must not resurrect the row.
+func TestWorkspaceRowsMsgFiltersPendingDeletes(t *testing.T) {
+	m := model{
+		width:          120,
+		pendingDeletes: map[string]workspace.Row{"/r/a": makeRow("/r", "/r/a", "feat", "a", workspace.StateStopped, state.AttnInactive, fixedNow)},
+	}
+
+	updated, _ := m.Update(workspaceRowsMsg{rows: []workspace.Row{
+		makeRow("/r", "/r/a", "feat", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/r", "/r/b", "other", "b", workspace.StateRunning, state.AttnActive, fixedNow),
+	}})
+	m2 := updated.(model)
+
+	if len(m2.workspaceRows) != 1 || m2.workspaceRows[0].Worktree != "/r/b" {
+		t.Fatalf("pending worktree must be filtered from a rebuild, got %+v", m2.workspaceRows)
 	}
 }
 

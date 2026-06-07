@@ -320,6 +320,13 @@ type model struct {
 	// When the in-flight build completes, one follow-up build is dispatched
 	// using the latest m.snap at that moment (coalesced, not stale).
 	rowsDirty bool
+	// pendingDeletes tracks worktrees whose row was optimistically removed
+	// from the table the moment deletion was confirmed, keyed by canonical
+	// worktree path. The stored Row lets a failed deletion restore the row.
+	// While a path is pending, workspaceRowsMsg filters it out so an in-flight
+	// snapshot rebuild (the worktree still exists on disk until git finishes)
+	// cannot resurrect the row. Entries clear on deletion success or failure.
+	pendingDeletes map[string]workspace.Row
 
 	// Repo finder ('A') state, meaningful only while prompt == promptAddRepo.
 	// repoFinderScanning is true between opening the finder and the scan result
@@ -545,6 +552,46 @@ func deleteWorktreeCmd(ops tmuxOps, gitOp gitOps, repo, path string, mode tmuxct
 		}
 		return worktreeDeletedMsg{path: path}
 	}
+}
+
+// removeWorktreeRow optimistically drops target's row from the visible table
+// and records it in pendingDeletes so a failed deletion can restore it. The
+// session cursor is clamped so it never points past the shortened list.
+func (m *model) removeWorktreeRow(target workspace.Row) {
+	if m.pendingDeletes == nil {
+		m.pendingDeletes = map[string]workspace.Row{}
+	}
+	m.pendingDeletes[target.Worktree] = target
+	remaining := m.workspaceRows[:0:0]
+	for _, row := range m.workspaceRows {
+		if row.Worktree != target.Worktree {
+			remaining = append(remaining, row)
+		}
+	}
+	m.workspaceRows = remaining
+	if n := len(m.workspaceRows); n == 0 {
+		m.sessionCursor = 0
+	} else if m.sessionCursor >= n {
+		m.sessionCursor = n - 1
+	}
+}
+
+// filterPendingDeletes drops rows whose worktree is awaiting deletion. A
+// snapshot-driven rebuild can list a worktree that git has not finished
+// removing yet; without this filter the row would flash back into the table
+// between the confirmation and the deletion completing. Returns rows unchanged
+// when nothing is pending.
+func filterPendingDeletes(rows []workspace.Row, pending map[string]workspace.Row) []workspace.Row {
+	if len(pending) == 0 {
+		return rows
+	}
+	filtered := rows[:0:0]
+	for _, row := range rows {
+		if _, ok := pending[row.Worktree]; !ok {
+			filtered = append(filtered, row)
+		}
+	}
+	return filtered
 }
 
 // canDeleteWorktree reports whether row may be deleted, returning a user-facing
@@ -820,6 +867,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.prompt = promptIdle
 					m.deleteTarget = workspace.Row{}
 					m.deleteMergeInfo = ""
+					// Optimistically drop the row now: git worktree removal can
+					// take a few seconds, and leaving the row visible looks like
+					// the keypress was ignored. removeWorktreeRow stashes the row
+					// in pendingDeletes so a failed deletion can restore it.
+					m.removeWorktreeRow(target)
 					return m, deleteWorktreeCmd(m.tmux, m.gitOp, target.Repo, target.Worktree, m.launchMode)
 				}
 				m.prompt = promptIdle
@@ -1212,10 +1264,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case worktreeDeletedMsg:
 		if msg.err != nil {
 			m.tmuxHint = fmt.Sprintf("delete failed: %v", msg.err)
+			// The row was optimistically removed at confirm time; restore it so
+			// a failed deletion does not silently drop the worktree from view.
+			// The next snapshot rebuild reconciles ordering.
+			if saved, ok := m.pendingDeletes[msg.path]; ok {
+				m.workspaceRows = append(m.workspaceRows, saved)
+				delete(m.pendingDeletes, msg.path)
+			}
 			return m, nil
 		}
-		// Drop the deleted row immediately so it disappears without waiting for
-		// the next snapshot; the subsequent merge confirms its absence.
+		// Success: clear the pending entry. The row was already dropped when the
+		// deletion was confirmed; remove it again defensively (idempotent) in
+		// case it was never optimistically removed (e.g. a direct dispatch).
+		delete(m.pendingDeletes, msg.path)
 		var remaining []workspace.Row
 		for _, row := range m.workspaceRows {
 			if row.Worktree != msg.path {
@@ -1253,7 +1314,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(next, bellC, buildC)
 
 	case workspaceRowsMsg:
-		m.workspaceRows = msg.rows
+		m.workspaceRows = filterPendingDeletes(msg.rows, m.pendingDeletes)
 		m.launchMode = msg.launchMode
 		// Clamp cursor so it never points past the end of the new row list.
 		if n := len(m.workspaceRows); n == 0 {
@@ -1515,6 +1576,7 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 		bellEnabled:     bellEnabled,
 		debug:           debug,
 		bellSent:        map[rowKey]state.Attention{},
+		pendingDeletes:  map[string]workspace.Row{},
 		cfg:             cfg,
 
 		// Inject real implementations for tmux, git, and harness operations.
