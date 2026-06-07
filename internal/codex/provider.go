@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/guilhermehto/cogitator/internal/harness"
+	"github.com/guilhermehto/cogitator/internal/hookipc"
 	"github.com/guilhermehto/cogitator/internal/provider"
 )
 
@@ -78,12 +79,12 @@ func (p *Provider) Start(ctx context.Context, sink provider.Sink) error {
 	// Attempt to start the hook listener. If another cogitator instance already
 	// owns the socket, log and continue without live hook attention.
 	sockPath := HookSocketPath()
-	cleanup, listenErr := Listen(ctx, sockPath, func(raw []byte) {
+	cleanup, listenErr := hookipc.Listen(ctx, sockPath, func(raw []byte) {
 		p.handleHookFrame(raw, sink)
 	}, p.logger)
 
 	if listenErr != nil {
-		if errors.Is(listenErr, ErrListenerOwned) {
+		if errors.Is(listenErr, hookipc.ErrListenerOwned) {
 			p.logger.Info("codex hook: another cogitator instance owns the socket; running without live hook attention",
 				"path", sockPath)
 		} else {
