@@ -357,6 +357,7 @@ type model struct {
 	// Taskwarrior fields
 	tw               ClientAPI
 	twAvail          bool
+	tasksActive      bool
 	tasks            []taskwarrior.TaskView
 	tasksErr         error // last error from Export; nil on success
 	tasksLoaded      bool
@@ -861,16 +862,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
-		// (c) Focus swap via Tab.
-		if msg.String() == "tab" {
+		// (c) Tasks pane activation and focus swap.
+		if msg.String() == "T" {
 			if m.twAvail {
+				m.tasksActive = !m.tasksActive
+				if m.tasksActive {
+					m.focus = focusTasks
+					if !m.tasksLoaded {
+						return m, loadTasksCmd(m.tw, m.cfg.TaskwarriorTimeout)
+					}
+				} else {
+					m.focus = focusSessions
+				}
+			}
+			return m, nil
+		}
+
+		if msg.String() == "tab" {
+			if m.twAvail && m.tasksActive {
 				if m.focus == focusSessions {
 					m.focus = focusTasks
 				} else {
 					m.focus = focusSessions
 				}
 			}
-			// No-op when !twAvail — focus stays on sessions.
+			// No-op when !twAvail or tasks are inactive — focus stays on sessions.
 			return m, nil
 		}
 
@@ -1006,7 +1022,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// (e) Tasks-focused keys — only when focused on tasks and no mutation in flight.
-		if m.focus == focusTasks && !m.mutationInFlight {
+		if m.focus == focusTasks && m.tasksActive && !m.mutationInFlight {
 			tasks := m.tasks
 			cursor := m.taskCursor
 			switch msg.String() {
@@ -1435,16 +1451,29 @@ func (m model) View() string {
 	recentMins := int(cfg.RecentWindow.Minutes())
 
 	var headerHint string
-	if m.focus == focusSessions {
-		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s recent · A add repo · R rm repo · D del wt  ·  tab→tasks  ·  q quit",
-			live, recent, recentMins, m.snap.UpdatedAt.Format("15:04:05"), toggleVerb(m.recentCollapsed))
+	tasksActive := m.twAvail && m.tasksActive
+	viewFocus := m.focus
+	if !tasksActive {
+		viewFocus = focusSessions
+	}
+
+	if viewFocus == focusSessions {
+		tasksHint := ""
+		switch {
+		case tasksActive:
+			tasksHint = "  ·  tab→tasks · T hide tasks"
+		case m.twAvail:
+			tasksHint = "  ·  T show tasks"
+		}
+		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s recent · A add repo · R rm repo · D del wt%s  ·  q quit",
+			live, recent, recentMins, m.snap.UpdatedAt.Format("15:04:05"), toggleVerb(m.recentCollapsed), tasksHint)
 	} else {
-		headerHint = fmt.Sprintf("  %d pending  ·  a add · e edit · s start/stop · d done · D del · U undo · j/k move  ·  tab→sessions  ·  q quit",
+		headerHint = fmt.Sprintf("  %d pending  ·  a add · e edit · s start/stop · d done · D del · U undo · j/k move  ·  tab→sessions · T hide tasks  ·  q quit",
 			len(m.tasks))
 	}
 	header := titleStyle.Render("cogitator") + dimStyle.Render(headerHint)
 
-	legend := legendLine(m.width)
+	legend := legendLine(m.width, tasksActive)
 	// The unreachable footer is gated behind --debug because transient
 	// "instance unreachable" warnings (laptop sleep, network blips,
 	// short-lived opencode processes) are noisy during normal operation
@@ -1469,13 +1498,16 @@ func (m model) View() string {
 	}
 	reserved := headerRows + legendRows + unreachableRows + mutationFooterRows
 
-	tasksOuterH := max(8, m.height/3)
+	tasksOuterH := 0
+	if tasksActive {
+		tasksOuterH = max(8, m.height/3)
+	}
 	sessionsOuterH := max(6, m.height-tasksOuterH-reserved)
 
 	// Choose border style based on which pane is focused.
 	sessionsStyle := paneStyle
 	tasksStyle := paneStyle
-	if m.focus == focusSessions {
+	if viewFocus == focusSessions {
 		sessionsStyle = paneFocusedStyle
 	} else {
 		tasksStyle = paneFocusedStyle
@@ -1487,7 +1519,10 @@ func (m model) View() string {
 	// this, the View() output is 4 rows taller than the terminal and the
 	// alt-screen crops the top (header, Sessions title, column header).
 	sessionsInnerH := max(1, sessionsOuterH-2)
-	tasksInnerH := max(1, tasksOuterH-2)
+	tasksInnerH := 0
+	if tasksActive {
+		tasksInnerH = max(1, tasksOuterH-2)
+	}
 
 	// When repos are configured, render the merged worktree view. Otherwise
 	// fall back to the live-only path so --status/--demo and unconfigured
@@ -1509,10 +1544,13 @@ func (m model) View() string {
 	}
 	sessionsPane := sessionsStyle.Width(paneW).Height(sessionsInnerH).Render(sessionContent)
 
-	tasksContent := m.renderTasksPane(tasksOuterH, paneW)
-	tasksPane := tasksStyle.Width(paneW).Height(tasksInnerH).Render(tasksContent)
-
-	parts := []string{header, sessionsPane, tasksPane, legend}
+	parts := []string{header, sessionsPane}
+	if tasksActive {
+		tasksContent := m.renderTasksPane(tasksOuterH, paneW)
+		tasksPane := tasksStyle.Width(paneW).Height(tasksInnerH).Render(tasksContent)
+		parts = append(parts, tasksPane)
+	}
+	parts = append(parts, legend)
 	if footer != "" {
 		parts = append(parts, footer)
 	}
@@ -1560,6 +1598,7 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 
 		tw:               tw,
 		twAvail:          twAvail,
+		tasksActive:      twAvail,
 		tasks:            nil,
 		tasksLoaded:      false,
 		taskCursor:       0,

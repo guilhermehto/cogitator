@@ -182,7 +182,7 @@ func styledStatus(s string) string {
 // legendLine renders the status-icon legend, optionally appending task-priority
 // glyphs. If the combined line would exceed width, the task glyphs are omitted
 // so the legend never wraps on narrow terminals.
-func legendLine(width int) string {
+func legendLine(width int, includeTasks bool) string {
 	sessionParts := []string{
 		dimStyle.Render("legend:"),
 		attnActiveStyle.Render(glyphActive) + " " + dimStyle.Render("active"),
@@ -194,6 +194,9 @@ func legendLine(width int) string {
 		attnErrStyle.Render(glyphError) + " " + dimStyle.Render("error"),
 	}
 	sessionLegend := strings.Join(sessionParts, "  ")
+	if !includeTasks {
+		return sessionLegend
+	}
 
 	taskParts := []string{
 		taskActiveStyle.Render(glyphTaskActive) + " " + dimStyle.Render("running"),
