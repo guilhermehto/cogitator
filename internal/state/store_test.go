@@ -501,3 +501,299 @@ func TestFinishedProviderSurvivesReplace(t *testing.T) {
 		t.Fatalf("finished lost on identical refresh: got %q, want %q", got, AttnFinished)
 	}
 }
+
+// TestRestoreSessionsPopulatesMap verifies that RestoreSessions stores sticky
+// entries and silently drops non-sticky ones (active, inactive).
+func TestRestoreSessionsPopulatesMap(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(ctx)
+
+	codex := harness.Kind("codex")
+	input := []RestoredSession{
+		{Provider: codex, SessionID: "S1", Attention: AttnFinished},
+		{Provider: codex, SessionID: "S2", Attention: AttnErrored},
+		{Provider: codex, SessionID: "S3", Attention: AttnPermissionPending},
+		{Provider: codex, SessionID: "S4", Attention: AttnQuestionPending},
+		{Provider: codex, SessionID: "S5", Attention: AttnActive},
+		{Provider: codex, SessionID: "S6", Attention: AttnInactive},
+	}
+	s.RestoreSessions(input)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sticky := []string{"S1", "S2", "S3", "S4"}
+	for _, id := range sticky {
+		key := providerSessionKey{provider: codex, sessionID: id}
+		if _, ok := s.restored[key]; !ok {
+			t.Errorf("expected sticky session %q to be stored, but it was not", id)
+		}
+	}
+	dropped := []string{"S5", "S6"}
+	for _, id := range dropped {
+		key := providerSessionKey{provider: codex, sessionID: id}
+		if _, ok := s.restored[key]; ok {
+			t.Errorf("expected non-sticky session %q to be dropped, but it was stored", id)
+		}
+	}
+}
+
+// TestRestoreSeedOnlyYieldsZeroRows verifies that a store seeded only via
+// RestoreSessions (no instances, no provider rows) produces an empty snapshot.
+// The seed alone must never create visible rows.
+func TestRestoreSeedOnlyYieldsZeroRows(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(ctx)
+
+	codex := harness.Kind("codex")
+	s.RestoreSessions([]RestoredSession{
+		{Provider: codex, SessionID: "S1", Attention: AttnFinished},
+		{Provider: codex, SessionID: "S2", Attention: AttnErrored},
+	})
+
+	snap := s.snapshot()
+	if len(snap.Sessions) != 0 {
+		t.Fatalf("seed-only store: expected 0 sessions in snapshot, got %d", len(snap.Sessions))
+	}
+}
+
+// TestRestoreApplyAndClear is the behavioral confidence gate for step 3.
+// It covers: recent-restore, live-supersede, multi-instance same-session-id
+// dedup, sticky-set filtering, and MarkViewed clear (asserting a publish fires).
+func TestRestoreApplyAndClear(t *testing.T) {
+	ocKind := harness.Kind("opencode")
+	codex := harness.Kind("codex")
+
+	// seed builds a single-entry restored slice for convenience.
+	seed := func(prov harness.Kind, sessionID string, attn Attention) []RestoredSession {
+		return []RestoredSession{
+			{Provider: prov, SessionID: sessionID, Attention: attn},
+		}
+	}
+
+	t.Run("recent row shows restored finished badge", func(t *testing.T) {
+		s := newTestStore(context.Background())
+		inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
+		s.AddInstance(inst)
+		s.RestoreSessions(seed(ocKind, "S1", AttnFinished))
+		// Recent-only row: no SSE event, so source stays SourceRecent.
+		s.SyncRecent(inst.ID, []oc.Session{makeSession("S1", 1_000)})
+
+		if got := attentionOf(t, s, "S1"); got != AttnFinished {
+			t.Fatalf("recent+restore: got %q, want %q", got, AttnFinished)
+		}
+	})
+
+	t.Run("live-idle row still shows restored badge", func(t *testing.T) {
+		s := newTestStore(context.Background())
+		inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
+		s.AddInstance(inst)
+		s.RestoreSessions(seed(ocKind, "S1", AttnFinished))
+		s.SyncRecent(inst.ID, []oc.Session{makeSession("S1", 1_000)})
+		// An SSE event promotes the row to live but the session is idle.
+		// The restored badge must still show — opencode replays idle events on
+		// restart and the badge should persist until a real active event or
+		// MarkViewed clears it.
+		applyStatus(t, s, inst.ID, "S1", "idle")
+
+		if got := attentionOf(t, s, "S1"); got != AttnFinished {
+			t.Fatalf("live-idle+restore: got %q, want %q", got, AttnFinished)
+		}
+	})
+
+	t.Run("live-active row does not show restored badge", func(t *testing.T) {
+		s := newTestStore(context.Background())
+		inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
+		s.AddInstance(inst)
+		s.RestoreSessions(seed(ocKind, "S1", AttnFinished))
+		s.SyncRecent(inst.ID, []oc.Session{makeSession("S1", 1_000)})
+		// A live active event means the session is genuinely busy; the
+		// restored badge must not override the live attention.
+		applyStatus(t, s, inst.ID, "S1", "busy")
+
+		if got := attentionOf(t, s, "S1"); got != AttnActive {
+			t.Fatalf("live-active: got %q, want %q", got, AttnActive)
+		}
+	})
+
+	t.Run("multi-instance same session: live-idle winner shows restored badge", func(t *testing.T) {
+		s := newTestStore(context.Background())
+		instA := discovery.Instance{ID: "127.0.0.1:1111", Host: "127.0.0.1", Port: 1111}
+		instB := discovery.Instance{ID: "127.0.0.1:2222", Host: "127.0.0.1", Port: 2222}
+		s.AddInstance(instA)
+		s.AddInstance(instB)
+		s.RestoreSessions(seed(ocKind, "ses_dup", AttnFinished))
+		shared := []oc.Session{makeSession("ses_dup", 1_000)}
+		s.SyncRecent(instA.ID, shared)
+		s.SyncRecent(instB.ID, shared)
+		// instB gets a live idle event; its row wins dedup. The winner is
+		// live-but-idle, so the restored badge must apply.
+		applyStatus(t, s, instB.ID, "ses_dup", "idle")
+
+		snap := s.snapshot()
+		count := 0
+		var winner SessionView
+		for _, sv := range snap.Sessions {
+			if sv.SessionID == "ses_dup" {
+				count++
+				winner = sv
+			}
+		}
+		if count != 1 {
+			t.Fatalf("expected 1 deduped row, got %d", count)
+		}
+		if winner.Source != SourceLive {
+			t.Fatalf("expected live source, got %q", winner.Source)
+		}
+		// Live-idle winner: restored badge must be applied.
+		if winner.Attention != AttnFinished {
+			t.Fatalf("live-idle winner attention: got %q, want %q", winner.Attention, AttnFinished)
+		}
+	})
+
+	t.Run("multi-instance same session: live-active winner does not show restored badge", func(t *testing.T) {
+		s := newTestStore(context.Background())
+		instA := discovery.Instance{ID: "127.0.0.1:1111", Host: "127.0.0.1", Port: 1111}
+		instB := discovery.Instance{ID: "127.0.0.1:2222", Host: "127.0.0.1", Port: 2222}
+		s.AddInstance(instA)
+		s.AddInstance(instB)
+		s.RestoreSessions(seed(ocKind, "ses_dup", AttnFinished))
+		shared := []oc.Session{makeSession("ses_dup", 1_000)}
+		s.SyncRecent(instA.ID, shared)
+		s.SyncRecent(instB.ID, shared)
+		// instB gets a live active event; its row wins dedup. The winner is
+		// live-and-active, so the restored badge must NOT apply.
+		applyStatus(t, s, instB.ID, "ses_dup", "busy")
+
+		snap := s.snapshot()
+		count := 0
+		var winner SessionView
+		for _, sv := range snap.Sessions {
+			if sv.SessionID == "ses_dup" {
+				count++
+				winner = sv
+			}
+		}
+		if count != 1 {
+			t.Fatalf("expected 1 deduped row, got %d", count)
+		}
+		if winner.Source != SourceLive {
+			t.Fatalf("expected live source, got %q", winner.Source)
+		}
+		// Live-active winner: restored badge must not override.
+		if winner.Attention != AttnActive {
+			t.Fatalf("live-active winner attention: got %q, want %q", winner.Attention, AttnActive)
+		}
+	})
+
+	t.Run("sticky set: errored/permission/question restored; active not restored", func(t *testing.T) {
+		cases := []struct {
+			attn Attention
+			want Attention
+		}{
+			{AttnErrored, AttnErrored},
+			{AttnPermissionPending, AttnPermissionPending},
+			{AttnQuestionPending, AttnQuestionPending},
+			{AttnActive, AttnInactive}, // active is not sticky; row stays inactive
+		}
+		for _, tc := range cases {
+			tc := tc
+			t.Run(string(tc.attn), func(t *testing.T) {
+				s := newTestStore(context.Background())
+				inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
+				s.AddInstance(inst)
+				s.RestoreSessions(seed(ocKind, "S1", tc.attn))
+				s.SyncRecent(inst.ID, []oc.Session{makeSession("S1", 1_000)})
+
+				if got := attentionOf(t, s, "S1"); got != tc.want {
+					t.Fatalf("restore %q: got %q, want %q", tc.attn, got, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("MarkViewed clears restored seed and fires publish", func(t *testing.T) {
+		s := newTestStore(context.Background())
+		inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
+		s.AddInstance(inst)
+		s.RestoreSessions(seed(ocKind, "S1", AttnFinished))
+		s.SyncRecent(inst.ID, []oc.Session{makeSession("S1", 1_000)})
+
+		// Precondition: restored badge is visible.
+		if got := attentionOf(t, s, "S1"); got != AttnFinished {
+			t.Fatalf("precondition: got %q, want %q", got, AttnFinished)
+		}
+
+		ch := s.Subscribe()
+		// Drain the initial snapshot from Subscribe.
+		select {
+		case <-ch:
+		case <-time.After(200 * time.Millisecond):
+			t.Fatal("expected initial snapshot from Subscribe")
+		}
+
+		// MarkViewed with empty instanceID (workspace Row semantics).
+		s.MarkViewed(ocKind, "", "S1")
+
+		// A publish must fire because the seed was deleted (changed = true).
+		select {
+		case snap := <-ch:
+			for _, sv := range snap.Sessions {
+				if sv.SessionID == "S1" && sv.Attention == AttnFinished {
+					t.Fatalf("after MarkViewed: restored badge still visible")
+				}
+			}
+		case <-time.After(200 * time.Millisecond):
+			t.Fatal("expected publish after MarkViewed cleared restored seed")
+		}
+
+		// Subsequent snapshot must not show the restored badge.
+		if got := attentionOf(t, s, "S1"); got != AttnInactive {
+			t.Fatalf("after MarkViewed: got %q, want %q", got, AttnInactive)
+		}
+	})
+
+	t.Run("MarkViewed with instanceID clears only matching provider key", func(t *testing.T) {
+		s := newTestStore(context.Background())
+		inst := discovery.Instance{ID: "inst-1", Host: "127.0.0.1", Port: 1}
+		s.AddInstance(inst)
+		// Seed both opencode and codex for the same logical session id.
+		s.RestoreSessions([]RestoredSession{
+			{Provider: ocKind, SessionID: "S1", Attention: AttnFinished},
+			{Provider: codex, SessionID: "S1", Attention: AttnErrored},
+		})
+		s.SyncRecent(inst.ID, []oc.Session{makeSession("S1", 1_000)})
+		// Also add a codex provider row so it appears in the snapshot.
+		s.ApplyUpdate(provider.SessionUpdate{
+			Provider:   codex,
+			InstanceID: "codex",
+			SessionID:  "S1",
+			StatusType: "idle",
+			Source:     string(SourceRecent),
+		})
+
+		// MarkViewed with explicit instanceID clears only the opencode key.
+		s.MarkViewed(ocKind, inst.ID, "S1")
+
+		// opencode row: badge cleared.
+		snap := s.snapshot()
+		for _, sv := range snap.Sessions {
+			if sv.SessionID == "S1" && sv.Provider == ocKind && sv.Attention == AttnFinished {
+				t.Fatalf("opencode restored badge should be cleared after MarkViewed")
+			}
+		}
+		// codex row: badge still present (different provider key).
+		found := false
+		for _, sv := range snap.Sessions {
+			if sv.SessionID == "S1" && sv.Provider == codex {
+				found = true
+				if sv.Attention != AttnErrored {
+					t.Fatalf("codex restored badge: got %q, want %q", sv.Attention, AttnErrored)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("codex session S1 not found in snapshot")
+		}
+	})
+}

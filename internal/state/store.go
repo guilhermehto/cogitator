@@ -123,17 +123,30 @@ type providerInstanceKey struct {
 	instanceID string
 }
 
+// RestoredSession carries the last-known attention for one session, loaded
+// from durable storage at startup. Provider and SessionID together form the
+// lookup key; Attention must satisfy isSticky() or the entry is ignored.
+type RestoredSession struct {
+	Provider  harness.Kind
+	SessionID string
+	Attention Attention
+}
+
 type Store struct {
 	mu        sync.Mutex
 	instances map[string]*instanceState
 	// providerSessions holds sessions ingested via ApplyUpdate (the neutral
 	// provider seam). Keyed by (provider, sessionID) for collision safety.
 	providerSessions map[providerSessionKey]*providerRow
-	listeners        []chan Snapshot
-	now              func() time.Time
-	lookupCtx        context.Context
-	cfg              *config.Config
-	logger           *slog.Logger
+	// restored holds the last-known attention for sessions loaded from durable
+	// storage at startup. Keyed by (provider, sessionID). Entries are consumed
+	// by the snapshot override in step 3; this map is never used to create rows.
+	restored  map[providerSessionKey]RestoredSession
+	listeners []chan Snapshot
+	now       func() time.Time
+	lookupCtx context.Context
+	cfg       *config.Config
+	logger    *slog.Logger
 }
 
 func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) *Store {
@@ -146,10 +159,30 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) *Store {
 	return &Store{
 		instances:        map[string]*instanceState{},
 		providerSessions: map[providerSessionKey]*providerRow{},
+		restored:         map[providerSessionKey]RestoredSession{},
 		now:              time.Now,
 		lookupCtx:        ctx,
 		cfg:              cfg,
 		logger:           logger,
+	}
+}
+
+// RestoreSessions seeds the store with last-known attention values loaded from
+// durable storage. It must be called before any events arrive (typically at
+// startup, before the SSE pump starts). Only entries whose Attention is sticky
+// (finished, errored, permission, question) are stored; active/inactive are
+// transient and must be re-derived from live events.
+//
+// Seeding alone never creates snapshot rows — the restored map is only
+// consulted by the snapshot override added in step 3.
+func (s *Store) RestoreSessions(sessions []RestoredSession) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, v := range sessions {
+		if v.Attention.isSticky() {
+			k := providerSessionKey{provider: v.Provider, sessionID: v.SessionID}
+			s.restored[k] = v
+		}
 	}
 }
 
@@ -827,6 +860,25 @@ func (s *Store) MarkViewed(providerKind harness.Kind, instanceID, sessionID stri
 			changed = true
 		}
 	}
+	// Clear the restored seed for this session so the badge does not
+	// reappear after the user has viewed it. When instanceID is empty the
+	// call is instance-agnostic (workspace Row), so delete any restored
+	// entry whose sessionID matches regardless of provider — mirroring the
+	// cross-instance clear semantics above.
+	if instanceID == "" {
+		for k := range s.restored {
+			if k.sessionID == sessionID {
+				delete(s.restored, k)
+				changed = true
+			}
+		}
+	} else {
+		rkey := providerSessionKey{provider: providerKind, sessionID: sessionID}
+		if _, ok := s.restored[rkey]; ok {
+			delete(s.restored, rkey)
+			changed = true
+		}
+	}
 	s.mu.Unlock()
 	if changed {
 		s.publish()
@@ -984,8 +1036,24 @@ func (s *Store) snapshot() Snapshot {
 	}
 
 	rows := make([]SessionView, 0, len(best))
-	for _, c := range best {
-		rows = append(rows, c.view)
+	for key, c := range best {
+		view := c.view
+		// Apply the restored badge whenever the deduped winner's attention is
+		// exactly inactive. The == AttnInactive gate is sufficient: any live
+		// reason to look (active, permission, question, errored, in-run
+		// finished) is never AttnInactive (finishedOr/Classify guarantee
+		// this), so dropping the former !c.live guard cannot clobber a live
+		// active/blocked row. It only fills genuinely-idle rows — including
+		// live-but-idle ones that opencode promotes to live via a
+		// session.status/session.idle replay on restart — with the persisted
+		// badge until a real live event makes attention non-inactive or the
+		// user views the session (MarkViewed).
+		if view.Attention == AttnInactive {
+			if r, ok := s.restored[key]; ok && r.Attention.isSticky() {
+				view.Attention = r.Attention
+			}
+		}
+		rows = append(rows, view)
 	}
 	// Sort deterministically with a mixed provider+instance id set.
 	// Primary: provider kind (groups all opencode rows before all codex rows,

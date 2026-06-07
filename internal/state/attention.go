@@ -36,6 +36,23 @@ func (a Attention) Rank() int {
 	}
 }
 
+// isSticky reports whether an attention label should survive a cogitator
+// restart. Only terminal/waiting states are sticky: active and inactive are
+// transient and must be re-derived from live events.
+func (a Attention) isSticky() bool {
+	switch a {
+	case AttnFinished, AttnErrored, AttnPermissionPending, AttnQuestionPending:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsSticky is the exported form of isSticky, for use by packages outside
+// internal/state (e.g. internal/ui) that need to filter roster entries to the
+// sticky set without duplicating the predicate.
+func (a Attention) IsSticky() bool { return a.isSticky() }
+
 // Classify computes the attention label for one session.
 //
 // statusType is the value of SessionStatus.type ("idle", "generating",
