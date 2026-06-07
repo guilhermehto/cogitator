@@ -109,6 +109,33 @@ Taskwarrior respects the following variables from that environment:
 | `$TASKDATA` | overrides the Taskwarrior data directory (`~/.task` by default) |
 | `$TASKRC` | overrides the Taskwarrior config file (`~/.taskrc` by default) |
 
+## Claude Code live attention (opt-in)
+
+cogitator can display live attention signals for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions running on the same machine, using the Claude Code lifecycle hooks system.
+
+**Quick start:**
+
+1. Claude Code monitoring is **auto-enabled** when `~/.claude` exists. To force it on without `~/.claude`: `CLAUDE_CODE_ENABLED=true cogitator`. To force it off: `CLAUDE_CODE_ENABLED=false cogitator`.
+2. Wire the hooks in `~/.claude/settings.json` (cogitator does **not** write this file — paste the block yourself):
+
+```json
+{
+  "hooks": {
+    "SessionStart":     [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
+    "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
+    "PreToolUse":       [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
+    "PostToolUse":      [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
+    "Stop":             [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
+    "Notification":     [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
+    "SessionEnd":       [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ]
+  }
+}
+```
+
+3. Restart Claude Code. Hooks take effect on the next session.
+
+If cogitator is not running when a hook fires, `cogitator claude-hook` exits 0 silently — Claude Code shows no failure and never blocks your tool calls.
+
 ## Codex live attention (opt-in)
 
 cogitator can display live attention signals for [Codex](https://openai.com/codex) sessions running on the same machine, using the Codex lifecycle hooks system.
