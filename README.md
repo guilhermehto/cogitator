@@ -57,7 +57,8 @@ go run ./cmd/cogitator
 
 | Key | Context | Action |
 | --- | --- | --- |
-| `Tab` | anywhere (outside a prompt) | swap focus between Sessions and Tasks panes |
+| `T` | anywhere (outside a prompt) | show or hide the Tasks pane |
+| `Tab` | anywhere (outside a prompt) | swap focus between Sessions and Tasks panes when Tasks is shown |
 | `j` / `k` | Tasks pane focused | move cursor down / up |
 | `a` | Tasks pane focused | open inline prompt to add a new task |
 | `e` | Tasks pane focused | open inline prompt to edit the selected task |
@@ -85,10 +86,10 @@ cogitator displays a live Tasks pane alongside the Sessions pane when a
 
 **Auto-detection:**
 
-- cogitator calls `task --version` at startup. If the binary is present the
-  Tasks pane is shown; if not, the pane is hidden and no error is surfaced.
-- There is no `--no-tasks` flag. The pane is intentionally always shown when
-  `task` is available — the decision is auto-detected, not opt-in.
+- cogitator checks for `task` at startup. If the binary is present the Tasks
+  pane is shown by default; if not, the pane is hidden and no error is surfaced.
+- Press `T` to hide or show the Tasks pane while cogitator is running. There is
+  no `--no-tasks` flag.
 
 **Visual indicators:**
 

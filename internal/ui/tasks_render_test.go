@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/lipgloss"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 
 	"github.com/guilhermehto/cogitator/internal/config"
@@ -92,6 +92,7 @@ func baseModel(fake *fakeClient) model {
 		height:      30,
 		tw:          fake,
 		twAvail:     fake.avail,
+		tasksActive: fake.avail,
 		tasksLoaded: true,
 		taskCursor:  0,
 		focus:       focusTasks,
@@ -271,6 +272,72 @@ func TestTabTogglesFocusWhenAvailable(t *testing.T) {
 	m3 := pressSpecialKey(m2, tea.KeyTab)
 	if m3.focus != focusSessions {
 		t.Errorf("focus = %v, want focusSessions after second tab", m3.focus)
+	}
+}
+
+func TestTabSkipsTasksWhenInactive(t *testing.T) {
+	fake := &fakeClient{avail: true}
+	m := baseModel(fake)
+	m.tasksActive = false
+	m.focus = focusSessions
+
+	m2 := pressSpecialKey(m, tea.KeyTab)
+	if m2.focus != focusSessions {
+		t.Errorf("focus = %v, want focusSessions when tasksActive=false", m2.focus)
+	}
+}
+
+func TestCapitalTTogglesTasksActive(t *testing.T) {
+	fake := &fakeClient{avail: true}
+	m := baseModel(fake)
+	m.focus = focusSessions
+
+	m2 := pressKey(m, "T")
+	if m2.tasksActive {
+		t.Fatal("tasksActive = true, want false after hiding tasks")
+	}
+	if m2.focus != focusSessions {
+		t.Errorf("focus = %v, want focusSessions after hiding tasks", m2.focus)
+	}
+
+	m3 := pressKey(m2, "T")
+	if !m3.tasksActive {
+		t.Fatal("tasksActive = false, want true after showing tasks")
+	}
+	if m3.focus != focusTasks {
+		t.Errorf("focus = %v, want focusTasks after showing tasks", m3.focus)
+	}
+}
+
+func TestCapitalTNoopWhenTasksUnavailable(t *testing.T) {
+	fake := &fakeClient{avail: false}
+	m := baseModel(fake)
+	m.twAvail = false
+	m.tasksActive = false
+	m.focus = focusSessions
+
+	m2 := pressKey(m, "T")
+	if m2.tasksActive {
+		t.Fatal("tasksActive = true, want false when taskwarrior is unavailable")
+	}
+	if m2.focus != focusSessions {
+		t.Errorf("focus = %v, want focusSessions when taskwarrior is unavailable", m2.focus)
+	}
+}
+
+func TestViewHidesTasksPaneWhenInactive(t *testing.T) {
+	fake := &fakeClient{avail: true}
+	m := baseModel(fake)
+	m.focus = focusSessions
+	m.tasksActive = false
+	m.tasks = []taskwarrior.TaskView{{ID: "1", Description: "hidden task", Urgency: 1}}
+
+	out := m.View()
+	if strings.Contains(out, "Tasks") {
+		t.Fatalf("inactive tasks pane should not render Tasks header, got %q", out)
+	}
+	if !strings.Contains(out, "T show tasks") {
+		t.Fatalf("inactive tasks hint should mention T show tasks, got %q", out)
 	}
 }
 
