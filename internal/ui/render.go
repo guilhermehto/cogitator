@@ -78,7 +78,6 @@ const (
 	glyphWtStopped   = "\U000f0766" // 󰝦 same as glyphInactive — agent stopped
 	glyphWtMissing   = "\U000f0e7a" // 󰹺 directory absent from disk
 	glyphWtUnknown   = "?"          // harness has no LiveStatus, tmux window present
-	glyphWtLaunching = "⟳"          // optimistic launching overlay — harness starting
 )
 
 var (
@@ -88,8 +87,6 @@ var (
 	wtMissingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Italic(true)
 	// wtUnknownStyle renders an unknown worktree row.
 	wtUnknownStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("226"))
-	// wtLaunchingStyle renders a row in the optimistic launching overlay.
-	wtLaunchingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
 	// wtCursorStyle highlights the row under the session cursor.
 	wtCursorStyle = lipgloss.NewStyle().Reverse(true)
 	// wtRepoStyle renders the repo group header.
@@ -435,8 +432,6 @@ func shortenDirectory(path string) string {
 // renderWorkspaceRows renders the merged worktree list grouped by repo.
 // cursor is the index into rows of the currently selected row.
 // now is the reference time for relative timestamps on stopped rows.
-// launching is the optimistic overlay map (canonical dir → deadline); rows
-// whose dir is in this map render as "launching" regardless of their State.
 // hint is a transient one-line message shown below the rows (e.g. tmux hint).
 func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, now time.Time) string {
 	var b strings.Builder
@@ -486,9 +481,7 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 
 		for _, i := range g.rows {
 			row := rows[i]
-			// Check if this row is in the launching overlay.
-			isLaunching := m.launching != nil && m.launching[row.Worktree] != (time.Time{})
-			line := formatWorktreeRow(now, row, width-2, isLaunching)
+			line := formatWorktreeRow(now, row, width-2)
 			if i == cursor {
 				// Highlight the cursor row with reverse video, matching the
 				// tasks pane. Reverse must wrap plain text: lipgloss emits a
@@ -669,24 +662,8 @@ func sessionTitleSuffix(title string) string {
 // (active / permission / question / error), and non-running rows show the
 // worktree run-state glyph (stopped / empty / missing / unknown). This keeps
 // the status in the same place the cursor highlight starts.
-//
-// isLaunching overrides the row's State to show the optimistic "launching"
-// indicator when the harness has been started but not yet confirmed running.
-func formatWorktreeRow(now time.Time, row workspace.Row, width int, isLaunching bool) string {
+func formatWorktreeRow(now time.Time, row workspace.Row, width int) string {
 	sessionW := worktreeSessionWidth(width)
-
-	// When the launching overlay is active, render a distinct launching state
-	// regardless of the underlying row state.
-	if isLaunching {
-		statusCell := wtLaunchingStyle.Render(glyphWtLaunching) + " "
-		titleStr := wtLaunchingStyle.Render(branchLabel(row) + "  launching…")
-		cells := []string{
-			padCell(statusCell, colStateW, lipgloss.Left),
-			padCell(titleStr, sessionW, lipgloss.Left),
-			padCell("", colActivityW, lipgloss.Right),
-		}
-		return strings.Join(cells, strings.Repeat(" ", colGap))
-	}
 
 	// Status column (left-most). Running rows carry a live attention label;
 	// everything else shows the run-state glyph.

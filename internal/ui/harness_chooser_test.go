@@ -272,16 +272,10 @@ func TestWorktreeCreatedMsgWritesRosterEntryForCodex(t *testing.T) {
 		rosterUpserts: upserts,
 	}
 
-	updated, _ := m.Update(worktreeCreatedMsg{
+	m.Update(worktreeCreatedMsg{
 		canonDest:   "/r/feat",
 		harnessKind: "codex",
 	})
-	m2 := updated.(model)
-
-	// Launching overlay must be set.
-	if m2.launching == nil || m2.launching["/r/feat"] == (time.Time{}) {
-		t.Error("success must set launching overlay")
-	}
 
 	// A roster entry must have been sent to the upserts channel.
 	select {
@@ -319,11 +313,7 @@ func TestWorktreeCreatedMsgDefaultsHarnessToOpencodeWhenEmpty(t *testing.T) {
 func TestWorktreeCreatedMsgNoUpsertWhenRosterUpsertsNil(t *testing.T) {
 	// rosterUpserts is nil — must not panic.
 	m := model{width: 120}
-	updated, _ := m.Update(worktreeCreatedMsg{canonDest: "/r/feat", harnessKind: "codex"})
-	m2 := updated.(model)
-	if m2.launching == nil || m2.launching["/r/feat"] == (time.Time{}) {
-		t.Error("launching overlay must still be set even when rosterUpserts is nil")
-	}
+	m.Update(worktreeCreatedMsg{canonDest: "/r/feat", harnessKind: "codex"})
 }
 
 // ---------------------------------------------------------------------------
