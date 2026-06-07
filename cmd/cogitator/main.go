@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime/debug"
 
+	"github.com/guilhermehto/cogitator/internal/claudecode"
 	"github.com/guilhermehto/cogitator/internal/codex"
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/hookipc"
@@ -29,6 +30,19 @@ func main() {
 			// A closed cogitator TUI is the expected case, not a failure:
 			// exit 0 silently so Codex never shows a "hook failed" banner.
 			if errors.Is(err, hookipc.ErrListenerUnavailable) {
+				return
+			}
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "claude-hook" {
+		if err := claudecode.SendHook(context.Background(), os.Stdin); err != nil {
+			// A closed cogitator TUI is the expected case, not a failure:
+			// exit 0 silently so Claude Code never shows a "hook failed" banner.
+			if errors.Is(err, claudecode.ErrListenerUnavailable) {
 				return
 			}
 			fmt.Fprintln(os.Stderr, err)
