@@ -1,0 +1,5 @@
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-06-01T10:00:00.000Z","sessionId":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"add feature X"}]},"uuid":"u1","timestamp":"2026-06-01T10:00:01.000Z","cwd":"/tmp/test-project","sessionId":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","version":"2.1.0"}
+{"parentUuid":"u1","isSidechain":false,"type":"assistant","uuid":"a1","timestamp":"2026-06-01T10:00:05.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Sure, I'll add feature X."}]},"cwd":"/tmp/test-project","sessionId":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","version":"2.1.0"}
+{"type":"ai-title","aiTitle":"Add Feature X","sessionId":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}
+{"parentUuid":"a1","isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"thanks"}]},"uuid":"u2","timestamp":"2026-06-01T10:00:10.000Z","cwd":"/tmp/test-project","sessionId":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","version":"2.1.0"}

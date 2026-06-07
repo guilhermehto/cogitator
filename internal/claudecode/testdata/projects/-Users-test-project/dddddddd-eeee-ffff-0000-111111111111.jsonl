@@ -1,0 +1,4 @@
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-06-04T07:00:00.000Z","sessionId":"dddddddd-eeee-ffff-0000-111111111111"}
+MALFORMED LINE NOT JSON {{{
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"refactor the parser"}]},"uuid":"u1","timestamp":"2026-06-04T07:00:02.000Z","cwd":"/tmp/test-project","sessionId":"dddddddd-eeee-ffff-0000-111111111111","version":"2.1.0"}
+{"parentUuid":"u1","isSidechain":false,"type":"assistant","uuid":"a1","timestamp":"2026-06-04T07:00:09.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Refactoring..."}]},"cwd":"/tmp/test-project","sessionId":"dddddddd-eeee-ffff-0000-111111111111","version":"2.1.0"}

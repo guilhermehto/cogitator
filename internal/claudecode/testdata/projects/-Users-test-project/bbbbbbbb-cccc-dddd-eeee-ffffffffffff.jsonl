@@ -1,0 +1,3 @@
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-06-02T09:00:00.000Z","sessionId":"bbbbbbbb-cccc-dddd-eeee-ffffffffffff"}
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"fix the login bug"},"uuid":"u1","timestamp":"2026-06-02T09:00:01.000Z","cwd":"/tmp/test-project","sessionId":"bbbbbbbb-cccc-dddd-eeee-ffffffffffff","version":"2.1.0"}
+{"parentUuid":"u1","isSidechain":false,"type":"assistant","uuid":"a1","timestamp":"2026-06-02T09:00:08.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Looking at the login code..."}]},"cwd":"/tmp/test-project","sessionId":"bbbbbbbb-cccc-dddd-eeee-ffffffffffff","version":"2.1.0"}
