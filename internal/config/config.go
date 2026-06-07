@@ -46,6 +46,25 @@ type Config struct {
 	// activity is considered "live" (SourceLive). Sessions older than this
 	// window are labelled SourceRecent.
 	CodexRecencyWindow time.Duration
+
+	// ClaudeCodeEnabled enables the polled Claude Code session monitor.
+	// When false, no Claude Code provider is started and cogitator behaves
+	// exactly as before Claude Code support was added.
+	ClaudeCodeEnabled bool
+
+	// ClaudeCodeHome is the path to the Claude home directory (CLAUDE_HOME).
+	// When empty the provider defaults to ~/.claude (resolved by the reader).
+	// Populated from the CLAUDE_HOME environment variable in Default().
+	ClaudeCodeHome string
+
+	// ClaudeCodePollInterval is how often the Claude Code provider polls
+	// ClaudeCodeHome.
+	ClaudeCodePollInterval time.Duration
+
+	// ClaudeCodeRecencyWindow is the duration within which a session's last
+	// activity is considered "live" (SourceLive). Sessions older than this
+	// window are labelled SourceRecent.
+	ClaudeCodeRecencyWindow time.Duration
 }
 
 // codexEnabled resolves whether Codex monitoring should be active.
@@ -86,6 +105,46 @@ func codexHomeDirExists() bool {
 	return err == nil && info.IsDir()
 }
 
+// claudeEnabled resolves whether Claude Code monitoring should be active.
+//
+// Precedence:
+//  1. CLAUDE_ENABLED explicitly set to a recognized value: "true"/"1" → ON,
+//     "false"/"0" → OFF (case-insensitive; this wins over auto-detection).
+//  2. CLAUDE_ENABLED unset or unrecognized: auto-detect by checking whether
+//     the resolved Claude home projects directory exists on disk.
+//
+// The Claude home is resolved as: $CLAUDE_HOME when non-empty, else ~/.claude.
+// If os.UserHomeDir() errors, auto-detection treats the directory as absent.
+func claudeEnabled() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("CLAUDE_ENABLED")))
+	switch v {
+	case "true", "1":
+		return true
+	case "false", "0":
+		return false
+	}
+	// Auto-detect: ON when the Claude projects directory exists.
+	return claudeProjectsDirExists()
+}
+
+// claudeProjectsDirExists reports whether the resolved Claude home projects
+// directory exists and is a directory. It mirrors the resolution logic used by
+// the Claude Code provider: $CLAUDE_HOME when set, otherwise ~/.claude.
+// Detection checks the projects subdirectory to avoid false positives from an
+// empty ~/.claude directory.
+func claudeProjectsDirExists() bool {
+	dir := os.Getenv("CLAUDE_HOME")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false
+		}
+		dir = home + "/.claude"
+	}
+	info, err := os.Stat(dir + "/projects")
+	return err == nil && info.IsDir()
+}
+
 func Default() *Config {
 	return &Config{
 		RecentWindow:            30 * time.Minute,
@@ -108,5 +167,10 @@ func Default() *Config {
 		CodexHome:          os.Getenv("CODEX_HOME"),
 		CodexPollInterval:  5 * time.Second,
 		CodexRecencyWindow: 30 * time.Minute,
+
+		ClaudeCodeEnabled:       claudeEnabled(),
+		ClaudeCodeHome:          os.Getenv("CLAUDE_HOME"),
+		ClaudeCodePollInterval:  5 * time.Second,
+		ClaudeCodeRecencyWindow: 30 * time.Minute,
 	}
 }

@@ -111,3 +111,115 @@ func TestDefault_CodexHome_Unset(t *testing.T) {
 		t.Errorf("CodexHome = %q, want empty string when CODEX_HOME unset", cfg.CodexHome)
 	}
 }
+
+// TestClaudeEnabled_ExplicitOverride verifies that CLAUDE_ENABLED wins over
+// auto-detection regardless of whether the Claude projects directory exists.
+func TestClaudeEnabled_ExplicitOverride(t *testing.T) {
+	// A real projects directory that exists — used to confirm explicit "false" still wins.
+	existingBase := t.TempDir()
+	if err := os.Mkdir(filepath.Join(existingBase, "projects"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// A path whose projects subdir does not exist — used to confirm explicit "true" still wins.
+	absentBase := filepath.Join(t.TempDir(), "no-such-subdir")
+
+	tests := []struct {
+		name       string
+		envVal     string
+		claudeHome string // set as CLAUDE_HOME so auto-detect uses this path
+		wantOn     bool
+	}{
+		// Explicit ON overrides absent directory.
+		{name: "explicit true, absent dir → ON", envVal: "true", claudeHome: absentBase, wantOn: true},
+		{name: "explicit 1, absent dir → ON", envVal: "1", claudeHome: absentBase, wantOn: true},
+		{name: "explicit TRUE uppercase, absent dir → ON", envVal: "TRUE", claudeHome: absentBase, wantOn: true},
+		// Explicit OFF overrides existing directory.
+		{name: "explicit false, existing dir → OFF", envVal: "false", claudeHome: existingBase, wantOn: false},
+		{name: "explicit 0, existing dir → OFF", envVal: "0", claudeHome: existingBase, wantOn: false},
+		{name: "explicit FALSE uppercase, existing dir → OFF", envVal: "FALSE", claudeHome: existingBase, wantOn: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CLAUDE_ENABLED", tc.envVal)
+			t.Setenv("CLAUDE_HOME", tc.claudeHome)
+			cfg := Default()
+			if cfg.ClaudeCodeEnabled != tc.wantOn {
+				t.Errorf("ClaudeCodeEnabled = %v, want %v (CLAUDE_ENABLED=%q, CLAUDE_HOME=%q)",
+					cfg.ClaudeCodeEnabled, tc.wantOn, tc.envVal, tc.claudeHome)
+			}
+		})
+	}
+}
+
+// TestClaudeEnabled_AutoDetect verifies that when CLAUDE_ENABLED is unset (or
+// unrecognized), ClaudeCodeEnabled is derived from whether the Claude projects
+// directory exists on disk.
+func TestClaudeEnabled_AutoDetect(t *testing.T) {
+	existingBase := t.TempDir()
+	if err := os.Mkdir(filepath.Join(existingBase, "projects"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	absentBase := filepath.Join(t.TempDir(), "no-such-subdir")
+
+	tests := []struct {
+		name       string
+		envVal     string // "" means unset; "yes" is an unrecognized value
+		claudeHome string
+		wantOn     bool
+	}{
+		{name: "unset, existing projects dir → ON", envVal: "", claudeHome: existingBase, wantOn: true},
+		{name: "unset, absent dir → OFF", envVal: "", claudeHome: absentBase, wantOn: false},
+		{name: "unrecognized value, existing projects dir → ON", envVal: "yes", claudeHome: existingBase, wantOn: true},
+		{name: "unrecognized value, absent dir → OFF", envVal: "yes", claudeHome: absentBase, wantOn: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CLAUDE_ENABLED", tc.envVal)
+			t.Setenv("CLAUDE_HOME", tc.claudeHome)
+			cfg := Default()
+			if cfg.ClaudeCodeEnabled != tc.wantOn {
+				t.Errorf("ClaudeCodeEnabled = %v, want %v (CLAUDE_ENABLED=%q, CLAUDE_HOME=%q)",
+					cfg.ClaudeCodeEnabled, tc.wantOn, tc.envVal, tc.claudeHome)
+			}
+		})
+	}
+}
+
+// TestClaudeEnabled_AutoDetect_FileNotDir verifies that a path pointing to a
+// regular file (not a directory) is treated as absent.
+func TestClaudeEnabled_AutoDetect_FileNotDir(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "projects")
+	if err := os.WriteFile(filePath, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("CLAUDE_ENABLED", "")
+	t.Setenv("CLAUDE_HOME", dir)
+	cfg := Default()
+	if cfg.ClaudeCodeEnabled {
+		t.Errorf("ClaudeCodeEnabled = true, want false when CLAUDE_HOME/projects points to a file, not a directory")
+	}
+}
+
+// TestDefault_ClaudeCodeHome verifies that CLAUDE_HOME is read from the environment.
+func TestDefault_ClaudeCodeHome(t *testing.T) {
+	t.Setenv("CLAUDE_HOME", "/custom/claude/home")
+	cfg := Default()
+	if cfg.ClaudeCodeHome != "/custom/claude/home" {
+		t.Errorf("ClaudeCodeHome = %q, want %q", cfg.ClaudeCodeHome, "/custom/claude/home")
+	}
+}
+
+// TestDefault_ClaudeCodeHome_Unset verifies that an unset CLAUDE_HOME yields
+// an empty string (the provider resolves ~/.claude itself).
+func TestDefault_ClaudeCodeHome_Unset(t *testing.T) {
+	t.Setenv("CLAUDE_HOME", "")
+	cfg := Default()
+	if cfg.ClaudeCodeHome != "" {
+		t.Errorf("ClaudeCodeHome = %q, want empty string when CLAUDE_HOME unset", cfg.ClaudeCodeHome)
+	}
+}
