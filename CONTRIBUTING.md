@@ -62,6 +62,8 @@ To test the `claude-code` provider end-to-end, paste the following block into
 Restart Claude Code after editing the file. If cogitator is not running when a
 hook fires, `cogitator claude-hook` exits 0 silently.
 
+> **PATH note:** the hook runner may not inherit your interactive shell PATH. If `cogitator` is not found, replace `"cogitator claude-hook"` with its absolute path — e.g. `"/Users/you/go/bin/cogitator claude-hook"` (use `which cogitator` to find it).
+
 ## OpenAPI generation
 
 The `internal/oc/generated.go` file is generated from `internal/oc/openapi.json`.

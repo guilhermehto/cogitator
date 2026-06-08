@@ -134,6 +134,8 @@ cogitator can display live attention signals for [Claude Code](https://docs.anth
 
 3. Restart Claude Code. Hooks take effect on the next session.
 
+> **PATH note:** the hook runner may not inherit your interactive shell PATH. If `cogitator` is not found, replace `"cogitator claude-hook"` with its absolute path — e.g. `"/Users/you/go/bin/cogitator claude-hook"` (use `which cogitator` to find it).
+
 If cogitator is not running when a hook fires, `cogitator claude-hook` exits 0 silently — Claude Code shows no failure and never blocks your tool calls.
 
 ## Codex live attention (opt-in)
