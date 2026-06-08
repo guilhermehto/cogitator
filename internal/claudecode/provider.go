@@ -35,9 +35,6 @@ type hookOverlay struct {
 	// the question's own paired frame — it must NOT set hasPermission.
 	hasQuestion bool
 
-	// lastError is set when an error-indicator hook fires.
-	lastError time.Time
-
 	// lastActivity is the time of the most recent hook event for this session.
 	lastActivity time.Time
 }
@@ -125,12 +122,12 @@ func (p *Provider) Start(ctx context.Context, sink provider.Sink) error {
 //
 // Poll-vs-hook merge strategy:
 //   - The poll refreshes title/dir/lastActivity/existence from disk.
-//   - The hook overlay (statusType, hasPermission, lastError) is preserved
-//     across poll cycles — a poll tick NEVER wipes hook-driven attention.
-//   - A session is pruned only when it is BOTH absent from disk AND has no
-//     live hook overlay (empty overlay with zero lastActivity). This prevents
-//     a hook that arrives before the transcript file is flushed from being
-//     wiped by the next poll.
+//   - The hook overlay (statusType, hasPermission) is preserved across poll
+//     cycles — a poll tick NEVER wipes hook-driven attention.
+//   - A session absent from disk is pruned once its overlay's lastActivity is
+//     zero or older than recencyWindow. This prevents a hook that arrives
+//     before the transcript file is flushed from being wiped by the next poll,
+//     while ensuring stale phantom sessions do not leak for process lifetime.
 func (p *Provider) poll(sink provider.Sink) {
 	sessions, err := ReadSessions(p.claudeHome)
 	if err != nil {
@@ -143,6 +140,8 @@ func (p *Provider) poll(sink provider.Sink) {
 // pollOnce is the testable core of poll. It accepts the already-read session
 // slice so tests can call it deterministically without touching the filesystem.
 func (p *Provider) pollOnce(sink provider.Sink, sessions []Session) {
+	now := time.Now()
+
 	p.mu.Lock()
 
 	// Build a set of current session IDs from disk.
@@ -152,19 +151,21 @@ func (p *Provider) pollOnce(sink provider.Sink, sessions []Session) {
 		p.sessions[s.ID] = s
 	}
 
-	// Prune sessions that have disappeared from disk, but only when they also
-	// have no live hook overlay. A hook-seeded entry (not yet on disk) must
-	// survive until its overlay goes stale or a subsequent poll finds it on disk.
+	// Prune sessions absent from disk. A hook-seeded entry must survive until
+	// its overlay goes stale (lastActivity older than recencyWindow) so that a
+	// hook arriving before the transcript is flushed is not immediately wiped.
+	// Once stale, the phantom session is dropped regardless of overlay flags.
 	for id := range p.sessions {
 		if _, onDisk := current[id]; onDisk {
 			continue
 		}
 		ov := p.overlays[id]
-		if ov.lastActivity.IsZero() && !ov.hasPermission && !ov.hasQuestion && ov.statusType == "" && ov.lastError.IsZero() {
+		stale := ov.lastActivity.IsZero() || now.Sub(ov.lastActivity) > p.recencyWindow
+		if stale {
 			delete(p.sessions, id)
 			delete(p.overlays, id)
 		}
-		// Otherwise: keep the hook-seeded entry alive until the next disk flush.
+		// Not yet stale: keep the hook-seeded entry alive until the next disk flush.
 	}
 
 	// Snapshot the merged state for emission (under the lock).
@@ -182,7 +183,6 @@ func (p *Provider) pollOnce(sink provider.Sink, sessions []Session) {
 	// Emit the full merged snapshot atomically so the UI never sees a blank
 	// intermediate state. ReplaceProviderInstance replaces the prior snapshot
 	// in one shot; if merged is empty the view is cleared without a flash.
-	now := time.Now()
 	updates := make([]provider.SessionUpdate, 0, len(merged))
 	for _, e := range merged {
 		updates = append(updates, p.mergeToUpdate(e.session, e.overlay, now))
@@ -280,8 +280,8 @@ func (p *Provider) handleHookFrame(raw []byte, sink provider.Sink) {
 	}
 
 	// Write the mutated overlay back so the next poll cycle sees the updated
-	// hasPermission/statusType/lastError — without this the overlay map stays
-	// permanently empty and hook-driven state is wiped on every poll tick.
+	// hasPermission/statusType — without this the overlay map stays permanently
+	// empty and hook-driven state is wiped on every poll tick.
 	p.overlays[sessionID] = ov
 
 	// Seed a minimal p.sessions entry when the hook arrives before the
@@ -318,8 +318,8 @@ func (p *Provider) sessionIDForDir(dir string) string {
 }
 
 // mergeToUpdate builds a provider.SessionUpdate from a poll-derived Session
-// and its hook overlay. The hook overlay's statusType/hasPermission/lastError
-// take precedence over the poll-derived defaults.
+// and its hook overlay. The hook overlay's statusType/hasPermission take
+// precedence over the poll-derived defaults.
 func (p *Provider) mergeToUpdate(s Session, ov hookOverlay, now time.Time) provider.SessionUpdate {
 	src := "recent"
 	if p.recencyWindow > 0 && now.Sub(s.LastActivity) <= p.recencyWindow {
@@ -354,7 +354,6 @@ func (p *Provider) mergeToUpdate(s Session, ov hookOverlay, now time.Time) provi
 		StatusType:    statusType,
 		HasPermission: ov.hasPermission,
 		HasQuestion:   ov.hasQuestion,
-		LastError:     ov.lastError,
 		LastActivity:  lastActivity,
 		Created:       s.Created,
 		Source:        src,

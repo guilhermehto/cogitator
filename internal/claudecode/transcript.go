@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -57,8 +58,9 @@ type Session struct {
 // derived title. Long prompts are truncated with an ellipsis.
 const maxTitleRunes = 80
 
-// scannerMaxToken is the initial scanner buffer size; the scanner grows up to
-// maxLineBytes before falling back to a line-by-line Reader.
+// lineReader buffer sizes: scannerInitBuf is the initial read buffer; lines
+// exceeding maxLineBytes are discarded (their JSON parse will fail and the
+// line is skipped — the desired behaviour for oversized base64/tool output).
 const (
 	scannerInitBuf = 64 * 1024
 	maxLineBytes   = 1024 * 1024 // 1 MiB
@@ -135,8 +137,8 @@ func resolveClaudeHome(claudeHome string) (string, error) {
 	return filepath.Join(home, ".claude"), nil
 }
 
-// isSessionFile reports whether name looks like a session UUID file.
-// Claude Code names session files as <uuid>.jsonl.
+// isSessionFile reports whether name has the .jsonl suffix used by Claude Code
+// session files. It does not validate the UUID shape of the base name.
 func isSessionFile(name string) bool {
 	return strings.HasSuffix(name, ".jsonl")
 }
@@ -169,30 +171,6 @@ func parseSessionReader(r io.Reader, sessionID string) (Session, bool) {
 	)
 
 	s.ID = sessionID
-
-	// scanLines iterates over lines using a bufio.Scanner with a 1 MiB buffer.
-	// When a line exceeds the buffer (ErrTooLong), we fall back to reading
-	// the remainder of that line via a bufio.Reader and skip its content
-	// (it's likely a base64 image or large tool output, not a title candidate).
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, scannerInitBuf), maxLineBytes)
-
-	// We need to be able to fall back to a Reader on ErrTooLong. Wrap r in a
-	// bufio.Reader so we can call ReadLine on it after the scanner is done.
-	// However, bufio.Scanner and bufio.Reader cannot share the same underlying
-	// reader safely. Instead, we detect ErrTooLong after Scan() returns false
-	// and switch to a secondary reader at that point.
-	//
-	// Strategy: run the scanner until it either finishes or hits ErrTooLong.
-	// On ErrTooLong, drain the current oversized line via the scanner's
-	// internal state (the scanner has already consumed the partial line into
-	// its buffer), then continue scanning. The scanner resets after a
-	// ErrTooLong only if we call Scan() again — but it will return false
-	// immediately. So we need a different approach.
-	//
-	// Correct approach: wrap r in a *lineReader that handles oversized lines
-	// transparently, feeding lines to the JSON parser one at a time.
-	_ = scanner // replaced below
 
 	lr := newLineReader(r)
 	for {
@@ -359,11 +337,9 @@ func parseTimestamp(s string) (time.Time, bool) {
 
 // sortByLastActivityDesc sorts sessions in-place, most-recent first.
 func sortByLastActivityDesc(sessions []Session) {
-	for i := 1; i < len(sessions); i++ {
-		for j := i; j > 0 && sessions[j].LastActivity.After(sessions[j-1].LastActivity); j-- {
-			sessions[j], sessions[j-1] = sessions[j-1], sessions[j]
-		}
-	}
+	sort.SliceStable(sessions, func(i, j int) bool {
+		return sessions[i].LastActivity.After(sessions[j].LastActivity)
+	})
 }
 
 // lineReader reads lines from an io.Reader, handling lines that exceed the

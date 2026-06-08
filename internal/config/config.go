@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -76,7 +77,7 @@ func codexHomeDirExists() bool {
 		if err != nil {
 			return false
 		}
-		dir = home + "/.codex"
+		dir = filepath.Join(home, ".codex")
 	}
 	info, err := os.Stat(dir)
 	return err == nil && info.IsDir()
@@ -94,9 +95,9 @@ func claudeProjectsDirExists() bool {
 		if err != nil {
 			return false
 		}
-		dir = home + "/.claude"
+		dir = filepath.Join(home, ".claude")
 	}
-	info, err := os.Stat(dir + "/projects")
+	info, err := os.Stat(filepath.Join(dir, "projects"))
 	return err == nil && info.IsDir()
 }
 

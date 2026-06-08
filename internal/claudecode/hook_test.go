@@ -78,74 +78,65 @@ func TestHookSocketPath_DifferentFromCodex(t *testing.T) {
 // and extracts session_id, cwd, and notification_type correctly.
 func TestParseHookEvent_EventMapping(t *testing.T) {
 	tests := []struct {
-		name             string
-		json             string
-		wantEvent        string
-		wantSessionID    string
-		wantCWD          string
-		wantNotifType    string
-		wantStatusType   string
+		name              string
+		json              string
+		wantEvent         string
+		wantSessionID     string
+		wantCWD           string
+		wantNotifType     string
 		wantHasPermission bool
 	}{
 		{
-			name:           "SessionStart PascalCase → busy",
-			json:           `{"hook_event_name":"SessionStart","session_id":"s1","cwd":"/tmp/a"}`,
-			wantEvent:      "SessionStart",
-			wantSessionID:  "s1",
-			wantCWD:        "/tmp/a",
-			wantStatusType: "busy",
+			name:          "SessionStart PascalCase",
+			json:          `{"hook_event_name":"SessionStart","session_id":"s1","cwd":"/tmp/a"}`,
+			wantEvent:     "SessionStart",
+			wantSessionID: "s1",
+			wantCWD:       "/tmp/a",
 		},
 		{
-			name:           "session_start snake_case → busy",
-			json:           `{"hook_event_name":"session_start","session_id":"s2","cwd":"/tmp/b"}`,
-			wantEvent:      "SessionStart",
-			wantSessionID:  "s2",
-			wantCWD:        "/tmp/b",
-			wantStatusType: "busy",
+			name:          "session_start snake_case",
+			json:          `{"hook_event_name":"session_start","session_id":"s2","cwd":"/tmp/b"}`,
+			wantEvent:     "SessionStart",
+			wantSessionID: "s2",
+			wantCWD:       "/tmp/b",
 		},
 		{
-			name:           "UserPromptSubmit → busy",
-			json:           `{"hook_event_name":"UserPromptSubmit","session_id":"s3","cwd":"/tmp/c"}`,
-			wantEvent:      "UserPromptSubmit",
-			wantSessionID:  "s3",
-			wantCWD:        "/tmp/c",
-			wantStatusType: "busy",
+			name:          "UserPromptSubmit",
+			json:          `{"hook_event_name":"UserPromptSubmit","session_id":"s3","cwd":"/tmp/c"}`,
+			wantEvent:     "UserPromptSubmit",
+			wantSessionID: "s3",
+			wantCWD:       "/tmp/c",
 		},
 		{
-			name:           "PreToolUse → busy",
-			json:           `{"hook_event_name":"PreToolUse","session_id":"s4"}`,
-			wantEvent:      "PreToolUse",
-			wantSessionID:  "s4",
-			wantStatusType: "busy",
+			name:          "PreToolUse",
+			json:          `{"hook_event_name":"PreToolUse","session_id":"s4"}`,
+			wantEvent:     "PreToolUse",
+			wantSessionID: "s4",
 		},
 		{
-			name:           "PostToolUse → busy",
-			json:           `{"hook_event_name":"PostToolUse","session_id":"s5"}`,
-			wantEvent:      "PostToolUse",
-			wantSessionID:  "s5",
-			wantStatusType: "busy",
+			name:          "PostToolUse",
+			json:          `{"hook_event_name":"PostToolUse","session_id":"s5"}`,
+			wantEvent:     "PostToolUse",
+			wantSessionID: "s5",
 		},
 		{
-			name:           "Stop → idle (teardown, not row removal)",
-			json:           `{"hook_event_name":"Stop","session_id":"s6"}`,
-			wantEvent:      "Stop",
-			wantSessionID:  "s6",
-			wantStatusType: "idle",
+			name:          "Stop (teardown, not row removal)",
+			json:          `{"hook_event_name":"Stop","session_id":"s6"}`,
+			wantEvent:     "Stop",
+			wantSessionID: "s6",
 		},
 		{
-			name:           "stopped snake_case → idle",
-			json:           `{"hook_event_name":"stopped","session_id":"s7"}`,
-			wantEvent:      "Stop",
-			wantSessionID:  "s7",
-			wantStatusType: "idle",
+			name:          "stopped snake_case",
+			json:          `{"hook_event_name":"stopped","session_id":"s7"}`,
+			wantEvent:     "Stop",
+			wantSessionID: "s7",
 		},
 		{
-			name:           "SessionEnd → idle (teardown, transcript persists)",
-			json:           `{"hook_event_name":"SessionEnd","session_id":"s8","cwd":"/tmp/d"}`,
-			wantEvent:      "SessionEnd",
-			wantSessionID:  "s8",
-			wantCWD:        "/tmp/d",
-			wantStatusType: "idle",
+			name:          "SessionEnd (teardown, transcript persists)",
+			json:          `{"hook_event_name":"SessionEnd","session_id":"s8","cwd":"/tmp/d"}`,
+			wantEvent:     "SessionEnd",
+			wantSessionID: "s8",
+			wantCWD:       "/tmp/d",
 		},
 		{
 			name:              "Notification permission_prompt → permission",
@@ -153,16 +144,14 @@ func TestParseHookEvent_EventMapping(t *testing.T) {
 			wantEvent:         "Notification",
 			wantSessionID:     "s9",
 			wantNotifType:     "permission_prompt",
-			wantStatusType:    "busy",
 			wantHasPermission: true,
 		},
 		{
-			name:           "Notification other type → busy, no permission",
-			json:           `{"hook_event_name":"Notification","session_id":"s10","notification_type":"info"}`,
-			wantEvent:      "Notification",
-			wantSessionID:  "s10",
-			wantNotifType:  "info",
-			wantStatusType: "busy",
+			name:          "Notification other type → no permission",
+			json:          `{"hook_event_name":"Notification","session_id":"s10","notification_type":"info"}`,
+			wantEvent:     "Notification",
+			wantSessionID: "s10",
+			wantNotifType: "info",
 		},
 		{
 			name:              "PermissionRequest → permission",
@@ -170,7 +159,6 @@ func TestParseHookEvent_EventMapping(t *testing.T) {
 			wantEvent:         "PermissionRequest",
 			wantSessionID:     "s11",
 			wantCWD:           "/tmp/e",
-			wantStatusType:    "busy",
 			wantHasPermission: true,
 		},
 		{
@@ -178,58 +166,50 @@ func TestParseHookEvent_EventMapping(t *testing.T) {
 			json:              `{"hook_event_name":"permission_request","session_id":"s12"}`,
 			wantEvent:         "PermissionRequest",
 			wantSessionID:     "s12",
-			wantStatusType:    "busy",
 			wantHasPermission: true,
 		},
 		{
-			name:           "event field fallback",
-			json:           `{"event":"UserPromptSubmit","session_id":"s13"}`,
-			wantEvent:      "UserPromptSubmit",
-			wantSessionID:  "s13",
-			wantStatusType: "busy",
+			name:          "event field fallback",
+			json:          `{"event":"UserPromptSubmit","session_id":"s13"}`,
+			wantEvent:     "UserPromptSubmit",
+			wantSessionID: "s13",
 		},
 		{
-			name:           "type field fallback",
-			json:           `{"type":"PreToolUse","session_id":"s14"}`,
-			wantEvent:      "PreToolUse",
-			wantSessionID:  "s14",
-			wantStatusType: "busy",
+			name:          "type field fallback",
+			json:          `{"type":"PreToolUse","session_id":"s14"}`,
+			wantEvent:     "PreToolUse",
+			wantSessionID: "s14",
 		},
 		{
-			name:           "sessionId camelCase fallback",
-			json:           `{"hook_event_name":"PostToolUse","sessionId":"s15"}`,
-			wantEvent:      "PostToolUse",
-			wantSessionID:  "s15",
-			wantStatusType: "busy",
+			name:          "sessionId camelCase fallback",
+			json:          `{"hook_event_name":"PostToolUse","sessionId":"s15"}`,
+			wantEvent:     "PostToolUse",
+			wantSessionID: "s15",
 		},
 		{
-			name:           "id fallback for session id",
-			json:           `{"hook_event_name":"Notification","id":"s16","notification_type":"info"}`,
-			wantEvent:      "Notification",
-			wantSessionID:  "s16",
-			wantNotifType:  "info",
-			wantStatusType: "busy",
+			name:          "id fallback for session id",
+			json:          `{"hook_event_name":"Notification","id":"s16","notification_type":"info"}`,
+			wantEvent:     "Notification",
+			wantSessionID: "s16",
+			wantNotifType: "info",
 		},
 		{
-			name:           "directory fallback for cwd",
-			json:           `{"hook_event_name":"SessionStart","session_id":"s17","directory":"/tmp/f"}`,
-			wantEvent:      "SessionStart",
-			wantSessionID:  "s17",
-			wantCWD:        "/tmp/f",
-			wantStatusType: "busy",
+			name:          "directory fallback for cwd",
+			json:          `{"hook_event_name":"SessionStart","session_id":"s17","directory":"/tmp/f"}`,
+			wantEvent:     "SessionStart",
+			wantSessionID: "s17",
+			wantCWD:       "/tmp/f",
 		},
 		{
-			name:           "unknown event name passes through as idle",
-			json:           `{"hook_event_name":"SomeFutureEvent","session_id":"s18"}`,
-			wantEvent:      "SomeFutureEvent",
-			wantSessionID:  "s18",
-			wantStatusType: "idle",
+			name:      "unknown event name passes through",
+			json:      `{"hook_event_name":"SomeFutureEvent","session_id":"s18"}`,
+			wantEvent: "SomeFutureEvent",
+			wantSessionID: "s18",
 		},
 		{
-			name:           "empty JSON is graceful",
-			json:           `{}`,
-			wantEvent:      "",
-			wantStatusType: "idle",
+			name:      "empty JSON is graceful",
+			json:      `{}`,
+			wantEvent: "",
 		},
 	}
 
@@ -251,9 +231,6 @@ func TestParseHookEvent_EventMapping(t *testing.T) {
 			if ev.NotificationType != tc.wantNotifType {
 				t.Errorf("NotificationType = %q, want %q", ev.NotificationType, tc.wantNotifType)
 			}
-			if got := ev.StatusType(); got != tc.wantStatusType {
-				t.Errorf("StatusType() = %q, want %q", got, tc.wantStatusType)
-			}
 			if got := ev.HasPermission(); got != tc.wantHasPermission {
 				t.Errorf("HasPermission() = %v, want %v", got, tc.wantHasPermission)
 			}
@@ -269,31 +246,15 @@ func TestParseHookEvent_MalformedJSON(t *testing.T) {
 	}
 }
 
-// TestHookEvent_SessionEnd_IdleNotRemoval verifies that SessionEnd maps to
-// "idle" (not a removal signal) so the transcript row persists and a poll
-// would resurrect a removed row.
-func TestHookEvent_SessionEnd_IdleNotRemoval(t *testing.T) {
+// TestHookEvent_SessionEnd_NoPermission verifies that SessionEnd does not
+// signal a permission request.
+func TestHookEvent_SessionEnd_NoPermission(t *testing.T) {
 	ev, err := claudecode.ParseHookEvent([]byte(`{"hook_event_name":"SessionEnd","session_id":"ses-end","cwd":"/tmp/proj"}`))
 	if err != nil {
 		t.Fatalf("ParseHookEvent: %v", err)
 	}
-	if ev.StatusType() != "idle" {
-		t.Errorf("SessionEnd StatusType() = %q, want %q", ev.StatusType(), "idle")
-	}
 	if ev.HasPermission() {
 		t.Error("SessionEnd HasPermission() = true, want false")
-	}
-}
-
-// TestHookEvent_Stop_IdleNotRemoval verifies that Stop maps to "idle" (teardown
-// clears busy→idle, does NOT remove the row).
-func TestHookEvent_Stop_IdleNotRemoval(t *testing.T) {
-	ev, err := claudecode.ParseHookEvent([]byte(`{"hook_event_name":"Stop","session_id":"ses-stop"}`))
-	if err != nil {
-		t.Fatalf("ParseHookEvent: %v", err)
-	}
-	if ev.StatusType() != "idle" {
-		t.Errorf("Stop StatusType() = %q, want %q", ev.StatusType(), "idle")
 	}
 }
 
@@ -399,9 +360,6 @@ func TestHookEvent_Notification_PermissionPrompt(t *testing.T) {
 	ev, err := claudecode.ParseHookEvent([]byte(`{"hook_event_name":"Notification","session_id":"ses-perm","notification_type":"permission_prompt"}`))
 	if err != nil {
 		t.Fatalf("ParseHookEvent: %v", err)
-	}
-	if ev.StatusType() != "busy" {
-		t.Errorf("Notification/permission_prompt StatusType() = %q, want %q", ev.StatusType(), "busy")
 	}
 	if !ev.HasPermission() {
 		t.Error("Notification/permission_prompt HasPermission() = false, want true")

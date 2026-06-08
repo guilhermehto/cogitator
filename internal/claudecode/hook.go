@@ -66,6 +66,7 @@ func ListenHooks(ctx context.Context, handler func(raw []byte), logger *slog.Log
 // The parser is defensive: it tries multiple candidate field names for each
 // logical field so that a single correction here fixes all callers.
 //
+// The authoritative event→status mapping lives in provider.handleHookFrame.
 // Known event names (PascalCase wire format from Claude Code):
 // SessionStart, UserPromptSubmit, PreToolUse, PostToolUse → busy/active
 // Stop → idle (teardown: clear busy→idle, NOT row removal)
@@ -191,34 +192,6 @@ func ParseHookEvent(raw []byte) (HookEvent, error) {
 	}
 
 	return ev, nil
-}
-
-// StatusType maps a HookEvent to the status string consumed by state.Classify
-// ("busy", "idle"). This is the single place that encodes the Claude Code
-// event-to-status mapping so all callers agree.
-//
-// Mapping:
-//   - SessionStart, UserPromptSubmit, PreToolUse, PostToolUse → "busy"
-//   - Stop, SessionEnd → "idle"  (teardown: clear busy→idle, NOT row removal)
-//   - Notification with notification_type=permission_prompt → "busy" (HasPermission=true)
-//   - PermissionRequest → "busy" (HasPermission=true)
-//   - Unknown events → "idle" (safe default)
-func (e HookEvent) StatusType() string {
-	switch e.EventName {
-	case "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse":
-		return "busy"
-	case "Stop", "SessionEnd":
-		return "idle"
-	case "Notification":
-		// A permission_prompt notification means the agent is waiting for the
-		// user — treat as busy so the row stays live; HasPermission signals the
-		// specific attention state.
-		return "busy"
-	case "PermissionRequest":
-		return "busy"
-	default:
-		return "idle"
-	}
 }
 
 // HasPermission reports whether this event signals a pending permission request.

@@ -534,6 +534,135 @@ func TestProvider_HookDrivenAttention(t *testing.T) {
 	<-done
 }
 
+// TestProvider_PollOnce_StalePhantomPruned verifies that a hook-seeded session
+// absent from disk is pruned once its overlay's lastActivity is older than
+// recencyWindow. A stale phantom must not leak for process lifetime.
+func TestProvider_PollOnce_StalePhantomPruned(t *testing.T) {
+	recencyWindow := 30 * time.Minute
+	hookSessionID := "aaaabbbb-cccc-dddd-eeee-000000000200"
+
+	// Use an empty home so the hook session is never on disk.
+	home := filepath.Join(t.TempDir(), "empty-claude")
+
+	p := claudecode.NewProvider(home, 10*time.Second, recencyWindow, nil)
+	sink := &hookSink{}
+
+	// Seed the hook session with a stale lastActivity (older than recencyWindow).
+	p.HandleHookFrameForTest(
+		[]byte(`{"hook_event_name":"PermissionRequest","session_id":"`+hookSessionID+`","cwd":"/tmp/phantom"}`),
+		sink,
+	)
+
+	// Verify the hook was processed.
+	u, ok := sink.latestForSession(hookSessionID)
+	if !ok || !u.HasPermission {
+		t.Fatal("PermissionRequest hook: HasPermission not set before poll cycle")
+	}
+
+	// Manually age the overlay by running a poll with a provider whose
+	// recencyWindow is tiny, so the existing lastActivity (just set) is stale.
+	// We use a separate provider with a 1ns window to force staleness.
+	pStale := claudecode.NewProvider(home, 10*time.Second, time.Nanosecond, nil)
+	sink2 := &fakeSink{}
+
+	// Seed the same session in the stale provider.
+	pStale.HandleHookFrameForTest(
+		[]byte(`{"hook_event_name":"PermissionRequest","session_id":"`+hookSessionID+`","cwd":"/tmp/phantom"}`),
+		sink2,
+	)
+
+	// Sleep briefly so lastActivity is definitely older than 1ns.
+	time.Sleep(10 * time.Millisecond)
+
+	// Poll with no sessions on disk — the overlay is now stale.
+	pStale.PollOnceForTest(sink2, nil)
+
+	// The session must have been pruned: the replace batch should be empty.
+	replaces := sink2.snapshotReplaces()
+	if len(replaces) == 0 {
+		t.Fatal("poll emitted no ReplaceProviderInstance batches")
+	}
+	last := replaces[len(replaces)-1]
+	for _, u := range last {
+		if u.SessionID == hookSessionID {
+			t.Errorf("stale phantom session %q still present after poll — should have been pruned", hookSessionID)
+		}
+	}
+}
+
+// TestProvider_PollOnce_RecentPhantomKept verifies that a hook-seeded session
+// absent from disk is NOT pruned when its overlay's lastActivity is within
+// recencyWindow.
+func TestProvider_PollOnce_RecentPhantomKept(t *testing.T) {
+	recencyWindow := 30 * time.Minute
+	hookSessionID := "aaaabbbb-cccc-dddd-eeee-000000000201"
+
+	// Use an empty home so the hook session is never on disk.
+	home := filepath.Join(t.TempDir(), "empty-claude")
+
+	p := claudecode.NewProvider(home, 10*time.Second, recencyWindow, nil)
+	sink := &fakeSink{}
+
+	// Seed the hook session — lastActivity is just now (well within recencyWindow).
+	p.HandleHookFrameForTest(
+		[]byte(`{"hook_event_name":"PermissionRequest","session_id":"`+hookSessionID+`","cwd":"/tmp/phantom-recent"}`),
+		&hookSink{},
+	)
+
+	// Poll with no sessions on disk — overlay is recent, session must survive.
+	p.PollOnceForTest(sink, nil)
+
+	replaces := sink.snapshotReplaces()
+	if len(replaces) == 0 {
+		t.Fatal("poll emitted no ReplaceProviderInstance batches")
+	}
+	last := replaces[len(replaces)-1]
+	var found bool
+	for _, u := range last {
+		if u.SessionID == hookSessionID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("recent phantom session %q was pruned — should have been kept (lastActivity within recencyWindow)", hookSessionID)
+	}
+}
+
+// TestProvider_PollOnce_OnDiskSessionNeverPruned verifies that a session
+// present on disk is never pruned regardless of overlay age.
+func TestProvider_PollOnce_OnDiskSessionNeverPruned(t *testing.T) {
+	sessionID := "aaaabbbb-cccc-dddd-eeee-000000000202"
+	// Old session — outside any recency window.
+	home := buildFixtureHome(t, sessionID, time.Now().Add(-24*time.Hour))
+
+	// Use a 1ns recency window so any overlay would be stale immediately.
+	p := claudecode.NewProvider(home, 10*time.Second, time.Nanosecond, nil)
+	sink := &fakeSink{}
+
+	diskSessions, err := claudecode.ReadSessionsForTest(home)
+	if err != nil {
+		t.Fatalf("ReadSessionsForTest: %v", err)
+	}
+
+	p.PollOnceForTest(sink, diskSessions)
+
+	replaces := sink.snapshotReplaces()
+	if len(replaces) == 0 {
+		t.Fatal("poll emitted no ReplaceProviderInstance batches")
+	}
+	last := replaces[len(replaces)-1]
+	var found bool
+	for _, u := range last {
+		if u.SessionID == sessionID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("on-disk session %q was pruned — sessions on disk must never be pruned", sessionID)
+	}
+}
 // TestProvider_NotificationPermission_SurvivesPoll is the primary regression
 // test for the overlay write-back bug: a Notification/permission_prompt hook
 // fires, then a poll cycle runs with the session present on disk, and the

@@ -11,7 +11,6 @@ import (
 	"github.com/guilhermehto/cogitator/internal/claudecode"
 	"github.com/guilhermehto/cogitator/internal/codex"
 	"github.com/guilhermehto/cogitator/internal/config"
-	"github.com/guilhermehto/cogitator/internal/hookipc"
 	"github.com/guilhermehto/cogitator/internal/logging"
 	"github.com/guilhermehto/cogitator/internal/ui"
 )
@@ -26,10 +25,10 @@ func main() {
 	// Route subcommands before flag.Parse() so bare subcommand names are not
 	// misinterpreted as unknown flags.
 	if len(os.Args) > 1 && os.Args[1] == "codex-hook" {
-		if err := hookipc.SendHook(context.Background(), codex.HookSocketPath(), os.Stdin); err != nil {
+		if err := codex.SendHook(context.Background(), os.Stdin); err != nil {
 			// A closed cogitator TUI is the expected case, not a failure:
 			// exit 0 silently so Codex never shows a "hook failed" banner.
-			if errors.Is(err, hookipc.ErrListenerUnavailable) {
+			if errors.Is(err, codex.ErrListenerUnavailable) {
 				return
 			}
 			fmt.Fprintln(os.Stderr, err)
