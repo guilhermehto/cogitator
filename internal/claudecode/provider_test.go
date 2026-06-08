@@ -643,6 +643,263 @@ func TestProvider_StopIdle_SurvivesPoll(t *testing.T) {
 	}
 }
 
+// TestProvider_AskUserQuestion_OrderA verifies that when PreToolUse(AskUserQuestion)
+// arrives before the paired Notification/permission_prompt, the result is
+// HasQuestion=true and HasPermission=false, and the state survives a poll cycle.
+func TestProvider_AskUserQuestion_OrderA(t *testing.T) {
+	sessionID := "aaaabbbb-cccc-dddd-eeee-000000000101"
+	home := buildFixtureHome(t, sessionID, time.Now().Add(-1*time.Minute))
+
+	p := claudecode.NewProvider(home, 10*time.Second, 30*time.Minute, nil)
+	sink := &hookSink{}
+
+	// Order A: PreToolUse(AskUserQuestion) arrives first.
+	p.HandleHookFrameForTest(
+		[]byte(`{"hook_event_name":"PreToolUse","session_id":"`+sessionID+`","tool_name":"AskUserQuestion"}`),
+		sink,
+	)
+
+	u, ok := sink.latestForSession(sessionID)
+	if !ok {
+		t.Fatal("no update after PreToolUse(AskUserQuestion)")
+	}
+	if !u.HasQuestion {
+		t.Error("PreToolUse(AskUserQuestion): HasQuestion = false, want true")
+	}
+	if u.HasPermission {
+		t.Error("PreToolUse(AskUserQuestion): HasPermission = true, want false")
+	}
+
+	// Paired Notification/permission_prompt arrives second — must NOT set HasPermission.
+	p.HandleHookFrameForTest(
+		[]byte(`{"hook_event_name":"Notification","session_id":"`+sessionID+`","notification_type":"permission_prompt"}`),
+		sink,
+	)
+
+	u2, ok2 := sink.latestForSession(sessionID)
+	if !ok2 {
+		t.Fatal("no update after Notification/permission_prompt")
+	}
+	if !u2.HasQuestion {
+		t.Error("after Notification: HasQuestion = false, want true (question must persist)")
+	}
+	if u2.HasPermission {
+		t.Error("after Notification: HasPermission = true, want false (question's own prompt must not set permission)")
+	}
+
+	// State must survive a subsequent poll cycle.
+	diskSessions, err := claudecode.ReadSessionsForTest(home)
+	if err != nil {
+		t.Fatalf("ReadSessionsForTest: %v", err)
+	}
+	sink2 := &fakeSink{}
+	p.PollOnceForTest(sink2, diskSessions)
+
+	replaces := sink2.snapshotReplaces()
+	if len(replaces) == 0 {
+		t.Fatal("poll emitted no ReplaceProviderInstance batches")
+	}
+	last := replaces[len(replaces)-1]
+	var found *provider.SessionUpdate
+	for i := range last {
+		if last[i].SessionID == sessionID {
+			u := last[i]
+			found = &u
+		}
+	}
+	if found == nil {
+		t.Fatalf("session %q absent from post-poll replace batch", sessionID)
+	}
+	if !found.HasQuestion {
+		t.Error("HasQuestion = false after poll — question overlay not preserved")
+	}
+	if found.HasPermission {
+		t.Error("HasPermission = true after poll — must remain false for question tool")
+	}
+}
+
+// TestProvider_AskUserQuestion_OrderB verifies that when Notification/permission_prompt
+// arrives BEFORE PreToolUse(AskUserQuestion) (concurrent processes, non-deterministic
+// socket arrival order), the final result is still HasQuestion=true and HasPermission=false.
+// The PreToolUse frame forces hasPermission=false after the Notification set it.
+func TestProvider_AskUserQuestion_OrderB(t *testing.T) {
+	sessionID := "aaaabbbb-cccc-dddd-eeee-000000000102"
+	home := buildFixtureHome(t, sessionID, time.Now().Add(-1*time.Minute))
+
+	p := claudecode.NewProvider(home, 10*time.Second, 30*time.Minute, nil)
+	sink := &hookSink{}
+
+	// Order B: Notification/permission_prompt arrives first.
+	// At this point hasQuestion is false, so hasPermission gets set to true.
+	p.HandleHookFrameForTest(
+		[]byte(`{"hook_event_name":"Notification","session_id":"`+sessionID+`","notification_type":"permission_prompt"}`),
+		sink,
+	)
+
+	u, ok := sink.latestForSession(sessionID)
+	if !ok {
+		t.Fatal("no update after Notification/permission_prompt")
+	}
+	// Intermediate state: hasPermission=true (question not yet known).
+	if !u.HasPermission {
+		t.Error("intermediate: HasPermission = false after Notification (expected true before PreToolUse arrives)")
+	}
+
+	// PreToolUse(AskUserQuestion) arrives second — must correct the state.
+	p.HandleHookFrameForTest(
+		[]byte(`{"hook_event_name":"PreToolUse","session_id":"`+sessionID+`","tool_name":"AskUserQuestion"}`),
+		sink,
+	)
+
+	u2, ok2 := sink.latestForSession(sessionID)
+	if !ok2 {
+		t.Fatal("no update after PreToolUse(AskUserQuestion)")
+	}
+	if !u2.HasQuestion {
+		t.Error("after PreToolUse: HasQuestion = false, want true")
+	}
+	if u2.HasPermission {
+		t.Error("after PreToolUse: HasPermission = true, want false (PreToolUse must clear it)")
+	}
+
+	// State must survive a subsequent poll cycle.
+	diskSessions, err := claudecode.ReadSessionsForTest(home)
+	if err != nil {
+		t.Fatalf("ReadSessionsForTest: %v", err)
+	}
+	sink2 := &fakeSink{}
+	p.PollOnceForTest(sink2, diskSessions)
+
+	replaces := sink2.snapshotReplaces()
+	if len(replaces) == 0 {
+		t.Fatal("poll emitted no ReplaceProviderInstance batches")
+	}
+	last := replaces[len(replaces)-1]
+	var found *provider.SessionUpdate
+	for i := range last {
+		if last[i].SessionID == sessionID {
+			u := last[i]
+			found = &u
+		}
+	}
+	if found == nil {
+		t.Fatalf("session %q absent from post-poll replace batch", sessionID)
+	}
+	if !found.HasQuestion {
+		t.Error("HasQuestion = false after poll — question overlay not preserved")
+	}
+	if found.HasPermission {
+		t.Error("HasPermission = true after poll — must remain false for question tool")
+	}
+}
+
+// TestProvider_RealPermissionPrompt verifies that a Notification/permission_prompt
+// with no preceding AskUserQuestion yields HasPermission=true and HasQuestion=false.
+func TestProvider_RealPermissionPrompt(t *testing.T) {
+	sessionID := "aaaabbbb-cccc-dddd-eeee-000000000103"
+	home := buildFixtureHome(t, sessionID, time.Now().Add(-1*time.Minute))
+
+	p := claudecode.NewProvider(home, 10*time.Second, 30*time.Minute, nil)
+	sink := &hookSink{}
+
+	// Real permission prompt: no AskUserQuestion PreToolUse.
+	p.HandleHookFrameForTest(
+		[]byte(`{"hook_event_name":"Notification","session_id":"`+sessionID+`","notification_type":"permission_prompt"}`),
+		sink,
+	)
+
+	u, ok := sink.latestForSession(sessionID)
+	if !ok {
+		t.Fatal("no update after Notification/permission_prompt")
+	}
+	if !u.HasPermission {
+		t.Error("real permission prompt: HasPermission = false, want true")
+	}
+	if u.HasQuestion {
+		t.Error("real permission prompt: HasQuestion = true, want false")
+	}
+}
+
+// TestProvider_QuestionClearsOnUserPromptSubmit verifies that a UserPromptSubmit
+// (the user's answer) clears the question state.
+func TestProvider_QuestionClearsOnUserPromptSubmit(t *testing.T) {
+	sessionID := "aaaabbbb-cccc-dddd-eeee-000000000104"
+	home := buildFixtureHome(t, sessionID, time.Now().Add(-1*time.Minute))
+
+	p := claudecode.NewProvider(home, 10*time.Second, 30*time.Minute, nil)
+	sink := &hookSink{}
+
+	// Set up question state.
+	p.HandleHookFrameForTest(
+		[]byte(`{"hook_event_name":"PreToolUse","session_id":"`+sessionID+`","tool_name":"AskUserQuestion"}`),
+		sink,
+	)
+	u, ok := sink.latestForSession(sessionID)
+	if !ok || !u.HasQuestion {
+		t.Fatal("question state not set before UserPromptSubmit")
+	}
+
+	// User answers → question cleared.
+	p.HandleHookFrameForTest(
+		[]byte(`{"hook_event_name":"UserPromptSubmit","session_id":"`+sessionID+`"}`),
+		sink,
+	)
+
+	u2, ok2 := sink.latestForSession(sessionID)
+	if !ok2 {
+		t.Fatal("no update after UserPromptSubmit")
+	}
+	if u2.HasQuestion {
+		t.Error("UserPromptSubmit: HasQuestion = true, want false (answer clears question)")
+	}
+	if u2.HasPermission {
+		t.Error("UserPromptSubmit: HasPermission = true, want false")
+	}
+	if u2.StatusType != "busy" {
+		t.Errorf("UserPromptSubmit: StatusType = %q, want busy", u2.StatusType)
+	}
+}
+
+// TestProvider_QuestionClearsOnStop verifies that a Stop event clears the
+// question state.
+func TestProvider_QuestionClearsOnStop(t *testing.T) {
+	sessionID := "aaaabbbb-cccc-dddd-eeee-000000000105"
+	home := buildFixtureHome(t, sessionID, time.Now().Add(-1*time.Minute))
+
+	p := claudecode.NewProvider(home, 10*time.Second, 30*time.Minute, nil)
+	sink := &hookSink{}
+
+	// Set up question state.
+	p.HandleHookFrameForTest(
+		[]byte(`{"hook_event_name":"PreToolUse","session_id":"`+sessionID+`","tool_name":"AskUserQuestion"}`),
+		sink,
+	)
+	u, ok := sink.latestForSession(sessionID)
+	if !ok || !u.HasQuestion {
+		t.Fatal("question state not set before Stop")
+	}
+
+	// Stop → question cleared, status idle.
+	p.HandleHookFrameForTest(
+		[]byte(`{"hook_event_name":"Stop","session_id":"`+sessionID+`"}`),
+		sink,
+	)
+
+	u2, ok2 := sink.latestForSession(sessionID)
+	if !ok2 {
+		t.Fatal("no update after Stop")
+	}
+	if u2.HasQuestion {
+		t.Error("Stop: HasQuestion = true, want false")
+	}
+	if u2.HasPermission {
+		t.Error("Stop: HasPermission = true, want false")
+	}
+	if u2.StatusType != "idle" {
+		t.Errorf("Stop: StatusType = %q, want idle", u2.StatusType)
+	}
+}
+
 // TestProvider_PollDoesNotWipeHookOverlay is the live-socket variant of the
 // prune-protection test: hook fires via socket, then a deterministic poll runs
 // without the session on disk — overlay must survive.

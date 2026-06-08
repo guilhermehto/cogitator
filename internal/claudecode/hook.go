@@ -61,6 +61,7 @@ func ListenHooks(ctx context.Context, handler func(raw []byte), logger *slog.Log
 //   - session_id         — the session identifier
 //   - cwd               — the working directory for the session
 //   - notification_type  — present on Notification events (e.g. "permission_prompt")
+//   - tool_name          — present on PreToolUse/PostToolUse events
 //
 // The parser is defensive: it tries multiple candidate field names for each
 // logical field so that a single correction here fixes all callers.
@@ -84,6 +85,10 @@ type HookEvent struct {
 	// NotificationType is the value of the notification_type field, present on
 	// Notification events (e.g. "permission_prompt").
 	NotificationType string
+
+	// ToolName is the name of the tool being invoked, present on PreToolUse and
+	// PostToolUse events (e.g. "AskUserQuestion").
+	ToolName string
 }
 
 // hookEventNames maps both PascalCase and snake_case wire names to a canonical
@@ -173,6 +178,18 @@ func ParseHookEvent(raw []byte) (HookEvent, error) {
 		}
 	}
 
+	// tool_name: present on PreToolUse/PostToolUse events.
+	// Try tool_name, tool, toolName (first non-empty wins).
+	for _, key := range []string{"tool_name", "tool", "toolName"} {
+		if v, ok := m[key]; ok {
+			var s string
+			if err := json.Unmarshal(v, &s); err == nil && s != "" {
+				ev.ToolName = s
+				break
+			}
+		}
+	}
+
 	return ev, nil
 }
 
@@ -216,4 +233,11 @@ func (e HookEvent) HasPermission() bool {
 	default:
 		return false
 	}
+}
+
+// IsQuestionTool reports whether this event is a PreToolUse for the
+// AskUserQuestion tool — Claude's mechanism for asking the user a question
+// mid-session. This is distinct from a real permission prompt.
+func (e HookEvent) IsQuestionTool() bool {
+	return e.EventName == "PreToolUse" && e.ToolName == "AskUserQuestion"
 }

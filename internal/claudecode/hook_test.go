@@ -297,6 +297,102 @@ func TestHookEvent_Stop_IdleNotRemoval(t *testing.T) {
 	}
 }
 
+// TestParseHookEvent_ToolName verifies that ParseHookEvent extracts the tool
+// name from the tool_name, tool, and toolName fields (first non-empty wins).
+func TestParseHookEvent_ToolName(t *testing.T) {
+	tests := []struct {
+		name         string
+		json         string
+		wantToolName string
+	}{
+		{
+			name:         "tool_name canonical key",
+			json:         `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"AskUserQuestion"}`,
+			wantToolName: "AskUserQuestion",
+		},
+		{
+			name:         "tool fallback key",
+			json:         `{"hook_event_name":"PreToolUse","session_id":"s2","tool":"Bash"}`,
+			wantToolName: "Bash",
+		},
+		{
+			name:         "toolName camelCase fallback",
+			json:         `{"hook_event_name":"PreToolUse","session_id":"s3","toolName":"Read"}`,
+			wantToolName: "Read",
+		},
+		{
+			name:         "tool_name wins over tool when both present",
+			json:         `{"hook_event_name":"PreToolUse","session_id":"s4","tool_name":"AskUserQuestion","tool":"Bash"}`,
+			wantToolName: "AskUserQuestion",
+		},
+		{
+			name:         "no tool field → empty",
+			json:         `{"hook_event_name":"PreToolUse","session_id":"s5"}`,
+			wantToolName: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ev, err := claudecode.ParseHookEvent([]byte(tc.json))
+			if err != nil {
+				t.Fatalf("ParseHookEvent: %v", err)
+			}
+			if ev.ToolName != tc.wantToolName {
+				t.Errorf("ToolName = %q, want %q", ev.ToolName, tc.wantToolName)
+			}
+		})
+	}
+}
+
+// TestHookEvent_IsQuestionTool verifies that IsQuestionTool returns true only
+// for PreToolUse events with ToolName=="AskUserQuestion".
+func TestHookEvent_IsQuestionTool(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+		want bool
+	}{
+		{
+			name: "PreToolUse + AskUserQuestion → true",
+			json: `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"AskUserQuestion"}`,
+			want: true,
+		},
+		{
+			name: "PreToolUse + other tool → false",
+			json: `{"hook_event_name":"PreToolUse","session_id":"s2","tool_name":"Bash"}`,
+			want: false,
+		},
+		{
+			name: "PreToolUse + no tool → false",
+			json: `{"hook_event_name":"PreToolUse","session_id":"s3"}`,
+			want: false,
+		},
+		{
+			name: "PostToolUse + AskUserQuestion → false (wrong event)",
+			json: `{"hook_event_name":"PostToolUse","session_id":"s4","tool_name":"AskUserQuestion"}`,
+			want: false,
+		},
+		{
+			name: "Notification + AskUserQuestion → false (wrong event)",
+			json: `{"hook_event_name":"Notification","session_id":"s5","tool_name":"AskUserQuestion"}`,
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ev, err := claudecode.ParseHookEvent([]byte(tc.json))
+			if err != nil {
+				t.Fatalf("ParseHookEvent: %v", err)
+			}
+			if got := ev.IsQuestionTool(); got != tc.want {
+				t.Errorf("IsQuestionTool() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestHookEvent_Notification_PermissionPrompt verifies the permission_prompt
 // notification type is correctly classified as a permission event.
 func TestHookEvent_Notification_PermissionPrompt(t *testing.T) {

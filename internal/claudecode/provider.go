@@ -29,6 +29,12 @@ type hookOverlay struct {
 	// not yet been cleared by a subsequent Stop/SessionStart.
 	hasPermission bool
 
+	// hasQuestion is true when a PreToolUse/AskUserQuestion hook has fired and
+	// has not yet been cleared by a subsequent UserPromptSubmit/Stop/SessionEnd.
+	// When hasQuestion is true, a concurrent Notification/permission_prompt is
+	// the question's own paired frame — it must NOT set hasPermission.
+	hasQuestion bool
+
 	// lastError is set when an error-indicator hook fires.
 	lastError time.Time
 
@@ -154,7 +160,7 @@ func (p *Provider) pollOnce(sink provider.Sink, sessions []Session) {
 			continue
 		}
 		ov := p.overlays[id]
-		if ov.lastActivity.IsZero() && !ov.hasPermission && ov.statusType == "" && ov.lastError.IsZero() {
+		if ov.lastActivity.IsZero() && !ov.hasPermission && !ov.hasQuestion && ov.statusType == "" && ov.lastError.IsZero() {
 			delete(p.sessions, id)
 			delete(p.overlays, id)
 		}
@@ -221,23 +227,50 @@ func (p *Provider) handleHookFrame(raw []byte, sink provider.Sink) {
 	ov.lastActivity = now
 
 	switch ev.EventName {
-	case "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse":
+	case "SessionStart", "PostToolUse":
 		ov.statusType = "busy"
 		ov.hasPermission = false
+		ov.hasQuestion = false
+
+	case "UserPromptSubmit":
+		// UserPromptSubmit is the user's answer to a question — clears question state.
+		ov.statusType = "busy"
+		ov.hasPermission = false
+		ov.hasQuestion = false
+
+	case "PreToolUse":
+		ov.statusType = "busy"
+		if ev.IsQuestionTool() {
+			// AskUserQuestion: signal a question pending, not a permission prompt.
+			ov.hasQuestion = true
+			ov.hasPermission = false
+		} else {
+			ov.hasPermission = false
+			ov.hasQuestion = false
+		}
 
 	case "Stop", "SessionEnd":
 		// Teardown: clear busy→idle. The row is NOT removed; the transcript
 		// persists on disk and a subsequent poll will keep the session alive.
 		ov.statusType = "idle"
 		ov.hasPermission = false
+		ov.hasQuestion = false
 
 	case "PermissionRequest":
 		ov.hasPermission = true
 
 	case "Notification":
-		// Notification with permission_prompt → permission request pending.
+		// Notification with permission_prompt may be either:
+		//   (a) a real permission prompt — set hasPermission=true, or
+		//   (b) the paired frame from AskUserQuestion — leave as question.
+		// Distinguish by whether hasQuestion is already set: if a question is
+		// pending, this Notification is the question's own prompt frame.
 		if ev.HasPermission() {
-			ov.hasPermission = true
+			if !ov.hasQuestion {
+				ov.hasPermission = true
+			}
+			// When hasQuestion is already true, do not set hasPermission —
+			// the question glyph takes precedence and the lock must not appear.
 		}
 		// Keep existing statusType but ensure the session is not marked as
 		// actively busy if it was already idle.
@@ -320,6 +353,7 @@ func (p *Provider) mergeToUpdate(s Session, ov hookOverlay, now time.Time) provi
 		Directory:     s.Dir,
 		StatusType:    statusType,
 		HasPermission: ov.hasPermission,
+		HasQuestion:   ov.hasQuestion,
 		LastError:     ov.lastError,
 		LastActivity:  lastActivity,
 		Created:       s.Created,
