@@ -145,6 +145,21 @@ func demoSessions(now time.Time) []state.SessionView {
 			Created:      hours(3),
 			Provider:     harness.Kind("codex"),
 		},
+		// Live, busy (claude-code — exercises the claude-code provider badge).
+		{
+			InstanceID:   "demo-laptop",
+			InstanceName: "laptop",
+			SessionID:    "ses_010",
+			Title:        "Implement OAuth2 PKCE flow",
+			Agent:        "fabricator",
+			Directory:    "~/src/api-gateway",
+			StatusType:   "busy",
+			Source:       state.SourceLive,
+			Attention:    state.AttnActive,
+			LastActivity: mins(1),
+			Created:      hours(1),
+			Provider:     harness.Kind("claude-code"),
+		},
 		// Live, errored.
 		{
 			InstanceID:   "demo-server",

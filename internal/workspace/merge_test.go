@@ -177,9 +177,11 @@ func TestMerge_Unknown(t *testing.T) {
 	worktreesByRepo := map[string][]git.Worktree{
 		repoDir: {{Path: wtDir, Branch: "exp"}},
 	}
-	// Use a harness kind that is NOT registered (no LiveStatus).
+	// Use a harness kind that is genuinely NOT registered in harness.DefaultRegistry
+	// (no LiveStatus). "claude-code" was previously used here but is now a real
+	// registered harness with LiveStatus=true; use an unregistered sentinel instead.
 	roster := map[string]workspace.RosterEntry{
-		wtDir: makeRosterEntry(wtDir, "claude-code", "sess-x", "Claude Session", past),
+		wtDir: makeRosterEntry(wtDir, "unregistered-kind", "sess-x", "Unknown Session", past),
 	}
 	// Tmux window exists for this dir.
 	tmuxDirs := map[string]bool{wtDir: true}

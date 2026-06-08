@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/guilhermehto/cogitator/internal/claudecode"
 	"github.com/guilhermehto/cogitator/internal/codex"
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/provider"
@@ -49,6 +50,10 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 	if cfg.CodexEnabled {
 		codexProvider := codex.NewProvider(cfg.CodexHome, cfg.CodexPollInterval, cfg.CodexRecencyWindow, logger)
 		mgr.Register(codexProvider)
+	}
+	if cfg.ClaudeCodeEnabled {
+		claudeProvider := claudecode.NewProvider(cfg.ClaudeCodeHome, cfg.ClaudeCodePollInterval, cfg.ClaudeCodeRecencyWindow, logger)
+		mgr.Register(claudeProvider)
 	}
 	mgr.Start(ctx, store)
 

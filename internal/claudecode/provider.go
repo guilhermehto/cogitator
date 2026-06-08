@@ -1,4 +1,4 @@
-package codex
+package claudecode
 
 import (
 	"context"
@@ -8,14 +8,15 @@ import (
 	"time"
 
 	"github.com/guilhermehto/cogitator/internal/harness"
-	"github.com/guilhermehto/cogitator/internal/hookipc"
+	"github.com/guilhermehto/cogitator/internal/pathnorm"
 	"github.com/guilhermehto/cogitator/internal/provider"
 )
 
-// InstanceID is the synthetic instance identifier used for all Codex sessions.
-// It is a stable constant so the (provider, sessionID) dedup key in the store
-// never collides with opencode's "host:port" instance ids.
-const InstanceID = "codex"
+// InstanceID is the synthetic instance identifier used for all Claude Code
+// sessions. It is a stable constant so the (provider, sessionID) dedup key in
+// the store never collides with opencode's "host:port" instance ids or codex's
+// "codex" id.
+const InstanceID = "claude-code"
 
 // hookOverlay holds the hook-driven attention state for one session.
 // It is overlaid on top of the poll-derived base fields when emitting updates.
@@ -28,20 +29,23 @@ type hookOverlay struct {
 	// not yet been cleared by a subsequent Stop/SessionStart.
 	hasPermission bool
 
-	// lastError is set when an error-indicator hook fires.
-	lastError time.Time
+	// hasQuestion is true when a PreToolUse/AskUserQuestion hook has fired and
+	// has not yet been cleared by a subsequent UserPromptSubmit/Stop/SessionEnd.
+	// When hasQuestion is true, a concurrent Notification/permission_prompt is
+	// the question's own paired frame — it must NOT set hasPermission.
+	hasQuestion bool
 
 	// lastActivity is the time of the most recent hook event for this session.
 	lastActivity time.Time
 }
 
-// Provider polls CODEX_HOME on a configurable interval and emits
+// Provider polls ~/.claude on a configurable interval and emits
 // provider.SessionUpdates into a Sink. It implements provider.Provider.
 //
 // The package is intentionally free of internal/ui, bubbletea, internal/oc,
 // and internal/state — it is a pure filesystem-in / sink-out adapter.
 type Provider struct {
-	codexHome     string
+	claudeHome    string
 	pollInterval  time.Duration
 	recencyWindow time.Duration
 	logger        *slog.Logger
@@ -52,15 +56,15 @@ type Provider struct {
 	overlays map[string]hookOverlay // keyed by session ID
 }
 
-// NewProvider constructs a Codex Provider. codexHome may be empty (defaults to
-// ~/.codex via ReadSessions). pollInterval and recencyWindow must be positive;
-// callers should pass values from config.Config.
-func NewProvider(codexHome string, pollInterval, recencyWindow time.Duration, logger *slog.Logger) *Provider {
+// NewProvider constructs a Claude Code Provider. claudeHome may be empty
+// (defaults to ~/.claude via ReadSessions). pollInterval and recencyWindow must
+// be positive; callers should pass values from config.Config.
+func NewProvider(claudeHome string, pollInterval, recencyWindow time.Duration, logger *slog.Logger) *Provider {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Provider{
-		codexHome:     codexHome,
+		claudeHome:    claudeHome,
 		pollInterval:  pollInterval,
 		recencyWindow: recencyWindow,
 		logger:        logger,
@@ -70,30 +74,30 @@ func NewProvider(codexHome string, pollInterval, recencyWindow time.Duration, lo
 }
 
 // Kind implements provider.Provider.
-func (p *Provider) Kind() harness.Kind { return harness.KindCodex }
+func (p *Provider) Kind() harness.Kind { return harness.KindClaudeCode }
 
 // Start implements provider.Provider. It starts the IPC hook listener (if the
-// socket is available) and polls CODEX_HOME on each tick. It blocks until ctx
+// socket is available) and polls ~/.claude on each tick. It blocks until ctx
 // is cancelled.
 func (p *Provider) Start(ctx context.Context, sink provider.Sink) error {
 	// Attempt to start the hook listener. If another cogitator instance already
 	// owns the socket, log and continue without live hook attention.
 	sockPath := HookSocketPath()
-	cleanup, listenErr := hookipc.Listen(ctx, sockPath, func(raw []byte) {
+	cleanup, listenErr := ListenHooks(ctx, func(raw []byte) {
 		p.handleHookFrame(raw, sink)
 	}, p.logger)
 
 	if listenErr != nil {
-		if errors.Is(listenErr, hookipc.ErrListenerOwned) {
-			p.logger.Info("codex hook: another cogitator instance owns the socket; running without live hook attention",
+		if errors.Is(listenErr, ErrListenerOwned) {
+			p.logger.Info("claude-code hook: another cogitator instance owns the socket; running without live hook attention",
 				"path", sockPath)
 		} else {
-			p.logger.Warn("codex hook: failed to start listener; running without live hook attention",
+			p.logger.Warn("claude-code hook: failed to start listener; running without live hook attention",
 				"path", sockPath, "err", listenErr)
 		}
 	} else {
 		defer cleanup()
-		p.logger.Debug("codex hook: listener started", "path", sockPath)
+		p.logger.Debug("claude-code hook: listener started", "path", sockPath)
 	}
 
 	ticker := time.NewTicker(p.pollInterval)
@@ -118,16 +122,16 @@ func (p *Provider) Start(ctx context.Context, sink provider.Sink) error {
 //
 // Poll-vs-hook merge strategy:
 //   - The poll refreshes title/dir/lastActivity/existence from disk.
-//   - The hook overlay (statusType, hasPermission, lastError) is preserved
-//     across poll cycles — a poll tick NEVER wipes hook-driven attention.
-//   - A session is pruned only when it is BOTH absent from disk AND has no
-//     live hook overlay (empty overlay with zero lastActivity). This prevents
-//     a hook that arrives before the rollout file is flushed from being wiped
-//     by the next poll.
+//   - The hook overlay (statusType, hasPermission) is preserved across poll
+//     cycles — a poll tick NEVER wipes hook-driven attention.
+//   - A session absent from disk is pruned once its overlay's lastActivity is
+//     zero or older than recencyWindow. This prevents a hook that arrives
+//     before the transcript file is flushed from being wiped by the next poll,
+//     while ensuring stale phantom sessions do not leak for process lifetime.
 func (p *Provider) poll(sink provider.Sink) {
-	sessions, err := ReadSessions(p.codexHome)
+	sessions, err := ReadSessions(p.claudeHome)
 	if err != nil {
-		p.logger.Warn("codex: failed to read sessions", "err", err)
+		p.logger.Warn("claude-code: failed to read sessions", "err", err)
 		return
 	}
 	p.pollOnce(sink, sessions)
@@ -136,6 +140,8 @@ func (p *Provider) poll(sink provider.Sink) {
 // pollOnce is the testable core of poll. It accepts the already-read session
 // slice so tests can call it deterministically without touching the filesystem.
 func (p *Provider) pollOnce(sink provider.Sink, sessions []Session) {
+	now := time.Now()
+
 	p.mu.Lock()
 
 	// Build a set of current session IDs from disk.
@@ -145,19 +151,21 @@ func (p *Provider) pollOnce(sink provider.Sink, sessions []Session) {
 		p.sessions[s.ID] = s
 	}
 
-	// Prune sessions that have disappeared from disk, but only when they also
-	// have no live hook overlay. A hook-seeded entry (not yet on disk) must
-	// survive until its overlay goes stale or a subsequent poll finds it on disk.
+	// Prune sessions absent from disk. A hook-seeded entry must survive until
+	// its overlay goes stale (lastActivity older than recencyWindow) so that a
+	// hook arriving before the transcript is flushed is not immediately wiped.
+	// Once stale, the phantom session is dropped regardless of overlay flags.
 	for id := range p.sessions {
 		if _, onDisk := current[id]; onDisk {
 			continue
 		}
 		ov := p.overlays[id]
-		if ov.lastActivity.IsZero() && !ov.hasPermission && ov.statusType == "" && ov.lastError.IsZero() {
+		stale := ov.lastActivity.IsZero() || now.Sub(ov.lastActivity) > p.recencyWindow
+		if stale {
 			delete(p.sessions, id)
 			delete(p.overlays, id)
 		}
-		// Otherwise: keep the hook-seeded entry alive until the next disk flush.
+		// Not yet stale: keep the hook-seeded entry alive until the next disk flush.
 	}
 
 	// Snapshot the merged state for emission (under the lock).
@@ -175,12 +183,11 @@ func (p *Provider) pollOnce(sink provider.Sink, sessions []Session) {
 	// Emit the full merged snapshot atomically so the UI never sees a blank
 	// intermediate state. ReplaceProviderInstance replaces the prior snapshot
 	// in one shot; if merged is empty the view is cleared without a flash.
-	now := time.Now()
 	updates := make([]provider.SessionUpdate, 0, len(merged))
 	for _, e := range merged {
 		updates = append(updates, p.mergeToUpdate(e.session, e.overlay, now))
 	}
-	sink.ReplaceProviderInstance(harness.KindCodex, InstanceID, updates)
+	sink.ReplaceProviderInstance(harness.KindClaudeCode, InstanceID, updates)
 }
 
 // handleHookFrame parses a raw hook frame, updates the in-memory overlay for
@@ -189,21 +196,27 @@ func (p *Provider) pollOnce(sink provider.Sink, sessions []Session) {
 func (p *Provider) handleHookFrame(raw []byte, sink provider.Sink) {
 	ev, err := ParseHookEvent(raw)
 	if err != nil {
-		p.logger.Warn("codex hook: parse event", "err", err)
+		p.logger.Warn("claude-code hook: parse event", "err", err)
 		return
 	}
 	if ev.EventName == "" {
-		p.logger.Debug("codex hook: ignoring event with no name")
+		p.logger.Debug("claude-code hook: ignoring event with no name")
 		return
 	}
 
 	// Resolve the session key: prefer session ID, fall back to CWD lookup.
+	// CWD is canonicalized via pathnorm.Canonical before the lookup so that
+	// a hook-seeded row reconciles with the worktree/merge dir regardless of
+	// symlink differences (e.g. /tmp vs /private/tmp on macOS).
 	sessionID := ev.SessionID
 	if sessionID == "" && ev.CWD != "" {
-		sessionID = p.sessionIDForCWD(ev.CWD)
+		canonCWD, canonErr := pathnorm.Canonical(ev.CWD)
+		if canonErr == nil {
+			sessionID = p.sessionIDForDir(canonCWD)
+		}
 	}
 	if sessionID == "" {
-		p.logger.Debug("codex hook: cannot resolve session id; ignoring event", "event", ev.EventName)
+		p.logger.Debug("claude-code hook: cannot resolve session id; ignoring event", "event", ev.EventName)
 		return
 	}
 
@@ -214,36 +227,75 @@ func (p *Provider) handleHookFrame(raw []byte, sink provider.Sink) {
 	ov.lastActivity = now
 
 	switch ev.EventName {
-	case "session_start", "user_prompt_submit", "pre_tool_use", "post_tool_use":
+	case "SessionStart", "PostToolUse":
 		ov.statusType = "busy"
 		ov.hasPermission = false
+		ov.hasQuestion = false
 
-	case "stopped":
+	case "UserPromptSubmit":
+		// UserPromptSubmit is the user's answer to a question — clears question state.
+		ov.statusType = "busy"
+		ov.hasPermission = false
+		ov.hasQuestion = false
+
+	case "PreToolUse":
+		ov.statusType = "busy"
+		if ev.IsQuestionTool() {
+			// AskUserQuestion: signal a question pending, not a permission prompt.
+			ov.hasQuestion = true
+			ov.hasPermission = false
+		} else {
+			ov.hasPermission = false
+			ov.hasQuestion = false
+		}
+
+	case "Stop", "SessionEnd":
+		// Teardown: clear busy→idle. The row is NOT removed; the transcript
+		// persists on disk and a subsequent poll will keep the session alive.
 		ov.statusType = "idle"
 		ov.hasPermission = false
+		ov.hasQuestion = false
 
-	case "permission_request":
+	case "PermissionRequest":
 		ov.hasPermission = true
 
-	case "notification":
-		// Notification → awaiting/attention; keep existing statusType but
-		// ensure the session is not marked as actively busy.
-		if ov.statusType == "busy" {
+	case "Notification":
+		// Notification with permission_prompt may be either:
+		//   (a) a real permission prompt — set hasPermission=true, or
+		//   (b) the paired frame from AskUserQuestion — leave as question.
+		// Distinguish by whether hasQuestion is already set: if a question is
+		// pending, this Notification is the question's own prompt frame.
+		if ev.HasPermission() {
+			if !ov.hasQuestion {
+				ov.hasPermission = true
+			}
+			// When hasQuestion is already true, do not set hasPermission —
+			// the question glyph takes precedence and the lock must not appear.
+		}
+		// Keep existing statusType but ensure the session is not marked as
+		// actively busy if it was already idle.
+		if ov.statusType == "busy" && !ev.HasPermission() {
 			ov.statusType = "idle"
 		}
 	}
 
-	if ev.IsError {
-		ov.lastError = now
-	}
-
+	// Write the mutated overlay back so the next poll cycle sees the updated
+	// hasPermission/statusType — without this the overlay map stays permanently
+	// empty and hook-driven state is wiped on every poll tick.
 	p.overlays[sessionID] = ov
 
-	// Seed a minimal p.sessions entry when the hook arrives before the rollout
-	// file is flushed to disk. This ensures the next poll cycle includes the
-	// session in its merge and does not drop the live hook overlay.
+	// Seed a minimal p.sessions entry when the hook arrives before the
+	// transcript file is flushed to disk. CWD is canonicalized so the seeded
+	// Dir reconciles with worktree/merge paths (improvement over codex's
+	// raw-cwd seed).
 	if _, known := p.sessions[sessionID]; !known {
-		p.sessions[sessionID] = Session{ID: sessionID, Dir: ev.CWD, LastActivity: now}
+		dir := ev.CWD
+		if dir != "" {
+			if canonical, canonErr := pathnorm.Canonical(dir); canonErr == nil {
+				dir = canonical
+			}
+		}
+		p.sessions[sessionID] = Session{ID: sessionID, Dir: dir, LastActivity: now}
 	}
 
 	sess := p.sessions[sessionID]
@@ -252,13 +304,13 @@ func (p *Provider) handleHookFrame(raw []byte, sink provider.Sink) {
 	sink.ApplyUpdate(p.mergeToUpdate(sess, ov, now))
 }
 
-// sessionIDForCWD returns the session ID whose Dir matches cwd, or "" if none.
-// Must NOT be called with p.mu held.
-func (p *Provider) sessionIDForCWD(cwd string) string {
+// sessionIDForDir returns the session ID whose Dir matches dir (canonical
+// form), or "" if none. Must NOT be called with p.mu held.
+func (p *Provider) sessionIDForDir(dir string) string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for id, s := range p.sessions {
-		if s.Dir == cwd {
+		if s.Dir == dir {
 			return id
 		}
 	}
@@ -266,8 +318,8 @@ func (p *Provider) sessionIDForCWD(cwd string) string {
 }
 
 // mergeToUpdate builds a provider.SessionUpdate from a poll-derived Session
-// and its hook overlay. The hook overlay's statusType/hasPermission/lastError
-// take precedence over the poll-derived defaults.
+// and its hook overlay. The hook overlay's statusType/hasPermission take
+// precedence over the poll-derived defaults.
 func (p *Provider) mergeToUpdate(s Session, ov hookOverlay, now time.Time) provider.SessionUpdate {
 	src := "recent"
 	if p.recencyWindow > 0 && now.Sub(s.LastActivity) <= p.recencyWindow {
@@ -293,7 +345,7 @@ func (p *Provider) mergeToUpdate(s Session, ov hookOverlay, now time.Time) provi
 	}
 
 	return provider.SessionUpdate{
-		Provider:      harness.KindCodex,
+		Provider:      harness.KindClaudeCode,
 		InstanceID:    InstanceID,
 		InstanceName:  InstanceID,
 		SessionID:     s.ID,
@@ -301,7 +353,7 @@ func (p *Provider) mergeToUpdate(s Session, ov hookOverlay, now time.Time) provi
 		Directory:     s.Dir,
 		StatusType:    statusType,
 		HasPermission: ov.hasPermission,
-		LastError:     ov.lastError,
+		HasQuestion:   ov.hasQuestion,
 		LastActivity:  lastActivity,
 		Created:       s.Created,
 		Source:        src,
