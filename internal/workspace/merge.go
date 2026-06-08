@@ -44,6 +44,10 @@ type Row struct {
 	// Branch is the git branch checked out in this worktree. Empty when
 	// unknown (e.g. detached HEAD or roster-only entry).
 	Branch string
+	// IsRoot is true when this row is the repository's main worktree (the
+	// checkout at the repo root) — the base off which new worktrees ('n') are
+	// created. The main worktree is the one whose path equals the repo root.
+	IsRoot bool
 	// Harness is the harness kind string (e.g. "opencode"). Sourced from the
 	// roster when available; empty for disk-only worktrees with no roster entry.
 	Harness string
@@ -138,6 +142,7 @@ func Merge(
 				Repo:     repoKey,
 				Worktree: repoKey,
 				State:    StateStopped,
+				IsRoot:   true,
 			})
 			continue
 		}
@@ -226,6 +231,7 @@ func buildRow(
 		Repo:     repo,
 		Worktree: dir,
 		Branch:   branch,
+		IsRoot:   dir == repo,
 	}
 
 	// Populate from roster if present. Try direct lookup first, then
