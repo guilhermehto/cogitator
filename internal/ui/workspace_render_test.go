@@ -634,6 +634,39 @@ func TestPromptIdleDoesNotRenderWorktreePromptInSessionsPane(t *testing.T) {
 	}
 }
 
+// TestPromptNewWorktreeShowsBaseBranchWhenRootRowKnown asserts that when the
+// model knows the repo's root worktree branch, the prompt label names it
+// ("new worktree off main:") instead of the generic fallback.
+func TestPromptNewWorktreeShowsBaseBranchWhenRootRowKnown(t *testing.T) {
+	ti := textinput.New()
+	ti.SetValue("feat/new-thing")
+	rootRow := workspace.Row{
+		Repo:     "/repo/a",
+		Worktree: "/repo/a",
+		Branch:   "main",
+		IsRoot:   true,
+		State:    workspace.StateRunning,
+	}
+	m := model{
+		width:           200,
+		prompt:          promptNewWorktree,
+		input:           ti,
+		newWorktreeRepo: "/repo/a",
+		workspaceRows:   []workspace.Row{rootRow},
+	}
+	got := wsStripANSI(m.renderWorkspaceRows(200, []workspace.Row{rootRow}, 0, fixedNow))
+
+	if !strings.Contains(got, "new worktree off main:") {
+		t.Fatalf("prompt must show 'new worktree off main:' when root branch is known, got %q", got)
+	}
+	if !strings.Contains(got, "feat/new-thing") {
+		t.Fatalf("prompt must contain the typed branch value, got %q", got)
+	}
+	if strings.Contains(got, "new worktree branch:") {
+		t.Fatalf("generic fallback label must not appear when base branch is known, got %q", got)
+	}
+}
+
 // TestTaskPromptLineOmitsWorktreePrompts asserts that taskPromptLine does NOT
 // mirror the worktree branch-name prompt: it is a sessions-pane action and must
 // render in one place only (renderWorkspaceRows), not duplicated in the tasks

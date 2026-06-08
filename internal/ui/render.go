@@ -96,6 +96,10 @@ var (
 	wtPathStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
 	// wtHintStyle renders the transient tmux hint line.
 	wtHintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Italic(true)
+	// wtBaseStyle marks the repo's root/default worktree — the base off which
+	// new worktrees ('n') are created. Reuses the accent colour (63) used by the
+	// repo header so the tag reads as the repo's primary checkout.
+	wtBaseStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("63"))
 )
 
 // taskPriorityGlyph maps Taskwarrior priority codes to display glyphs.
@@ -536,12 +540,32 @@ func (m model) repoRemovePromptLine() string {
 		"stop tracking repo [%s]? worktrees stay on disk · y to confirm · any other key cancels", name))
 }
 
+// newWorktreeBase returns the branch of the root (main) worktree for the repo
+// captured when the user pressed 'n' — i.e. the branch a new worktree will be
+// based off. Returns "" when the repo or its root branch is unknown (e.g.
+// detached HEAD), in which case the prompt falls back to a generic label.
+func (m model) newWorktreeBase() string {
+	if m.newWorktreeRepo == "" {
+		return ""
+	}
+	for _, row := range m.workspaceRows {
+		if row.IsRoot && row.Repo == m.newWorktreeRepo {
+			return row.Branch
+		}
+	}
+	return ""
+}
+
 // worktreePromptLine returns the styled prompt line shown in the sessions pane
 // while the user is typing a branch name for a new worktree ('n' action).
 // It is a shared helper so both the empty-rows and non-empty-rows paths in
 // renderWorkspaceRows produce the same label, and taskPromptLine can reuse it.
 func (m model) worktreePromptLine() string {
-	return wtHintStyle.Render("new worktree branch: ") + m.input.View()
+	label := "new worktree branch: "
+	if base := m.newWorktreeBase(); base != "" {
+		label = "new worktree off " + base + ": "
+	}
+	return wtHintStyle.Render(label) + m.input.View()
 }
 
 // renderRepoFinder renders the embedded "add repo" fuzzy finder shown in the
@@ -724,6 +748,10 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int) string {
 		titleStr = wtUnknownStyle.Render(branchLabel(row)) + "  " + wtPathStyle.Render("status unknown")
 	default:
 		titleStr = dimStyle.Render(branchLabel(row))
+	}
+
+	if row.IsRoot {
+		titleStr += " " + wtBaseStyle.Render("(base)")
 	}
 
 	// Activity column: relative last-activity for stopped/unknown rows.
