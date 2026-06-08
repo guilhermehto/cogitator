@@ -7,19 +7,38 @@ It discovers instances over mDNS, subscribes to their event streams, and renders
   <img src="tui.png" alt="cogitator TUI" />
 </p>
 
-## Install
+## Table of contents
 
-### Go install
+- [Getting started](#getting-started)
+  - [1. Install](#1-install)
+  - [2. Run cogitator](#2-run-cogitator)
+  - [3. Connect your coding agent](#3-connect-your-coding-agent)
+    - [opencode](#opencode)
+    - [Claude Code](#claude-code)
+    - [Codex](#codex)
+- [Key bindings](#key-bindings)
+- [Taskwarrior integration](#taskwarrior-integration)
+- [Live attention reference](#live-attention-reference)
+  - [Claude Code](#claude-code-reference)
+  - [Codex](#codex-reference)
+- [CLI reference](#cli-reference)
+- [Logging](#logging)
+- [Architecture overview](#architecture-overview)
+- [Status mode](#status-mode)
+- [Notes for macOS unsigned binaries](#notes-for-macos-unsigned-binaries)
+- [Development](#development)
+- [Roadmap](#roadmap)
 
-```sh
-go install github.com/guilhermehto/cogitator/cmd/cogitator@latest
-```
+## Getting started
 
-### Homebrew
+cogitator monitors **coding agents** ("harnesses") running on your machine. Get up and
+running in three steps: install the binary, run it, then connect each agent you want to
+watch. Every harness offers two setup paths:
 
-Homebrew support is published through `guilhermehto/homebrew-tap` once release automation is configured.
+- **Automated** — paste a prompt into the agent itself and let it do the setup.
+- **Manual** — do the setup yourself, step by step.
 
-## Supported OS
+### 1. Install
 
 | OS | Support |
 | --- | --- |
@@ -27,19 +46,16 @@ Homebrew support is published through `guilhermehto/homebrew-tap` once release a
 | Linux | Supported |
 | Windows | Not supported |
 
-## Prerequisite
-
-Each opencode instance you want to monitor must be launched with `--mdns` so
-it advertises itself on `_http._tcp.local.`:
+**Go install:**
 
 ```sh
-opencode --mdns                       # default port (random)
-opencode serve --mdns --port 7777     # headless, fixed port
+go install github.com/guilhermehto/cogitator/cmd/cogitator@latest
 ```
 
-You can launch as many as you like; cogitator discovers them automatically.
+**Homebrew:** support is published through `guilhermehto/homebrew-tap` once release
+automation is configured.
 
-## Run
+### 2. Run cogitator
 
 ```sh
 cogitator
@@ -51,9 +67,162 @@ or from source:
 go run ./cmd/cogitator
 ```
 
-`q`, `Esc`, or `Ctrl+C` quits.
+`q`, `Esc`, or `Ctrl+C` quits. Leave cogitator running while you work — it picks up
+agents as they start. (If a hook fires while cogitator is closed, nothing breaks; the
+event is simply dropped.)
 
-### Key bindings
+### 3. Connect your coding agent
+
+Pick the harness you use below. You only need to do this once per machine.
+
+#### opencode
+
+opencode advertises itself over mDNS and cogitator discovers it automatically. The only
+setup is launching opencode with the `--mdns` flag.
+
+**Automated** — paste this to your agent:
+
+```text
+Add a shell alias named `ocm` to my shell startup file (~/.zshrc, ~/.bashrc, or whichever
+my shell actually uses), defined as:
+
+    alias ocm='opencode --mdns'
+
+Preserve the rest of the file. Then tell me to reload my shell (or open a new terminal)
+and start opencode with `ocm` from now on so cogitator can see it.
+```
+
+**Manual:**
+
+Launch opencode with `--mdns` so it advertises on `_http._tcp.local.`:
+
+```sh
+opencode --mdns                       # default port (random)
+opencode serve --mdns --port 7777     # headless, fixed port
+```
+
+You can launch as many as you like; cogitator discovers them automatically.
+
+#### Claude Code
+
+cogitator displays live attention signals for [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+sessions using Claude Code's lifecycle hooks. Monitoring **auto-enables** when
+`~/.claude/projects` exists — no environment variable needed.
+
+**Automated** — paste this to Claude Code:
+
+```text
+Set up cogitator live-attention monitoring for Claude Code on this machine.
+
+1. Run `which cogitator` to find the absolute path to the cogitator binary. If it is not
+   found, stop and tell me to install cogitator first.
+2. Open ~/.claude/settings.json, creating it if it does not exist. Preserve every existing
+   top-level key.
+3. Merge the hooks below into the `hooks` object. Replace the bare command `cogitator`
+   with the absolute path you found in step 1 (the hook runner may not inherit my
+   interactive PATH):
+
+   {
+     "hooks": {
+       "SessionStart":     [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
+       "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
+       "PreToolUse":       [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
+       "PostToolUse":      [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
+       "Stop":             [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
+       "Notification":     [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
+       "SessionEnd":       [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ]
+     }
+   }
+
+4. Save the file and tell me to restart Claude Code so the hooks take effect.
+```
+
+**Manual:**
+
+1. Confirm `~/.claude/projects` exists (it does once you've run Claude Code at least once).
+2. Wire the hooks in `~/.claude/settings.json` — cogitator does **not** write this file, so
+   paste the block yourself:
+
+   ```json
+   {
+     "hooks": {
+       "SessionStart":     [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
+       "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
+       "PreToolUse":       [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
+       "PostToolUse":      [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
+       "Stop":             [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
+       "Notification":     [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
+       "SessionEnd":       [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ]
+     }
+   }
+   ```
+
+3. Restart Claude Code. Hooks take effect on the next session.
+
+> **PATH note:** the hook runner may not inherit your interactive shell PATH. If
+> `cogitator` is not found, replace `"cogitator claude-hook"` with its absolute path —
+> e.g. `"/Users/you/go/bin/cogitator claude-hook"` (use `which cogitator` to find it).
+
+See [Live attention reference → Claude Code](#claude-code-reference) for how it behaves.
+
+#### Codex
+
+cogitator displays live attention signals for [Codex](https://openai.com/codex) sessions
+using Codex's lifecycle hooks. Monitoring **auto-enables** when `~/.codex` exists — no
+environment variable needed.
+
+**Automated** — paste this to Codex:
+
+```text
+Set up cogitator live-attention monitoring for Codex on this machine.
+
+1. Run `which cogitator` to find the absolute path to the cogitator binary. If it is not
+   found, stop and tell me to install cogitator first.
+2. Open ~/.codex/hooks.json, creating it if it does not exist. Preserve any existing keys.
+3. Merge the hooks below into the `hooks` object. Replace the bare command `cogitator`
+   with the absolute path you found in step 1:
+
+   {
+     "hooks": {
+       "SessionStart":      [ { "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
+       "UserPromptSubmit":  [ { "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
+       "PreToolUse":        [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
+       "PostToolUse":       [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
+       "PermissionRequest": [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
+       "Stop":              [ { "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ]
+     }
+   }
+
+4. Save the file, then remind me to start `codex`, run `/hooks`, and confirm trust for
+   `cogitator codex-hook` — Codex skips untrusted hooks silently.
+```
+
+**Manual:**
+
+1. Confirm `~/.codex` exists (it does once Codex is installed).
+2. Wire the hooks in `~/.codex/hooks.json`:
+
+   ```json
+   {
+     "hooks": {
+       "SessionStart":      [ { "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
+       "UserPromptSubmit":  [ { "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
+       "PreToolUse":        [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
+       "PostToolUse":       [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
+       "PermissionRequest": [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
+       "Stop":              [ { "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ]
+     }
+   }
+   ```
+
+3. Trust the hook: start `codex`, run `/hooks`, and confirm trust for
+   `cogitator codex-hook`. Until trusted, Codex skips the hook silently.
+
+See [docs/codex.md](docs/codex.md) for the full setup guide (inline TOML alternative,
+minimal hook variant, and `CODEX_HOME` override), and
+[Live attention reference → Codex](#codex-reference) for how it behaves.
+
+## Key bindings
 
 | Key | Context | Action |
 | --- | --- | --- |
@@ -110,62 +279,41 @@ Taskwarrior respects the following variables from that environment:
 | `$TASKDATA` | overrides the Taskwarrior data directory (`~/.task` by default) |
 | `$TASKRC` | overrides the Taskwarrior config file (`~/.taskrc` by default) |
 
-## Claude Code live attention (opt-in)
+## Live attention reference
 
-cogitator can display live attention signals for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions running on the same machine, using the Claude Code lifecycle hooks system.
+Setup for each harness lives in [Getting started → Connect your coding agent](#3-connect-your-coding-agent).
+This section explains how live attention behaves once it's wired up.
 
-**Quick start:**
+<a id="claude-code-reference"></a>
 
-1. Claude Code monitoring is **auto-enabled** when `~/.claude/projects` exists. No environment variable is needed.
-2. Wire the hooks in `~/.claude/settings.json` (cogitator does **not** write this file — paste the block yourself):
+### Claude Code
 
-```json
-{
-  "hooks": {
-    "SessionStart":     [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
-    "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
-    "PreToolUse":       [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
-    "PostToolUse":      [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
-    "Stop":             [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
-    "Notification":     [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
-    "SessionEnd":       [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ]
-  }
-}
-```
+cogitator subscribes to Claude Code's lifecycle hooks to track each session's attention
+state. Monitoring is auto-enabled when `~/.claude/projects` exists.
 
-3. Restart Claude Code. Hooks take effect on the next session.
+If cogitator is not running when a hook fires, `cogitator claude-hook` exits 0 silently —
+Claude Code shows no failure and never blocks your tool calls.
 
-> **PATH note:** the hook runner may not inherit your interactive shell PATH. If `cogitator` is not found, replace `"cogitator claude-hook"` with its absolute path — e.g. `"/Users/you/go/bin/cogitator claude-hook"` (use `which cogitator` to find it).
+<a id="codex-reference"></a>
 
-If cogitator is not running when a hook fires, `cogitator claude-hook` exits 0 silently — Claude Code shows no failure and never blocks your tool calls.
+### Codex
 
-## Codex live attention (opt-in)
+cogitator subscribes to Codex's lifecycle hooks. Each event maps to an attention state:
 
-cogitator can display live attention signals for [Codex](https://openai.com/codex) sessions running on the same machine, using the Codex lifecycle hooks system.
+| Event | Attention state |
+| --- | --- |
+| `SessionStart` | active |
+| `UserPromptSubmit` | active |
+| `PreToolUse` / `PostToolUse` | active |
+| `PermissionRequest` | permission-pending |
+| `Stop` | idle / awaiting |
 
-**Quick start:**
-
-1. Codex monitoring is **auto-enabled** when `~/.codex` exists. No environment variable is needed.
-2. Wire the hooks in `~/.codex/hooks.json`:
-
-```json
-{
-  "hooks": {
-    "SessionStart":      [ { "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
-    "UserPromptSubmit":  [ { "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
-    "PreToolUse":        [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
-    "PostToolUse":       [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
-    "PermissionRequest": [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
-    "Stop":              [ { "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ]
-  }
-}
-```
-
-3. Trust the hook: start `codex`, run `/hooks`, and confirm trust for `cogitator codex-hook`. Until trusted, Codex skips the hook silently.
-
-Hooks are enabled by default in Codex (`codex features list | grep hooks`). If cogitator is not running when a hook fires, `cogitator codex-hook` exits 0 silently — Codex shows no failure and never blocks your tool calls.
-
-See [docs/codex.md](docs/codex.md) for the full setup guide, inline TOML alternative, minimal hook variant, and `CODEX_HOME` override.
+Hooks are enabled by default in Codex (`codex features list | grep hooks`). `PreToolUse`
+and `PostToolUse` fire on every tool call; for less process churn, wire only
+`SessionStart`, `PermissionRequest`, and `Stop` (see the minimal variant in
+[docs/codex.md](docs/codex.md)). If cogitator is not running when a hook fires,
+`cogitator codex-hook` exits 0 silently — Codex shows no failure and never blocks your
+tool calls.
 
 ## CLI reference
 
