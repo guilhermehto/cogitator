@@ -534,6 +534,115 @@ func TestProvider_HookDrivenAttention(t *testing.T) {
 	<-done
 }
 
+// TestProvider_NotificationPermission_SurvivesPoll is the primary regression
+// test for the overlay write-back bug: a Notification/permission_prompt hook
+// fires, then a poll cycle runs with the session present on disk, and the
+// emitted SessionUpdate must STILL have HasPermission==true after the poll.
+// Without the p.overlays[sessionID]=ov write-back this test fails because the
+// poll reads an empty overlay and emits HasPermission=false.
+func TestProvider_NotificationPermission_SurvivesPoll(t *testing.T) {
+	sessionID := "aaaabbbb-cccc-dddd-eeee-000000000011"
+	home := buildFixtureHome(t, sessionID, time.Now().Add(-1*time.Minute))
+
+	p := claudecode.NewProvider(home, 10*time.Second, 30*time.Minute, nil)
+	sink := &hookSink{}
+
+	// Fire a Notification hook with permission_prompt — sets hasPermission=true.
+	p.HandleHookFrameForTest(
+		[]byte(`{"hook_event_name":"Notification","session_id":"`+sessionID+`","notification_type":"permission_prompt"}`),
+		sink,
+	)
+
+	// Verify the hook was processed and HasPermission is set.
+	u, ok := sink.latestForSession(sessionID)
+	if !ok || !u.HasPermission {
+		t.Fatal("Notification/permission_prompt hook: HasPermission not set before poll cycle")
+	}
+
+	// Run a poll cycle with the session present on disk.
+	diskSessions, err := claudecode.ReadSessionsForTest(home)
+	if err != nil {
+		t.Fatalf("ReadSessionsForTest: %v", err)
+	}
+	p.PollOnceForTest(sink, diskSessions)
+
+	// The poll emits via ReplaceProviderInstance (captured in replaces on fakeSink,
+	// but hookSink ignores it). We need the post-poll ApplyUpdate from the poll's
+	// ReplaceProviderInstance path — use a fakeSink for the poll call instead.
+	sink2 := &fakeSink{}
+	p.PollOnceForTest(sink2, diskSessions)
+
+	replaces := sink2.snapshotReplaces()
+	if len(replaces) == 0 {
+		t.Fatal("poll emitted no ReplaceProviderInstance batches")
+	}
+	last := replaces[len(replaces)-1]
+	var found *provider.SessionUpdate
+	for i := range last {
+		if last[i].SessionID == sessionID {
+			u := last[i]
+			found = &u
+		}
+	}
+	if found == nil {
+		t.Fatalf("session %q absent from post-poll replace batch", sessionID)
+	}
+	if !found.HasPermission {
+		t.Errorf("HasPermission = false after poll — overlay write-back missing (regression)")
+	}
+}
+
+// TestProvider_StopIdle_SurvivesPoll verifies that a Stop-driven statusType="idle"
+// persists across a subsequent poll cycle (parallel assertion to the permission test).
+func TestProvider_StopIdle_SurvivesPoll(t *testing.T) {
+	sessionID := "aaaabbbb-cccc-dddd-eeee-000000000022"
+	// Use an old session so poll-derived default would be "recent" (no statusType),
+	// proving the overlay's "idle" wins.
+	home := buildFixtureHome(t, sessionID, time.Now().Add(-2*time.Hour))
+
+	p := claudecode.NewProvider(home, 10*time.Second, 30*time.Minute, nil)
+	sink := &hookSink{}
+
+	// Fire a Stop hook → overlay statusType = "idle".
+	p.HandleHookFrameForTest(
+		[]byte(`{"hook_event_name":"Stop","session_id":"`+sessionID+`"}`),
+		sink,
+	)
+
+	u, ok := sink.latestForSession(sessionID)
+	if !ok || u.StatusType != "idle" {
+		t.Fatalf("Stop hook: StatusType = %q, want idle", u.StatusType)
+	}
+
+	// Poll cycle — session is on disk but old (outside recency window).
+	diskSessions, err := claudecode.ReadSessionsForTest(home)
+	if err != nil {
+		t.Fatalf("ReadSessionsForTest: %v", err)
+	}
+
+	sink2 := &fakeSink{}
+	p.PollOnceForTest(sink2, diskSessions)
+
+	replaces := sink2.snapshotReplaces()
+	if len(replaces) == 0 {
+		t.Fatal("poll emitted no ReplaceProviderInstance batches")
+	}
+	last := replaces[len(replaces)-1]
+	var found *provider.SessionUpdate
+	for i := range last {
+		if last[i].SessionID == sessionID {
+			u := last[i]
+			found = &u
+		}
+	}
+	if found == nil {
+		t.Fatalf("session %q absent from post-poll replace batch", sessionID)
+	}
+	if found.StatusType != "idle" {
+		t.Errorf("StatusType = %q after poll, want idle — overlay write-back missing (regression)", found.StatusType)
+	}
+}
+
 // TestProvider_PollDoesNotWipeHookOverlay is the live-socket variant of the
 // prune-protection test: hook fires via socket, then a deterministic poll runs
 // without the session on disk — overlay must survive.

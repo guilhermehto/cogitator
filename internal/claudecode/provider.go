@@ -246,6 +246,11 @@ func (p *Provider) handleHookFrame(raw []byte, sink provider.Sink) {
 		}
 	}
 
+	// Write the mutated overlay back so the next poll cycle sees the updated
+	// hasPermission/statusType/lastError — without this the overlay map stays
+	// permanently empty and hook-driven state is wiped on every poll tick.
+	p.overlays[sessionID] = ov
+
 	// Seed a minimal p.sessions entry when the hook arrives before the
 	// transcript file is flushed to disk. CWD is canonicalized so the seeded
 	// Dir reconciles with worktree/merge paths (improvement over codex's
