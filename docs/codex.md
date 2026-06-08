@@ -26,26 +26,10 @@ cogitator reads its configuration from `internal/config/config.go`. The relevant
 
 | Config field | Default | How to override |
 | --- | --- | --- |
-| `CodexEnabled` | auto-detected (see below) | Set `CODEX_ENABLED=true/1` or `CODEX_ENABLED=false/0` to force on or off. |
+| `CodexEnabled` | auto-detected | _(no override — determined by directory presence)_ |
 | `CodexHome` | `""` (resolves to `~/.codex`) | Set `CODEX_HOME=/path/to/codex/home` in the environment. |
 
 **Auto-detection:** cogitator enables Codex monitoring automatically when the resolved Codex home directory (`$CODEX_HOME` if set, otherwise `~/.codex`) exists and is a directory. No environment variable is needed on a machine that has Codex installed.
-
-**Explicit override:** `CODEX_ENABLED` takes precedence over auto-detection:
-
-| `CODEX_ENABLED` value | Result |
-| --- | --- |
-| `true` or `1` (case-insensitive) | Always ON, even if `~/.codex` does not exist |
-| `false` or `0` (case-insensitive) | Always OFF, even if `~/.codex` exists |
-| unset or any other value | Auto-detect from directory presence |
-
-For a quick one-off test on a machine without `~/.codex`:
-
-```sh
-CODEX_ENABLED=true cogitator
-```
-
-To permanently disable on a machine that has `~/.codex` but where you do not want cogitator to monitor Codex, export `CODEX_ENABLED=false` in your shell profile (`.zshrc`, `.bashrc`, etc.).
 
 ---
 
@@ -161,4 +145,4 @@ After trusting, the hook fires on every subsequent Codex session without further
 
 ## Verification
 
-With cogitator running (auto-enabled when `~/.codex` exists, or `CODEX_ENABLED=true cogitator` to force it on) and the hooks wired and trusted, start a Codex session in any directory. You should see a new Codex session appear in the cogitator Sessions pane. When Codex requests a permission, the session's attention indicator should change to the permission-pending state.
+With cogitator running (auto-enabled when `~/.codex` exists) and the hooks wired and trusted, start a Codex session in any directory. You should see a new Codex session appear in the cogitator Sessions pane. When Codex requests a permission, the session's attention indicator should change to the permission-pending state.

@@ -115,7 +115,7 @@ cogitator can display live attention signals for [Claude Code](https://docs.anth
 
 **Quick start:**
 
-1. Claude Code monitoring is **auto-enabled** when `~/.claude` exists. To force it on without `~/.claude`: `CLAUDE_CODE_ENABLED=true cogitator`. To force it off: `CLAUDE_CODE_ENABLED=false cogitator`.
+1. Claude Code monitoring is **auto-enabled** when `~/.claude/projects` exists. No environment variable is needed.
 2. Wire the hooks in `~/.claude/settings.json` (cogitator does **not** write this file — paste the block yourself):
 
 ```json
@@ -142,7 +142,7 @@ cogitator can display live attention signals for [Codex](https://openai.com/code
 
 **Quick start:**
 
-1. Codex monitoring is **auto-enabled** when `~/.codex` exists. To force it on without `~/.codex`: `CODEX_ENABLED=true cogitator`. To force it off: `CODEX_ENABLED=false cogitator`.
+1. Codex monitoring is **auto-enabled** when `~/.codex` exists. No environment variable is needed.
 2. Wire the hooks in `~/.codex/hooks.json`:
 
 ```json

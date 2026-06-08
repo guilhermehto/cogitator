@@ -2,7 +2,6 @@ package config
 
 import (
 	"os"
-	"strings"
 	"time"
 )
 
@@ -67,28 +66,6 @@ type Config struct {
 	ClaudeCodeRecencyWindow time.Duration
 }
 
-// codexEnabled resolves whether Codex monitoring should be active.
-//
-// Precedence:
-//  1. CODEX_ENABLED explicitly set to a recognized value: "true"/"1" → ON,
-//     "false"/"0" → OFF (case-insensitive; this wins over auto-detection).
-//  2. CODEX_ENABLED unset or unrecognized: auto-detect by checking whether
-//     the resolved Codex home directory exists on disk.
-//
-// The Codex home is resolved as: $CODEX_HOME when non-empty, else ~/.codex.
-// If os.UserHomeDir() errors, auto-detection treats the directory as absent.
-func codexEnabled() bool {
-	v := strings.ToLower(strings.TrimSpace(os.Getenv("CODEX_ENABLED")))
-	switch v {
-	case "true", "1":
-		return true
-	case "false", "0":
-		return false
-	}
-	// Auto-detect: ON when the Codex home directory exists.
-	return codexHomeDirExists()
-}
-
 // codexHomeDirExists reports whether the resolved Codex home directory exists
 // and is a directory. It mirrors the resolution logic used by the Codex
 // provider: $CODEX_HOME when set, otherwise ~/.codex.
@@ -103,28 +80,6 @@ func codexHomeDirExists() bool {
 	}
 	info, err := os.Stat(dir)
 	return err == nil && info.IsDir()
-}
-
-// claudeEnabled resolves whether Claude Code monitoring should be active.
-//
-// Precedence:
-//  1. CLAUDE_ENABLED explicitly set to a recognized value: "true"/"1" → ON,
-//     "false"/"0" → OFF (case-insensitive; this wins over auto-detection).
-//  2. CLAUDE_ENABLED unset or unrecognized: auto-detect by checking whether
-//     the resolved Claude home projects directory exists on disk.
-//
-// The Claude home is resolved as: $CLAUDE_HOME when non-empty, else ~/.claude.
-// If os.UserHomeDir() errors, auto-detection treats the directory as absent.
-func claudeEnabled() bool {
-	v := strings.ToLower(strings.TrimSpace(os.Getenv("CLAUDE_ENABLED")))
-	switch v {
-	case "true", "1":
-		return true
-	case "false", "0":
-		return false
-	}
-	// Auto-detect: ON when the Claude projects directory exists.
-	return claudeProjectsDirExists()
 }
 
 // claudeProjectsDirExists reports whether the resolved Claude home projects
@@ -163,12 +118,12 @@ func Default() *Config {
 		UnreachableThreshold:    3,
 		InactiveHideAfter:       5 * time.Minute,
 
-		CodexEnabled:       codexEnabled(),
+		CodexEnabled:       codexHomeDirExists(),
 		CodexHome:          os.Getenv("CODEX_HOME"),
 		CodexPollInterval:  5 * time.Second,
 		CodexRecencyWindow: 30 * time.Minute,
 
-		ClaudeCodeEnabled:       claudeEnabled(),
+		ClaudeCodeEnabled:       claudeProjectsDirExists(),
 		ClaudeCodeHome:          os.Getenv("CLAUDE_HOME"),
 		ClaudeCodePollInterval:  5 * time.Second,
 		ClaudeCodeRecencyWindow: 30 * time.Minute,
