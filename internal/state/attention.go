@@ -12,6 +12,12 @@ const (
 	AttnPermissionPending Attention = "permission"
 	AttnQuestionPending   Attention = "question"
 	AttnErrored           Attention = "errored"
+	// AttnFinished marks a session that was working on a user request and has
+	// since gone idle, but the user has not yet returned to it. Unlike the
+	// other labels it is NOT computed by Classify (which is stateless): it
+	// requires per-session transition memory and the user-viewed signal, so
+	// the store sets it directly when assembling a snapshot.
+	AttnFinished Attention = "finished"
 )
 
 // Rank is used to sort the attention pane: lower = more urgent.
@@ -23,10 +29,29 @@ func (a Attention) Rank() int {
 		return 0
 	case AttnErrored:
 		return 1
+	case AttnFinished:
+		return 1
 	default:
 		return 2
 	}
 }
+
+// isSticky reports whether an attention label should survive a cogitator
+// restart. Only terminal/waiting states are sticky: active and inactive are
+// transient and must be re-derived from live events.
+func (a Attention) isSticky() bool {
+	switch a {
+	case AttnFinished, AttnErrored, AttnPermissionPending, AttnQuestionPending:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsSticky is the exported form of isSticky, for use by packages outside
+// internal/state (e.g. internal/ui) that need to filter roster entries to the
+// sticky set without duplicating the predicate.
+func (a Attention) IsSticky() bool { return a.isSticky() }
 
 // Classify computes the attention label for one session.
 //

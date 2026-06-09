@@ -7,8 +7,21 @@ import (
 	"time"
 
 	"github.com/guilhermehto/cogitator/internal/config"
+	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/state"
 )
+
+func TestAttnLabelFinishedUsesFinishedGlyph(t *testing.T) {
+	got := attnLabel(state.AttnFinished, state.SourceLive)
+	if !strings.Contains(got, glyphFinished) {
+		t.Fatalf("finished label %q must contain finished glyph", got)
+	}
+	// Finished must win over the source-recent fallback.
+	got = attnLabel(state.AttnFinished, state.SourceRecent)
+	if !strings.Contains(got, glyphFinished) {
+		t.Fatalf("finished label (recent source) %q must contain finished glyph", got)
+	}
+}
 
 func TestRenderAllSessionsRedactsInstanceHostPort(t *testing.T) {
 	m := model{}
@@ -243,7 +256,7 @@ func TestViewMutationErrorFooterAbsentOnNilErr(t *testing.T) {
 
 func TestLegendLineIncludesTaskGlyphsOnWideTerminal(t *testing.T) {
 	// A very wide terminal should include the task-priority glyphs.
-	got := legendLine(300)
+	got := legendLine(300, true)
 	if !strings.Contains(got, "high") {
 		t.Fatalf("expected task priority glyphs on wide terminal, got %q", got)
 	}
@@ -257,7 +270,7 @@ func TestLegendLineIncludesTaskGlyphsOnWideTerminal(t *testing.T) {
 
 func TestLegendLineOmitsTaskGlyphsOnNarrowTerminal(t *testing.T) {
 	// A very narrow terminal must not include the task-priority glyphs.
-	got := legendLine(40)
+	got := legendLine(40, true)
 	if strings.Contains(got, "high") {
 		t.Fatalf("expected task priority glyphs omitted on narrow terminal, got %q", got)
 	}
@@ -269,8 +282,103 @@ func TestLegendLineOmitsTaskGlyphsOnNarrowTerminal(t *testing.T) {
 
 func TestLegendLineZeroWidthIncludesTaskGlyphs(t *testing.T) {
 	// width=0 means "unknown / unconstrained" — task glyphs should be included.
-	got := legendLine(0)
+	got := legendLine(0, true)
 	if !strings.Contains(got, "high") {
 		t.Fatalf("expected task priority glyphs when width=0 (unconstrained), got %q", got)
+	}
+}
+
+func TestLegendLineOmitsTaskGlyphsWhenTasksInactive(t *testing.T) {
+	got := legendLine(300, false)
+	if strings.Contains(got, "high") || strings.Contains(got, "medium") || strings.Contains(got, "low") {
+		t.Fatalf("expected task priority glyphs omitted when tasks are inactive, got %q", got)
+	}
+	if !strings.Contains(got, "legend:") {
+		t.Fatalf("expected session legend prefix when tasks are inactive, got %q", got)
+	}
+}
+
+// TestStyledStatusCodexStrings verifies that every status string the Codex
+// provider emits renders legibly (non-blank for "busy"; blank for idle/empty)
+// and that the existing opencode strings are unaffected.
+func TestStyledStatusCodexStrings(t *testing.T) {
+	cases := []struct {
+		name      string
+		status    string
+		wantBlank bool // true → rendered output should be empty/whitespace
+	}{
+		// Codex-emitted strings.
+		{name: "codex busy renders non-blank", status: "busy", wantBlank: false},
+		{name: "codex idle renders blank", status: "idle", wantBlank: true},
+		{name: "codex empty renders blank", status: "", wantBlank: true},
+		// opencode-only strings — regression guard.
+		{name: "opencode generating renders non-blank", status: "generating", wantBlank: false},
+		{name: "opencode retry renders non-blank", status: "retry", wantBlank: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := styledStatus(tc.status)
+			blank := strings.TrimSpace(got) == ""
+			if blank != tc.wantBlank {
+				t.Fatalf("styledStatus(%q) = %q, wantBlank=%v", tc.status, got, tc.wantBlank)
+			}
+		})
+	}
+}
+
+// TestFormatRowShowsProviderBadge verifies that a SessionView with a non-empty
+// Provider renders a "[<provider>]" badge in the row output.
+func TestFormatRowShowsProviderBadge(t *testing.T) {
+	now := time.Now()
+	sv := state.SessionView{
+		SessionID:    "s1",
+		Title:        "My Task",
+		Source:       state.SourceLive,
+		Attention:    state.AttnActive,
+		Provider:     harness.Kind("opencode"),
+		LastActivity: now,
+	}
+	got := formatRow(now, sv, 120, false)
+	if !strings.Contains(got, "[opencode]") {
+		t.Errorf("formatRow output %q does not contain provider badge [opencode]", got)
+	}
+}
+
+// TestFormatRowShowsCodexProviderBadge verifies that a codex session renders
+// "[codex]" in the row output (not "[opencode]").
+func TestFormatRowShowsCodexProviderBadge(t *testing.T) {
+	now := time.Now()
+	sv := state.SessionView{
+		SessionID:    "s2",
+		Title:        "Codex Task",
+		Source:       state.SourceLive,
+		Attention:    state.AttnActive,
+		Provider:     harness.Kind("codex"),
+		LastActivity: now,
+	}
+	got := formatRow(now, sv, 120, false)
+	if !strings.Contains(got, "[codex]") {
+		t.Errorf("formatRow output %q does not contain provider badge [codex]", got)
+	}
+	if strings.Contains(got, "[opencode]") {
+		t.Errorf("formatRow output %q must not contain [opencode] for a codex session", got)
+	}
+}
+
+// TestFormatRowNoProviderBadgeWhenEmpty verifies that a SessionView with an
+// empty Provider does not render any "[...]" badge.
+func TestFormatRowNoProviderBadgeWhenEmpty(t *testing.T) {
+	now := time.Now()
+	sv := state.SessionView{
+		SessionID:    "s3",
+		Title:        "No Provider",
+		Source:       state.SourceLive,
+		Attention:    state.AttnActive,
+		LastActivity: now,
+		// Provider is zero value (empty)
+	}
+	got := formatRow(now, sv, 120, false)
+	if strings.Contains(got, "[") {
+		t.Errorf("formatRow output %q must not contain a provider badge when Provider is empty", got)
 	}
 }

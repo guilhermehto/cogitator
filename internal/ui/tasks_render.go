@@ -52,8 +52,10 @@ func (m model) renderTasksPane(outerH, outerW int) string {
 	b.WriteString(taskColumnHeader(innerW) + "\n")
 
 	// Budget: border top+bottom (2) + title row (1) + column header (1).
+	// Only task-pane prompts reserve a row here; worktree/repo prompts belong
+	// to the sessions pane and must not be mirrored (see isTaskPrompt).
 	promptRows := 0
-	if m.prompt != promptIdle {
+	if isTaskPrompt(m.prompt) {
 		promptRows = 1
 	}
 	maxBodyRows := outerH - 2 - 1 - 1 - promptRows
@@ -77,8 +79,10 @@ func (m model) renderTasksPane(outerH, outerW int) string {
 
 	b.WriteString(strings.Join(rows, "\n"))
 
-	// Prompt line at the bottom of the pane body.
-	if m.prompt != promptIdle {
+	// Prompt line at the bottom of the pane body. Only task-pane prompts are
+	// rendered here; the worktree branch-name and delete confirmations live in
+	// the sessions pane (renderWorkspaceRows) and must appear in one place only.
+	if isTaskPrompt(m.prompt) {
 		b.WriteString("\n")
 		b.WriteString(m.taskPromptLine())
 	}
@@ -186,8 +190,21 @@ func formatTaskRow(tv taskwarrior.TaskView, innerW int, selected, active bool) s
 	return row
 }
 
+// isTaskPrompt reports whether p is a tasks-pane prompt. Only these prompts
+// render an input/confirmation row in the tasks pane; worktree and repo prompts
+// are sessions-pane actions and render solely in renderWorkspaceRows so they
+// never appear in two places at once.
+func isTaskPrompt(p promptMode) bool {
+	switch p {
+	case promptAdd, promptEdit, promptConfirmDelete:
+		return true
+	default:
+		return false
+	}
+}
+
 // taskPromptLine returns the prompt line rendered at the bottom of the tasks
-// pane body. It is only called when m.prompt != promptIdle.
+// pane body. It is only called when isTaskPrompt(m.prompt) is true.
 func (m model) taskPromptLine() string {
 	switch m.prompt {
 	case promptAdd:

@@ -29,6 +29,23 @@ func TestFormatRowAgentBeforeTitleAndDedupesAgentSuffix(t *testing.T) {
 	}
 }
 
+func TestFormatRowFoldsMultilineTitleIntoOneLine(t *testing.T) {
+	row := formatRow(time.Now(), state.SessionView{
+		SessionID:  "s1",
+		Title:      "first line\nsecond line\r\nthird line",
+		StatusType: "busy",
+		Attention:  state.AttnActive,
+		Source:     state.SourceLive,
+	}, 120, false)
+
+	if strings.ContainsAny(row, "\r\n") {
+		t.Fatalf("row must not contain embedded line breaks: %q", row)
+	}
+	if !strings.Contains(row, "first line second line third line") {
+		t.Fatalf("row = %q, want folded title text", row)
+	}
+}
+
 func TestTrimAgentSuffix(t *testing.T) {
 	cases := []struct {
 		name  string

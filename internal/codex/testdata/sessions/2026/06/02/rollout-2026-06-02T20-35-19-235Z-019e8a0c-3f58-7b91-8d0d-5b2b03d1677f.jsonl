@@ -1,0 +1,4 @@
+{"timestamp":"2026-06-02T20:35:23.336Z","type":"session_meta","payload":{"id":"019e8a0c-3f58-7b91-8d0d-5b2b03d1677f","timestamp":"2026-06-02T20:35:19.235Z","cwd":"/tmp/wt","originator":"codex-tui","cli_version":"0.136.0","source":"cli"}}
+{"timestamp":"2026-06-02T20:35:25.576Z","type":"event_msg","payload":{"type":"user_message","message":"add codex support"}}
+{"timestamp":"2026-06-02T20:35:27.823Z","type":"event_msg","payload":{"type":"agent_message","message":"On it.","phase":"final_answer"}}
+{"timestamp":"2026-06-02T20:35:27.837Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","duration_ms":4568}}

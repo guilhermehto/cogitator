@@ -1,0 +1,2 @@
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-06-05T06:00:00.000Z","sessionId":"eeeeeeee-ffff-0000-1111-222222222222"}
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"some work"}]},"uuid":"u1","timestamp":"2026-06-05T06:00:01.000Z","sessionId":"eeeeeeee-ffff-0000-1111-222222222222","version":"2.1.0"}
