@@ -87,8 +87,16 @@ var (
 	wtMissingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Italic(true)
 	// wtUnknownStyle renders an unknown worktree row.
 	wtUnknownStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("226"))
-	// wtCursorStyle highlights the row under the session cursor.
+	// wtCursorStyle highlights plain-text cursor rows (the repo finder and the
+	// harness chooser) with reverse video. Worktree rows use the colour-
+	// preserving band in highlightSelectedRow instead, so reverse video is
+	// never applied to rows that carry per-cell foreground colours.
 	wtCursorStyle = lipgloss.NewStyle().Reverse(true)
+	// wtSelectedBg is the background painted across the highlighted (cursor)
+	// worktree row. A background — unlike reverse video — leaves each cell's
+	// foreground colour intact, so the selected row keeps its status/branch/
+	// path styling while still reading as selected. See highlightSelectedRow.
+	wtSelectedBg = lipgloss.Color("237")
 	// wtRepoStyle renders the repo group header.
 	wtRepoStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63"))
 	// wtPathStyle renders the faded-italic path annotation shown next to a repo
@@ -490,14 +498,13 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 			row := rows[i]
 			line := formatWorktreeRow(now, row, width-2)
 			if i == cursor {
-				// Highlight the cursor row with reverse video, matching the
-				// tasks pane. Reverse must wrap plain text: lipgloss emits a
-				// full SGR reset after every embedded foreground colour, and
-				// that reset also clears the reverse attribute — so wrapping a
-				// row that still carries per-cell colours leaves everything
-				// after the first coloured segment un-highlighted. Strip the
-				// embedded styling first so the reverse spans the entire row.
-				line = wtCursorStyle.Render(ansi.Strip(line))
+				// Highlight the cursor row with a background band that keeps
+				// the row's per-cell foreground colours (see
+				// highlightSelectedRow). Reverse video would instead force a
+				// strip of all colour first, because lipgloss emits an SGR
+				// reset after every coloured cell that also clears the reverse
+				// attribute.
+				line = highlightSelectedRow(line)
 			}
 			b.WriteString(line + "\n")
 		}
@@ -528,6 +535,29 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 	}
 
 	return b.String()
+}
+
+// highlightSelectedRow paints wtSelectedBg across an already-rendered worktree
+// row while preserving its foreground colours. lipgloss emits a full SGR reset
+// ("\x1b[0m") after every styled cell, and that reset also clears the
+// background — so a single outer background wrap would only fill up to the
+// first coloured cell. We therefore re-assert the background immediately after
+// every interior reset and wrap the whole line, producing a continuous
+// selection band that survives the resets. The opener and reset are taken from
+// lipgloss so they honour the active colour profile; under a no-colour profile
+// lipgloss emits no SGR, open is empty, and the row is returned unchanged
+// (matching the old reverse path, which also vanished without colour support).
+func highlightSelectedRow(line string) string {
+	const marker = "\x00"
+	open, reset, ok := strings.Cut(
+		lipgloss.NewStyle().Background(wtSelectedBg).Render(marker), marker)
+	if !ok || open == "" {
+		return line
+	}
+	if reset != "" {
+		line = strings.ReplaceAll(line, reset, reset+open)
+	}
+	return open + line + reset
 }
 
 // repoRemovePromptLine returns the styled confirmation line shown while the

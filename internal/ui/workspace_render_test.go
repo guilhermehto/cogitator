@@ -279,12 +279,14 @@ func TestWorkspaceRowStatusBadgeIsLeftmostColumn(t *testing.T) {
 	}
 }
 
-// TestSelectedWorkspaceRowHighlightSpansWholeRow asserts the cursor row is one
-// clean reverse-video span (like the tasks pane). Embedded foreground colours
-// would emit an SGR reset that also clears the reverse attribute, breaking the
-// highlight partway through; the selected row must therefore carry exactly the
-// reverse-open and a single trailing reset, with no interior escapes.
-func TestSelectedWorkspaceRowHighlightSpansWholeRow(t *testing.T) {
+// TestSelectedWorkspaceRowHighlightKeepsColour asserts the cursor row is
+// highlighted with a background band (wtSelectedBg) that spans the whole row
+// while preserving the row's foreground colours. lipgloss emits an SGR reset
+// after every coloured cell that also clears the background, so the band must
+// be re-asserted after each interior reset: we check the row opens with the
+// background, that a reset is immediately followed by the background opener,
+// and that a foreground colour still survives in the highlighted row.
+func TestSelectedWorkspaceRowHighlightKeepsColour(t *testing.T) {
 	r := lipgloss.DefaultRenderer()
 	orig := r.ColorProfile()
 	r.SetColorProfile(termenv.ANSI256)
@@ -298,17 +300,29 @@ func TestSelectedWorkspaceRowHighlightSpansWholeRow(t *testing.T) {
 	if line == "" {
 		t.Fatal("cursor row not found")
 	}
-	if !strings.Contains(line, "\x1b[7m") {
-		t.Fatalf("selected row must use reverse video, got %q", line)
+
+	open, reset, _ := strings.Cut(
+		lipgloss.NewStyle().Background(wtSelectedBg).Render("\x00"), "\x00")
+	if open == "" {
+		t.Fatal("expected a non-empty background opener under ANSI256")
 	}
-	if n := strings.Count(line, "\x1b["); n != 2 {
-		t.Fatalf("selected row must be a single clean reverse span (2 escapes), got %d in %q", n, line)
+	if !strings.HasPrefix(line, open) {
+		t.Fatalf("selected row must open with the selection background, got %q", line)
+	}
+	if !strings.Contains(line, reset+open) {
+		t.Fatalf("selection background must be re-asserted after interior resets, got %q", line)
+	}
+	if !strings.Contains(line, "\x1b[38") {
+		t.Fatalf("selected row must preserve foreground colour, got %q", line)
+	}
+	if strings.Contains(line, "\x1b[7m") {
+		t.Fatalf("selected row must not use reverse video, got %q", line)
 	}
 }
 
 // TestUnselectedWorkspaceRowKeepsColour guards the test above: an unselected
-// running row still carries its colour styling (so the highlight test is
-// actually exercising the strip-before-reverse path, not a no-op).
+// running row still carries its colour styling and is never reverse-video, so
+// the highlight test is exercising the background-band path, not a no-op.
 func TestUnselectedWorkspaceRowKeepsColour(t *testing.T) {
 	r := lipgloss.DefaultRenderer()
 	orig := r.ColorProfile()
