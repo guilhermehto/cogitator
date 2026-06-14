@@ -211,6 +211,49 @@ func TestProvider_RecencyMapping(t *testing.T) {
 	}
 }
 
+// TestProvider_RecencyDoesNotImplyBusy is the regression guard for the
+// "sessions stuck active after restart" bug. With no hook overlay (the state
+// right after a cogitator restart — the overlay map starts empty), a session
+// whose transcript was written within recencyWindow must be Source "live" (so
+// it stays discoverable) but StatusType "" — NOT "busy". A recent transcript
+// means the session was touched recently, not that Claude is generating.
+// Classify("") → AttnInactive, so the row renders inactive instead of active.
+func TestProvider_RecencyDoesNotImplyBusy(t *testing.T) {
+	sessionID := "aaaabbbb-cccc-dddd-eeee-000000000099"
+	// 5 minutes ago: well inside the 30m recency window → Source "live".
+	home := buildFixtureHome(t, sessionID, time.Now().Add(-5*time.Minute))
+
+	p := claudecode.NewProvider(home, 10*time.Second, 30*time.Minute, nil)
+	sink := &fakeSink{}
+
+	// Poll with no hook ever fired — exactly the post-restart situation.
+	diskSessions, err := claudecode.ReadSessionsForTest(home)
+	if err != nil {
+		t.Fatalf("ReadSessionsForTest: %v", err)
+	}
+	p.PollOnceForTest(sink, diskSessions)
+
+	replaces := sink.snapshotReplaces()
+	var found *provider.SessionUpdate
+	for _, batch := range replaces {
+		for i := range batch {
+			if batch[i].SessionID == sessionID {
+				u := batch[i]
+				found = &u
+			}
+		}
+	}
+	if found == nil {
+		t.Fatalf("no update emitted for session %q", sessionID)
+	}
+	if found.Source != "live" {
+		t.Errorf("Source = %q, want live (recent transcript must stay discoverable)", found.Source)
+	}
+	if found.StatusType != "" {
+		t.Errorf("StatusType = %q, want \"\" — recency must not be coerced to busy (stuck-active regression)", found.StatusType)
+	}
+}
+
 // TestProvider_EmitsOneUpdatePerSession verifies that a poll cycle emits
 // exactly one ReplaceProviderInstance call carrying all fixture sessions, with
 // no ClearProviderInstance calls and no blank intermediate emissions.

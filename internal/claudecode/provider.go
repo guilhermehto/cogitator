@@ -330,13 +330,16 @@ func (p *Provider) mergeToUpdate(s Session, ov hookOverlay, now time.Time) provi
 		src = "live"
 	}
 
-	statusType := ov.statusType // hook overlay wins
-	if statusType == "" {
-		// No hook override — derive from recency (matches Phase B behaviour).
-		if src == "live" {
-			statusType = "busy"
-		}
-	}
+	// StatusType is hook-driven only. Recency still drives Source (for
+	// visibility and sorting), but a recently-written transcript must NEVER be
+	// coerced to "busy": it means the session was touched recently, not that
+	// Claude is generating right now. Coercing here made every session whose
+	// last transcript line fell within recencyWindow render as "active" after a
+	// cogitator restart — the in-memory overlay map starts empty, so the poll
+	// fallback fired for every recent session even when idle. "active" means
+	// busy/generating only (see .scriptorum/redefine-session-activity); idle
+	// sessions classify as inactive once the hook overlay is absent.
+	statusType := ov.statusType
 
 	// Use the more recent of poll and hook lastActivity.
 	lastActivity := s.LastActivity
