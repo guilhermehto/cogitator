@@ -254,6 +254,92 @@ func TestProvider_RecencyDoesNotImplyBusy(t *testing.T) {
 	}
 }
 
+// TestProvider_SessionStartIsIdle is the regression guard for the
+// "resume → idle → still active" bug. A SessionStart hook means the session was
+// opened/resumed and is parked at the prompt awaiting input — Claude is NOT
+// generating, and a bare resume emits no Stop to clear a busy. So SessionStart
+// must produce StatusType != "busy" (idle), which Classify maps to inactive.
+func TestProvider_SessionStartIsIdle(t *testing.T) {
+	sessionID := "aaaabbbb-cccc-dddd-eeee-000000000301"
+	home := buildFixtureHome(t, sessionID, time.Now().Add(-1*time.Minute))
+
+	p := claudecode.NewProvider(home, 10*time.Second, 30*time.Minute, nil)
+	sink := &hookSink{}
+
+	p.HandleHookFrameForTest(
+		[]byte(`{"hook_event_name":"SessionStart","session_id":"`+sessionID+`"}`),
+		sink,
+	)
+
+	u, ok := sink.latestForSession(sessionID)
+	if !ok {
+		t.Fatal("no update after SessionStart hook")
+	}
+	if u.StatusType == "busy" {
+		t.Errorf("SessionStart: StatusType = busy — a resumed/opened session is not generating (stuck-active regression)")
+	}
+	if u.StatusType != "idle" {
+		t.Errorf("SessionStart: StatusType = %q, want idle", u.StatusType)
+	}
+}
+
+// TestProvider_StaleBusyDecaysToInactive is the regression guard for a "busy"
+// overlay that never received its clearing Stop (cogitator not the socket owner
+// at finish, CLI killed, or a dropped frame). Once neither the transcript nor a
+// hook has advanced within recencyWindow, the session is no longer "live" and a
+// lingering "busy" must decay to "" so the row renders inactive rather than
+// pinned active for the life of the process.
+func TestProvider_StaleBusyDecaysToInactive(t *testing.T) {
+	sessionID := "aaaabbbb-cccc-dddd-eeee-000000000302"
+	// Old transcript so the poll-derived source is "recent" without a fresh hook.
+	home := buildFixtureHome(t, sessionID, time.Now().Add(-2*time.Hour))
+
+	// Tiny recency window: the busy-setting hook's own lastActivity goes stale
+	// almost immediately, mimicking a long-idle session whose Stop never arrived.
+	p := claudecode.NewProvider(home, 10*time.Second, time.Nanosecond, nil)
+	sink := &hookSink{}
+
+	// PostToolUse → overlay statusType = "busy".
+	p.HandleHookFrameForTest(
+		[]byte(`{"hook_event_name":"PostToolUse","session_id":"`+sessionID+`"}`),
+		sink,
+	)
+
+	// Let the overlay's lastActivity age past the 1ns window.
+	time.Sleep(10 * time.Millisecond)
+
+	// Poll with the session still on disk (so it is never pruned) — the stale
+	// busy must be decayed to "".
+	diskSessions, err := claudecode.ReadSessionsForTest(home)
+	if err != nil {
+		t.Fatalf("ReadSessionsForTest: %v", err)
+	}
+	sink2 := &fakeSink{}
+	p.PollOnceForTest(sink2, diskSessions)
+
+	replaces := sink2.snapshotReplaces()
+	if len(replaces) == 0 {
+		t.Fatal("poll emitted no ReplaceProviderInstance batches")
+	}
+	last := replaces[len(replaces)-1]
+	var found *provider.SessionUpdate
+	for i := range last {
+		if last[i].SessionID == sessionID {
+			u := last[i]
+			found = &u
+		}
+	}
+	if found == nil {
+		t.Fatalf("session %q absent from post-poll replace batch — must stay (on disk)", sessionID)
+	}
+	if found.StatusType == "busy" {
+		t.Errorf("StatusType = busy after going stale — a missed Stop must not pin active forever (stuck-active regression)")
+	}
+	if found.StatusType != "" {
+		t.Errorf("StatusType = %q, want \"\" (decayed)", found.StatusType)
+	}
+}
+
 // TestProvider_EmitsOneUpdatePerSession verifies that a poll cycle emits
 // exactly one ReplaceProviderInstance call carrying all fixture sessions, with
 // no ClearProviderInstance calls and no blank intermediate emissions.
@@ -388,22 +474,24 @@ func TestProvider_PollOnce_OverlayPrecedence(t *testing.T) {
 	p := claudecode.NewProvider(home, 10*time.Second, 30*time.Minute, nil)
 	sink := &hookSink{}
 
-	// Fire a SessionStart hook → overlay statusType = "busy".
+	// Fire a PostToolUse hook → overlay statusType = "busy". A generating event
+	// (not SessionStart, which now maps to idle) sets the hook's lastActivity to
+	// now, so the session is "live" and the busy is not decayed.
 	p.HandleHookFrameForTest(
-		[]byte(`{"hook_event_name":"SessionStart","session_id":"`+sessionID+`"}`),
+		[]byte(`{"hook_event_name":"PostToolUse","session_id":"`+sessionID+`"}`),
 		sink,
 	)
 
 	u, ok := sink.latestForSession(sessionID)
 	if !ok {
-		t.Fatal("no update after SessionStart hook")
+		t.Fatal("no update after PostToolUse hook")
 	}
 	if u.StatusType != "busy" {
-		t.Errorf("after SessionStart hook: StatusType = %q, want busy", u.StatusType)
+		t.Errorf("after PostToolUse hook: StatusType = %q, want busy", u.StatusType)
 	}
 
-	// Run a poll cycle — the session is old (outside recency window) but the
-	// hook overlay must keep it "busy".
+	// Run a poll cycle — the transcript is old (outside recency window) but the
+	// fresh hook keeps the session live, so the overlay must keep it "busy".
 	diskSessions, err := claudecode.ReadSessionsForTest(home)
 	if err != nil {
 		t.Fatalf("ReadSessionsForTest: %v", err)
@@ -539,19 +627,20 @@ func TestProvider_HookDrivenAttention(t *testing.T) {
 		return provider.SessionUpdate{}
 	}
 
-	// SessionStart → busy, no permission.
-	sendHookJSON(t, `{"hook_event_name":"SessionStart","session_id":"`+sessionID+`"}`)
+	// PostToolUse → busy, no permission (a generating event; SessionStart now
+	// maps to idle and is covered by TestProvider_SessionStartIsIdle).
+	sendHookJSON(t, `{"hook_event_name":"PostToolUse","session_id":"`+sessionID+`"}`)
 	u := waitForUpdate(t, func(u provider.SessionUpdate) bool {
 		return u.StatusType == "busy" && !u.HasPermission
 	})
 	if u.StatusType != "busy" {
-		t.Errorf("SessionStart: StatusType = %q, want busy", u.StatusType)
+		t.Errorf("PostToolUse: StatusType = %q, want busy", u.StatusType)
 	}
 	if u.HasPermission {
-		t.Error("SessionStart: HasPermission = true, want false")
+		t.Error("PostToolUse: HasPermission = true, want false")
 	}
 	if u.Provider != harness.KindClaudeCode {
-		t.Errorf("SessionStart: Provider = %q, want %q", u.Provider, harness.KindClaudeCode)
+		t.Errorf("PostToolUse: Provider = %q, want %q", u.Provider, harness.KindClaudeCode)
 	}
 
 	// PermissionRequest → hasPermission=true.
