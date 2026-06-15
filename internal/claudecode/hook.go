@@ -68,7 +68,8 @@ func ListenHooks(ctx context.Context, handler func(raw []byte), logger *slog.Log
 //
 // The authoritative event→status mapping lives in provider.handleHookFrame.
 // Known event names (PascalCase wire format from Claude Code):
-// SessionStart, UserPromptSubmit, PreToolUse, PostToolUse → busy/active
+// UserPromptSubmit, PreToolUse, PostToolUse → busy/active (Claude is generating)
+// SessionStart → idle (session opened/resumed; parked at the prompt, not generating)
 // Stop → idle (teardown: clear busy→idle, NOT row removal)
 // SessionEnd → idle (teardown: transcript persists; poll would resurrect a removed row)
 // Notification with notification_type=permission_prompt → permission

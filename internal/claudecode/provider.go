@@ -227,7 +227,19 @@ func (p *Provider) handleHookFrame(raw []byte, sink provider.Sink) {
 	ov.lastActivity = now
 
 	switch ev.EventName {
-	case "SessionStart", "PostToolUse":
+	case "SessionStart":
+		// A session starting, resuming, or clearing is NOT generating — Claude
+		// is parked at the prompt waiting for the user's first input. Marking it
+		// "busy" here pinned freshly opened/resumed sessions to "active" with no
+		// Stop to follow (a bare resume emits no Stop), so they stuck active.
+		// "active" means in-flight work only (see
+		// .scriptorum/redefine-session-activity); treat start as idle and let the
+		// first UserPromptSubmit/PreToolUse flip it to busy.
+		ov.statusType = "idle"
+		ov.hasPermission = false
+		ov.hasQuestion = false
+
+	case "PostToolUse":
 		ov.statusType = "busy"
 		ov.hasPermission = false
 		ov.hasQuestion = false
@@ -340,6 +352,21 @@ func (p *Provider) mergeToUpdate(s Session, ov hookOverlay, now time.Time) provi
 	// busy/generating only (see .scriptorum/redefine-session-activity); idle
 	// sessions classify as inactive once the hook overlay is absent.
 	statusType := ov.statusType
+
+	// Decay a stale "busy". A hook reports "busy" when Claude starts generating
+	// and the paired Stop/SessionEnd clears it — but that clearing hook is lost
+	// whenever cogitator was not the socket owner at finish time, the CLI was
+	// killed mid-run, or the frame was dropped. Without decay the overlay stays
+	// "busy" for the life of the process, pinning the row to "active"
+	// indefinitely (observed: a session idle for 12h still rendering active). A
+	// real generation streams to the transcript and fires tool hooks
+	// continuously, so it always refreshes activity well inside recencyWindow;
+	// once nothing — transcript mtime nor hook — has advanced within the window
+	// (src != "live"), "busy" can no longer mean "currently generating", so drop
+	// it and let Classify fall back to inactive.
+	if statusType == "busy" && src != "live" {
+		statusType = ""
+	}
 
 	// Use the more recent of poll and hook lastActivity.
 	lastActivity := s.LastActivity
