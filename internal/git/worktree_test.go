@@ -204,6 +204,120 @@ func TestRemoveWorktree_RefusesDirtyWorktree(t *testing.T) {
 	}
 }
 
+// initRemoteWithBranch creates a temporary git repository to serve as a fetch
+// origin. It has an initial commit on "main" and an extra branch named branch
+// carrying one additional commit, then checks "main" back out so the feature
+// branch exists only as a ref. Returns its path.
+func initRemoteWithBranch(t *testing.T, branch string) string {
+	t.Helper()
+	dir := t.TempDir()
+
+	cmds := [][]string{
+		{"git", "init", "-b", "main"},
+		{"git", "config", "user.email", "test@example.com"},
+		{"git", "config", "user.name", "Test"},
+		{"git", "commit", "--allow-empty", "-m", "init"},
+		{"git", "checkout", "-b", branch},
+		{"git", "commit", "--allow-empty", "-m", "feature work"},
+		{"git", "checkout", "main"},
+	}
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("setup %v: %v\n%s", args, err, out)
+		}
+	}
+	return dir
+}
+
+// addOrigin wires remote as the "origin" of repo using the standard fetch
+// refspec, so `git fetch origin <branch>` populates refs/remotes/origin/<branch>.
+func addOrigin(t *testing.T, repo, remote string) {
+	t.Helper()
+	cmd := exec.Command("git", "remote", "add", "origin", remote)
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add origin: %v\n%s", err, out)
+	}
+}
+
+// TestFetchAndAddWorktree_FetchesRemoteBranch verifies the core contract:
+// FetchAndAddWorktree fetches a branch that exists only on origin, checks it out
+// into a new worktree at a canonical path, and sets the new local branch to
+// track origin/<branch>.
+func TestFetchAndAddWorktree_FetchesRemoteBranch(t *testing.T) {
+	const branch = "feature/remote-only"
+	remote := initRemoteWithBranch(t, branch)
+	local := initRepo(t)
+	addOrigin(t, local, remote)
+
+	wtDir := filepath.Join(t.TempDir(), "feature-wt")
+	gotPath, err := git.FetchAndAddWorktree(local, branch, wtDir)
+	if err != nil {
+		t.Fatalf("FetchAndAddWorktree: %v", err)
+	}
+
+	wantPath, err := pathnorm.Canonical(wtDir)
+	if err != nil {
+		t.Fatalf("pathnorm.Canonical(%q): %v", wtDir, err)
+	}
+	if gotPath != wantPath {
+		t.Errorf("returned path %q, want canonical %q", gotPath, wantPath)
+	}
+	if _, err := os.Stat(gotPath); err != nil {
+		t.Errorf("worktree dir %q does not exist after fetch: %v", gotPath, err)
+	}
+
+	// The worktree must check out a local branch named after the remote branch.
+	wts, err := git.ListWorktrees(local)
+	if err != nil {
+		t.Fatalf("ListWorktrees: %v", err)
+	}
+	var found bool
+	for _, wt := range wts {
+		if wt.Path == gotPath {
+			found = true
+			if wt.Branch != branch {
+				t.Errorf("branch: got %q, want %q", wt.Branch, branch)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("new worktree %q not found in list: %v", gotPath, wts)
+	}
+
+	// The new local branch must track origin/<branch> so future pulls/pushes
+	// target the remote it came from.
+	track := exec.Command("git", "rev-parse", "--abbrev-ref", branch+"@{upstream}")
+	track.Dir = local
+	out, err := track.CombinedOutput()
+	if err != nil {
+		t.Fatalf("rev-parse upstream: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "origin/"+branch {
+		t.Errorf("upstream: got %q, want %q", got, "origin/"+branch)
+	}
+}
+
+// TestFetchAndAddWorktree_MissingRemoteBranchErrors verifies that fetching a
+// branch that does not exist on origin returns a non-nil error and creates
+// nothing on disk.
+func TestFetchAndAddWorktree_MissingRemoteBranchErrors(t *testing.T) {
+	remote := initRemoteWithBranch(t, "feature/remote-only")
+	local := initRepo(t)
+	addOrigin(t, local, remote)
+
+	wtDir := filepath.Join(t.TempDir(), "nope-wt")
+	_, err := git.FetchAndAddWorktree(local, "does/not/exist", wtDir)
+	if err == nil {
+		t.Fatal("expected error fetching a nonexistent remote branch, got nil")
+	}
+	if _, statErr := os.Stat(wtDir); statErr == nil {
+		t.Errorf("destination %q was created despite fetch failure", wtDir)
+	}
+}
+
 // TestListWorktrees_BranchNames verifies that branch names with slashes
 // (e.g. "feat/foo") are preserved correctly after stripping the refs/heads/ prefix.
 func TestListWorktrees_BranchNames(t *testing.T) {

@@ -109,12 +109,16 @@ func (f *fakeTmuxOps) KillSession(target tmuxctl.Target) error {
 	return f.killSessionErr
 }
 
-// fakeGitOps records AddWorktree/RemoveWorktree/BranchMergeStatus calls and
-// returns canned results.
+// fakeGitOps records AddWorktree/FetchAndAddWorktree/RemoveWorktree/
+// BranchMergeStatus calls and returns canned results.
 type fakeGitOps struct {
 	addResult string
 	addErr    error
 	addCalls  []addWorktreeCall
+
+	fetchAddResult string
+	fetchAddErr    error
+	fetchAddCalls  []addWorktreeCall
 
 	removeErr   error
 	removeCalls []removeWorktreeCall
@@ -146,6 +150,14 @@ func (f *fakeGitOps) AddWorktree(repoPath, branch, dest string) (string, error) 
 		return f.addResult, f.addErr
 	}
 	return dest, f.addErr
+}
+
+func (f *fakeGitOps) FetchAndAddWorktree(repoPath, branch, dest string) (string, error) {
+	f.fetchAddCalls = append(f.fetchAddCalls, addWorktreeCall{repoPath: repoPath, branch: branch, dest: dest})
+	if f.fetchAddResult != "" {
+		return f.fetchAddResult, f.fetchAddErr
+	}
+	return dest, f.fetchAddErr
 }
 
 func (f *fakeGitOps) RemoveWorktree(repoPath, worktreePath string) error {
@@ -620,7 +632,7 @@ func TestNewWorktreeCmdCallsAddWorktreeAndLaunch(t *testing.T) {
 	gitFake := &fakeGitOps{addResult: "/r-feat"}
 	harnFake := &fakeHarnessOps{argv: []string{"fake", "/r-feat"}}
 
-	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake", tmuxctl.ModeWindow)
+	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake", tmuxctl.ModeWindow, false)
 	msg := runCmd(cmd)
 
 	result, ok := msg.(worktreeCreatedMsg)
@@ -658,7 +670,7 @@ func TestNewWorktreeCmdSessionModePropagates(t *testing.T) {
 	gitFake := &fakeGitOps{addResult: "/r-feat"}
 	harnFake := &fakeHarnessOps{argv: []string{"fake", "/r-feat"}}
 
-	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake", tmuxctl.ModeSession)
+	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake", tmuxctl.ModeSession, false)
 	if _, ok := runCmd(cmd).(worktreeCreatedMsg); !ok {
 		t.Fatal("expected worktreeCreatedMsg")
 	}
@@ -675,7 +687,7 @@ func TestNewWorktreeCmdGitErrorReturnsMsg(t *testing.T) {
 	gitFake := &fakeGitOps{addErr: errors.New("branch already exists")}
 	harnFake := &fakeHarnessOps{}
 
-	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake", tmuxctl.ModeWindow)
+	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake", tmuxctl.ModeWindow, false)
 	msg := runCmd(cmd)
 
 	result, ok := msg.(worktreeCreatedMsg)
@@ -695,7 +707,7 @@ func TestNewWorktreeCmdTmuxUnavailableReturnsMsg(t *testing.T) {
 	gitFake := &fakeGitOps{}
 	harnFake := &fakeHarnessOps{}
 
-	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake", tmuxctl.ModeWindow)
+	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake", tmuxctl.ModeWindow, false)
 	msg := runCmd(cmd)
 
 	result, ok := msg.(worktreeCreatedMsg)
@@ -704,6 +716,116 @@ func TestNewWorktreeCmdTmuxUnavailableReturnsMsg(t *testing.T) {
 	}
 	if !errors.Is(result.err, tmuxctl.ErrNotAvailable) {
 		t.Errorf("expected ErrNotAvailable, got %v", result.err)
+	}
+}
+
+// TestNewWorktreeCmdFromRemoteFetches verifies that when fromRemote is true the
+// command checks the branch out via FetchAndAddWorktree (fetch from origin)
+// rather than AddWorktree (create fresh), while sharing the same launch flow.
+func TestNewWorktreeCmdFromRemoteFetches(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{
+		available:          true,
+		ensureWindowResult: "main:6",
+	}
+	gitFake := &fakeGitOps{fetchAddResult: "/r-feat"}
+	harnFake := &fakeHarnessOps{argv: []string{"fake", "/r-feat"}}
+
+	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake", tmuxctl.ModeWindow, true)
+	msg := runCmd(cmd)
+
+	result, ok := msg.(worktreeCreatedMsg)
+	if !ok {
+		t.Fatalf("expected worktreeCreatedMsg, got %T", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("unexpected error: %v", result.err)
+	}
+	if result.canonDest != "/r-feat" {
+		t.Errorf("canonDest = %q, want /r-feat", result.canonDest)
+	}
+	if len(gitFake.fetchAddCalls) != 1 {
+		t.Fatalf("expected 1 FetchAndAddWorktree call, got %d", len(gitFake.fetchAddCalls))
+	}
+	if gitFake.fetchAddCalls[0].branch != "feat" {
+		t.Errorf("FetchAndAddWorktree branch = %q, want feat", gitFake.fetchAddCalls[0].branch)
+	}
+	if len(gitFake.addCalls) != 0 {
+		t.Errorf("AddWorktree must not be called in the fetch flow, got %d calls", len(gitFake.addCalls))
+	}
+	if len(tmuxFake.ensureWindowCalls) != 1 {
+		t.Errorf("expected 1 EnsureWindow call, got %d", len(tmuxFake.ensureWindowCalls))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 'F' fetch-branch key dispatch
+// ---------------------------------------------------------------------------
+
+// TestFKeyOpensFetchBranchPrompt verifies that pressing 'F' on a repo row opens
+// the branch-name prompt in fetch mode (worktreeFromRemote set) with the repo
+// captured.
+func TestFKeyOpensFetchBranchPrompt(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{available: true}
+	m := makeTestModel(tmuxFake, &fakeGitOps{}, &fakeHarnessOps{}, []workspace.Row{
+		makeRow("/r", "/r", "main", "row-a", workspace.StateStopped, state.AttnInactive, fixedNow),
+	})
+
+	updated, cmd := m.Update(keyMsg("F"))
+	m2 := updated.(model)
+
+	if m2.prompt != promptFetchBranch {
+		t.Errorf("F must enter promptFetchBranch, got %v", m2.prompt)
+	}
+	if !m2.worktreeFromRemote {
+		t.Error("F must set worktreeFromRemote")
+	}
+	if m2.newWorktreeRepo != "/r" {
+		t.Errorf("newWorktreeRepo = %q, want /r", m2.newWorktreeRepo)
+	}
+	if cmd == nil {
+		t.Error("F must return the input-focus cmd")
+	}
+}
+
+// TestFKeyShowsHintWhenTmuxUnavailable verifies 'F' degrades gracefully without
+// tmux: no prompt, no cmd, a tmux hint.
+func TestFKeyShowsHintWhenTmuxUnavailable(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{available: false}
+	m := makeTestModel(tmuxFake, nil, nil, []workspace.Row{
+		makeRow("/r", "/r", "main", "row-a", workspace.StateStopped, state.AttnInactive, time.Time{}),
+	})
+
+	updated, cmd := m.Update(keyMsg("F"))
+	m2 := updated.(model)
+
+	if cmd != nil {
+		t.Error("F with tmux unavailable must return nil cmd")
+	}
+	if m2.prompt != promptIdle {
+		t.Errorf("F with tmux unavailable must stay idle, got %v", m2.prompt)
+	}
+	if !strings.Contains(m2.tmuxHint, "tmux") {
+		t.Errorf("hint must mention tmux, got %q", m2.tmuxHint)
+	}
+}
+
+// TestNKeyClearsFromRemoteFlag verifies the create-fresh path ('n') resets any
+// stale worktreeFromRemote set by a prior interrupted fetch flow.
+func TestNKeyClearsFromRemoteFlag(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{available: true}
+	m := makeTestModel(tmuxFake, &fakeGitOps{}, &fakeHarnessOps{}, []workspace.Row{
+		makeRow("/r", "/r", "main", "row-a", workspace.StateStopped, state.AttnInactive, fixedNow),
+	})
+	m.worktreeFromRemote = true // stale flag from a cancelled 'F'
+
+	updated, _ := m.Update(keyMsg("n"))
+	m2 := updated.(model)
+
+	if m2.prompt != promptNewWorktree {
+		t.Errorf("n must enter promptNewWorktree, got %v", m2.prompt)
+	}
+	if m2.worktreeFromRemote {
+		t.Error("n must clear worktreeFromRemote")
 	}
 }
 

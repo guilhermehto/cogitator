@@ -252,6 +252,52 @@ func TestChooserEnterDispatchesNewWorktreeCmdWithChosenKind(t *testing.T) {
 	}
 }
 
+// TestChooserEnterFetchesWhenFromRemote verifies the chooser dispatches the
+// fetch-from-origin path (FetchAndAddWorktree) when the flow was started by 'F'
+// (worktreeFromRemote set), and resets the flag afterwards.
+func TestChooserEnterFetchesWhenFromRemote(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{available: true, ensureWindowResult: "main:1"}
+	gitFake := &fakeGitOps{fetchAddResult: "/r-feat"}
+	harnFake := &fakeHarnessOpsWithKinds{kinds: []harness.Kind{"codex", "opencode"}}
+
+	m := model{
+		width:                120,
+		input:                newTestInput(),
+		prompt:               promptChooseHarness,
+		newWorktreeRepo:      "/r",
+		newWorktreeBranch:    "feat",
+		worktreeFromRemote:   true,
+		harnessChooserKinds:  []harness.Kind{"codex", "opencode"},
+		harnessChooserCursor: 1, // opencode
+		tmux:                 tmuxFake,
+		gitOp:                gitFake,
+		harnOp:               harnFake,
+	}
+
+	updated, cmd := m.Update(keyMsg("enter"))
+	m2 := updated.(model)
+
+	if m2.prompt != promptIdle {
+		t.Errorf("enter must return to promptIdle, got %v", m2.prompt)
+	}
+	if m2.worktreeFromRemote {
+		t.Error("enter must reset worktreeFromRemote")
+	}
+	if cmd == nil {
+		t.Fatal("enter must return a worktree cmd")
+	}
+
+	if _, ok := runCmd(cmd).(worktreeCreatedMsg); !ok {
+		t.Fatal("expected worktreeCreatedMsg")
+	}
+	if len(gitFake.fetchAddCalls) != 1 {
+		t.Fatalf("expected 1 FetchAndAddWorktree call, got %d", len(gitFake.fetchAddCalls))
+	}
+	if len(gitFake.addCalls) != 0 {
+		t.Errorf("AddWorktree must not be called in the fetch flow, got %d", len(gitFake.addCalls))
+	}
+}
+
 func TestChooserDefaultsToOpencodeWhenNoDefaultHarnessSet(t *testing.T) {
 	ops := &fakeHarnessOpsWithKinds{kinds: []harness.Kind{"codex", "opencode"}}
 	kinds := harnessChooserKinds(ops)

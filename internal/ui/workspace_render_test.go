@@ -681,6 +681,29 @@ func TestPromptNewWorktreeShowsBaseBranchWhenRootRowKnown(t *testing.T) {
 	}
 }
 
+// TestPromptFetchBranchRendersFetchLabel asserts that the 'F' branch prompt
+// shows a fetch-specific label (not the new-worktree label) plus the typed
+// value, so the user can tell the fetch flow apart from 'n'.
+func TestPromptFetchBranchRendersFetchLabel(t *testing.T) {
+	rows := []workspace.Row{
+		makeRow("/repo/a", "/repo/a", "main", "running", workspace.StateRunning, state.AttnActive, fixedNow),
+	}
+	ti := textinput.New()
+	ti.SetValue("feature/remote-only")
+	m := model{width: 200, prompt: promptFetchBranch, input: ti}
+	got := wsStripANSI(m.renderWorkspaceRows(200, rows, 0, fixedNow))
+
+	if !strings.Contains(got, "fetch branch from origin:") {
+		t.Fatalf("sessions pane must contain 'fetch branch from origin:' label, got %q", got)
+	}
+	if !strings.Contains(got, "feature/remote-only") {
+		t.Fatalf("sessions pane must contain typed branch value, got %q", got)
+	}
+	if strings.Contains(got, "new worktree branch:") {
+		t.Fatalf("fetch prompt must not show the new-worktree label, got %q", got)
+	}
+}
+
 // TestTaskPromptLineOmitsWorktreePrompts asserts that taskPromptLine does NOT
 // mirror the worktree branch-name prompt: it is a sessions-pane action and must
 // render in one place only (renderWorkspaceRows), not duplicated in the tasks
@@ -688,7 +711,7 @@ func TestPromptNewWorktreeShowsBaseBranchWhenRootRowKnown(t *testing.T) {
 func TestTaskPromptLineOmitsWorktreePrompts(t *testing.T) {
 	ti := textinput.New()
 	ti.SetValue("feat/task-pane")
-	for _, p := range []promptMode{promptNewWorktree, promptConfirmDeleteWorktree, promptConfirmDeleteWorktree2} {
+	for _, p := range []promptMode{promptNewWorktree, promptFetchBranch, promptConfirmDeleteWorktree, promptConfirmDeleteWorktree2} {
 		m := model{prompt: p, input: ti}
 		if isTaskPrompt(p) {
 			t.Fatalf("isTaskPrompt(%v) must be false", p)

@@ -56,6 +56,36 @@ func AddWorktree(repoPath, branch, dest string) (string, error) {
 	return canonical, nil
 }
 
+// FetchAndAddWorktree fetches branch from the "origin" remote and creates a new
+// worktree at dest that checks it out. It runs `git fetch origin <branch>`
+// followed by `git worktree add --track -b <branch> <dest> origin/<branch>` from
+// repoPath, so the new worktree's local branch tracks the freshly-fetched
+// remote branch.
+//
+// Unlike AddWorktree — which creates a brand-new branch off the current HEAD —
+// this checks out a branch that already exists on origin.
+//
+// The returned path is pathnorm.Canonical of dest evaluated AFTER creation, so
+// it matches the path OpenCode will later report as SessionView.Directory.
+//
+// Returns a non-nil error (and creates nothing) when the fetch fails (e.g. the
+// branch does not exist on origin) or when a local branch named branch already
+// exists.
+func FetchAndAddWorktree(repoPath, branch, dest string) (string, error) {
+	if _, err := runGit(repoPath, "fetch", "origin", branch); err != nil {
+		return "", fmt.Errorf("git fetch origin %s: %w", branch, err)
+	}
+	if _, err := runGit(repoPath, "worktree", "add", "--track", "-b", branch, dest, "origin/"+branch); err != nil {
+		return "", fmt.Errorf("git worktree add: %w", err)
+	}
+
+	canonical, err := pathnorm.Canonical(dest)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize worktree path %q: %w", dest, err)
+	}
+	return canonical, nil
+}
+
 // RemoveWorktree removes the worktree at worktreePath belonging to the
 // repository rooted at repoPath. It runs `git worktree remove <worktreePath>`
 // from repoPath.

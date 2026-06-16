@@ -456,7 +456,7 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 		if m.tmuxHint != "" {
 			b.WriteString("\n" + wtHintStyle.Render(m.tmuxHint))
 		}
-		if m.prompt == promptNewWorktree {
+		if m.prompt == promptNewWorktree || m.prompt == promptFetchBranch {
 			b.WriteString("\n" + m.worktreePromptLine())
 		}
 		if m.prompt == promptConfirmDeleteWorktree || m.prompt == promptConfirmDeleteWorktree2 {
@@ -515,10 +515,11 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 		b.WriteString(wtHintStyle.Render(m.tmuxHint) + "\n")
 	}
 
-	// Render branch-name prompt when the user pressed 'n' to create a worktree.
-	// This must render regardless of m.twAvail — the sessions pane is independent
-	// of taskwarrior. Placed after the hint so it is always the last visible line.
-	if m.prompt == promptNewWorktree {
+	// Render branch-name prompt when the user pressed 'n' (new worktree) or 'F'
+	// (fetch from origin). This must render regardless of m.twAvail — the
+	// sessions pane is independent of taskwarrior. Placed after the hint so it is
+	// always the last visible line.
+	if m.prompt == promptNewWorktree || m.prompt == promptFetchBranch {
 		b.WriteString(m.worktreePromptLine() + "\n")
 	}
 
@@ -587,10 +588,13 @@ func (m model) newWorktreeBase() string {
 }
 
 // worktreePromptLine returns the styled prompt line shown in the sessions pane
-// while the user is typing a branch name for a new worktree ('n' action).
-// It is a shared helper so both the empty-rows and non-empty-rows paths in
-// renderWorkspaceRows produce the same label, and taskPromptLine can reuse it.
+// while the user is typing a branch name for a new worktree ('n') or a branch to
+// fetch from origin ('F'). It is a shared helper so both the empty-rows and
+// non-empty-rows paths in renderWorkspaceRows produce the same label.
 func (m model) worktreePromptLine() string {
+	if m.prompt == promptFetchBranch {
+		return wtHintStyle.Render("fetch branch from origin: ") + m.input.View()
+	}
 	label := "new worktree branch: "
 	if base := m.newWorktreeBase(); base != "" {
 		label = "new worktree off " + base + ": "

@@ -74,6 +74,11 @@ const (
 	// On enter, the branch name is passed to git.AddWorktree + harness launch.
 	// On esc, the prompt is cancelled without creating anything.
 	promptNewWorktree
+	// promptFetchBranch is active while the user types a branch name for 'F'.
+	// It mirrors promptNewWorktree but, on enter, the branch is fetched from
+	// origin and checked out (git.FetchAndAddWorktree) instead of created fresh.
+	// The distinction is carried forward via model.worktreeFromRemote.
+	promptFetchBranch
 	// promptAddRepo is active while the embedded "add repo" fuzzy finder is
 	// open ('A'). cogitator scans $HOME for git repositories; the user filters
 	// the discovered list with the shared text input and selects one to add.
@@ -211,6 +216,7 @@ func launchModeFor(m workspace.LaunchMode) tmuxctl.LaunchMode {
 // gitOps is the injectable seam for git worktree operations.
 type gitOps interface {
 	AddWorktree(repoPath, branch, dest string) (string, error)
+	FetchAndAddWorktree(repoPath, branch, dest string) (string, error)
 	RemoveWorktree(repoPath, worktreePath string) error
 	BranchMergeStatus(repoPath, branch string) (git.MergeState, string)
 }
@@ -220,6 +226,10 @@ type realGitOps struct{}
 
 func (realGitOps) AddWorktree(repoPath, branch, dest string) (string, error) {
 	return git.AddWorktree(repoPath, branch, dest)
+}
+
+func (realGitOps) FetchAndAddWorktree(repoPath, branch, dest string) (string, error) {
+	return git.FetchAndAddWorktree(repoPath, branch, dest)
 }
 
 func (realGitOps) RemoveWorktree(repoPath, worktreePath string) error {
@@ -281,6 +291,12 @@ type model struct {
 	// newWorktreeBranch is the branch name typed in promptNewWorktree, carried
 	// forward to promptChooseHarness so the chooser can dispatch newWorktreeCmd.
 	newWorktreeBranch string
+	// worktreeFromRemote records whether the in-progress new-worktree flow
+	// should fetch the branch from origin ('F') rather than create a fresh
+	// branch off the base ('n'). It is set when the flow begins, read by the
+	// harness chooser when it dispatches the create Cmd, and reset when the flow
+	// completes or is cancelled.
+	worktreeFromRemote bool
 	// harnessChooserKinds is the ordered list of harness kinds shown in the
 	// promptChooseHarness list. Populated when entering the chooser.
 	harnessChooserKinds []harness.Kind
@@ -455,10 +471,31 @@ func launchInner(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl
 	}
 }
 
+// worktreeAddFn selects the worktree-creation function for newWorktreeCmd: the
+// fetch-then-checkout path when fromRemote is true, the create-fresh-branch path
+// otherwise. It prefers the injected gitOp seam and falls back to the
+// package-level git functions when gitOp is nil (zero-value model in tests).
+func worktreeAddFn(gitOp gitOps, fromRemote bool) func(string, string, string) (string, error) {
+	switch {
+	case gitOp != nil && fromRemote:
+		return gitOp.FetchAndAddWorktree
+	case gitOp != nil:
+		return gitOp.AddWorktree
+	case fromRemote:
+		return git.FetchAndAddWorktree
+	default:
+		return git.AddWorktree
+	}
+}
+
 // newWorktreeCmd creates a git worktree for branch under repoPath, then
 // launches the harness in a new tmux window. Returns worktreeCreatedMsg with
 // the canonical post-create dest (the overlay key).
-func newWorktreeCmd(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, branch, harnessKind string, mode tmuxctl.LaunchMode) tea.Cmd {
+//
+// When fromRemote is true the branch is fetched from origin and checked out
+// (git.FetchAndAddWorktree); otherwise a fresh branch is created off the
+// current HEAD (git.AddWorktree). Both paths share the same launch flow.
+func newWorktreeCmd(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, branch, harnessKind string, mode tmuxctl.LaunchMode, fromRemote bool) tea.Cmd {
 	return func() tea.Msg {
 		if ops == nil || !ops.Available() {
 			return worktreeCreatedMsg{err: tmuxctl.ErrNotAvailable}
@@ -468,12 +505,7 @@ func newWorktreeCmd(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, bran
 		// e.g. /home/user/myrepo → /home/user/myrepo-branch
 		dest := filepath.Join(filepath.Dir(repoPath), filepath.Base(repoPath)+"-"+branch)
 
-		var addFn func(string, string, string) (string, error)
-		if gitOp != nil {
-			addFn = gitOp.AddWorktree
-		} else {
-			addFn = git.AddWorktree
-		}
+		addFn := worktreeAddFn(gitOp, fromRemote)
 
 		canonDest, err := addFn(repoPath, branch, dest)
 		if err != nil {
@@ -724,9 +756,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, cmd
 				}
 
-			case promptNewWorktree:
-				// Branch-name prompt for 'n' (new worktree). On enter, advance
-				// to the harness chooser. On esc, cancel.
+			case promptNewWorktree, promptFetchBranch:
+				// Branch-name prompt for 'n' (new worktree) and 'F' (fetch from
+				// origin). On enter, advance to the harness chooser; the fetch-vs-
+				// create distinction is carried by m.worktreeFromRemote. On esc,
+				// cancel.
 				switch msg.String() {
 				case "enter":
 					branch := strings.TrimSpace(m.input.Value())
@@ -738,6 +772,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.input.Blur()
 						m.input.SetValue("")
 						m.newWorktreeRepo = ""
+						m.worktreeFromRemote = false
 						return m, inputCmd
 					}
 					// Carry the branch forward and open the harness chooser.
@@ -764,6 +799,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.input.SetValue("")
 					m.newWorktreeRepo = ""
 					m.newWorktreeBranch = ""
+					m.worktreeFromRemote = false
 					return m, nil
 
 				default:
@@ -787,22 +823,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if chosenKind == "" {
 						chosenKind = string(harness.KindOpenCode)
 					}
+					fromRemote := m.worktreeFromRemote
 					m.prompt = promptIdle
 					m.newWorktreeRepo = ""
 					m.newWorktreeBranch = ""
+					m.worktreeFromRemote = false
 					m.harnessChooserKinds = nil
 					m.harnessChooserCursor = 0
 					launchMode := m.launchMode
 					if wsCfg, err := workspace.LoadConfig(); err == nil {
 						launchMode = launchModeFor(wsCfg.LaunchMode)
 					}
-					actionCmd := newWorktreeCmd(m.tmux, m.gitOp, m.harnOp, repoPath, branch, chosenKind, launchMode)
+					actionCmd := newWorktreeCmd(m.tmux, m.gitOp, m.harnOp, repoPath, branch, chosenKind, launchMode, fromRemote)
 					return m, actionCmd
 
 				case "esc":
 					m.prompt = promptIdle
 					m.newWorktreeRepo = ""
 					m.newWorktreeBranch = ""
+					m.worktreeFromRemote = false
 					m.harnessChooserKinds = nil
 					m.harnessChooserCursor = 0
 					return m, nil
@@ -987,8 +1026,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.newWorktreeRepo = repoPath
+				m.worktreeFromRemote = false
 				m.prompt = promptNewWorktree
 				m.input.Placeholder = "branch name"
+				m.input.SetValue("")
+				focusCmd := m.input.Focus()
+				return m, focusCmd
+
+			case "F":
+				// Fetch a branch from origin into a new worktree: collect the
+				// branch name via prompt, then (after the harness chooser) fetch
+				// and check it out. Mirrors 'n' but sets worktreeFromRemote so the
+				// chooser dispatches the fetch path.
+				tmuxAvail := m.tmux != nil && m.tmux.Available()
+				if !tmuxAvail {
+					m.tmuxHint = "tmux not available — start cogitator inside a tmux session to create worktrees"
+					return m, nil
+				}
+				if len(m.workspaceRows) == 0 {
+					return m, nil
+				}
+				row := m.workspaceRows[m.sessionCursor]
+				// Determine the repo path: use row.Repo if set, else row.Worktree.
+				repoPath := row.Repo
+				if repoPath == "" {
+					repoPath = row.Worktree
+				}
+				if repoPath == "" {
+					return m, nil
+				}
+				m.newWorktreeRepo = repoPath
+				m.worktreeFromRemote = true
+				m.prompt = promptFetchBranch
+				m.input.Placeholder = "branch name to fetch from origin"
 				m.input.SetValue("")
 				focusCmd := m.input.Focus()
 				return m, focusCmd
@@ -1453,7 +1523,7 @@ func (m model) View() string {
 		case m.twAvail:
 			tasksHint = "  ·  T show tasks"
 		}
-		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s recent · A add repo · R rm repo · D del wt%s  ·  q quit",
+		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s recent · A add repo · R rm repo · D del wt · F fetch branch%s  ·  q quit",
 			live, recent, recentMins, m.snap.UpdatedAt.Format("15:04:05"), toggleVerb(m.recentCollapsed), tasksHint)
 	} else {
 		headerHint = fmt.Sprintf("  %d pending  ·  a add · e edit · s start/stop · d done · D del · U undo · j/k move  ·  tab→sessions · T hide tasks  ·  q quit",
