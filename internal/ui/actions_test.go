@@ -210,6 +210,32 @@ func runCmd(cmd tea.Cmd) tea.Msg {
 	return cmd()
 }
 
+// worktreeCreatedFrom runs cmd — which may be a tea.Batch of the action Cmd and
+// the spinner ticker — and returns the first worktreeCreatedMsg produced. It
+// runs batched cmds in order and returns on the first match, so the spinner
+// ticker (which sleeps) is never executed.
+func worktreeCreatedFrom(t *testing.T, cmd tea.Cmd) worktreeCreatedMsg {
+	t.Helper()
+	msg := runCmd(cmd)
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, c := range batch {
+			if c == nil {
+				continue
+			}
+			if wc, ok := c().(worktreeCreatedMsg); ok {
+				return wc
+			}
+		}
+		t.Fatal("no worktreeCreatedMsg produced by batched cmd")
+		return worktreeCreatedMsg{}
+	}
+	if wc, ok := msg.(worktreeCreatedMsg); ok {
+		return wc
+	}
+	t.Fatalf("expected worktreeCreatedMsg, got %T", msg)
+	return worktreeCreatedMsg{}
+}
+
 // makeTestModel builds a model with injected fakes and the given rows.
 // The textinput is initialized so Focus() calls don't panic.
 func makeTestModel(tmux *fakeTmuxOps, gitOp *fakeGitOps, harnOp *fakeHarnessOps, rows []workspace.Row) model {
@@ -826,6 +852,150 @@ func TestNKeyClearsFromRemoteFlag(t *testing.T) {
 	}
 	if m2.worktreeFromRemote {
 		t.Error("n must clear worktreeFromRemote")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Pending-create spinner row
+// ---------------------------------------------------------------------------
+
+func TestInjectPendingCreatesAddsPlaceholderRow(t *testing.T) {
+	rows := []workspace.Row{
+		makeRow("/r", "/r", "main", "", workspace.StateStopped, state.AttnInactive, fixedNow),
+	}
+	pending := map[string]pendingCreate{
+		createKey("/r", "feat"): {repo: "/r", dest: "/r-feat", branch: "feat", fromRemote: true},
+	}
+	got := injectPendingCreates(rows, pending)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(got))
+	}
+	last := got[len(got)-1]
+	if last.State != workspace.StateCreating || last.Branch != "feat" || last.Repo != "/r" {
+		t.Errorf("placeholder row = %+v, want creating /r feat", last)
+	}
+}
+
+// TestInjectPendingCreatesSkipsExistingRow verifies no duplicate placeholder is
+// added once a real row for the same repo+branch has appeared.
+func TestInjectPendingCreatesSkipsExistingRow(t *testing.T) {
+	rows := []workspace.Row{
+		makeRow("/r", "/r-feat", "feat", "sess", workspace.StateRunning, state.AttnActive, fixedNow),
+	}
+	pending := map[string]pendingCreate{
+		createKey("/r", "feat"): {repo: "/r", dest: "/r-feat", branch: "feat"},
+	}
+	got := injectPendingCreates(rows, pending)
+	if len(got) != 1 {
+		t.Fatalf("expected no duplicate row, got %d", len(got))
+	}
+}
+
+func TestClearPendingCreateRemovesRowAndEntry(t *testing.T) {
+	m := makeTestModel(&fakeTmuxOps{available: true}, &fakeGitOps{}, &fakeHarnessOps{}, []workspace.Row{
+		makeRow("/r", "/r", "main", "", workspace.StateStopped, state.AttnInactive, fixedNow),
+	})
+	m.addPendingCreate("/r", "/r-feat", "feat", false)
+	m.workspaceRows = injectPendingCreates(m.workspaceRows, m.pendingCreates)
+	if len(m.workspaceRows) != 2 {
+		t.Fatalf("setup: expected 2 rows, got %d", len(m.workspaceRows))
+	}
+
+	m.clearPendingCreate("/r", "feat")
+	if _, ok := m.pendingCreates[createKey("/r", "feat")]; ok {
+		t.Error("clearPendingCreate must drop the map entry")
+	}
+	for _, r := range m.workspaceRows {
+		if r.State == workspace.StateCreating {
+			t.Fatal("clearPendingCreate must drop the placeholder row")
+		}
+	}
+}
+
+// TestSpinnerTickAdvancesAndStops verifies the spinner ticker advances the frame
+// while a create is pending and stops (resetting the frame) once none remain.
+func TestSpinnerTickAdvancesAndStops(t *testing.T) {
+	m := makeTestModel(&fakeTmuxOps{available: true}, &fakeGitOps{}, &fakeHarnessOps{}, nil)
+	m.addPendingCreate("/r", "/r-feat", "feat", true)
+	m.spinnerActive = true
+
+	updated, cmd := m.Update(spinnerTickMsg(fixedNow))
+	m2 := updated.(model)
+	if m2.spinnerFrame != 1 {
+		t.Errorf("frame must advance while pending, got %d", m2.spinnerFrame)
+	}
+	if cmd == nil {
+		t.Error("spinner must re-arm while a create is pending")
+	}
+
+	m2.clearPendingCreate("/r", "feat")
+	updated2, cmd2 := m2.Update(spinnerTickMsg(fixedNow))
+	m3 := updated2.(model)
+	if m3.spinnerActive {
+		t.Error("spinner must deactivate when no creates remain")
+	}
+	if m3.spinnerFrame != 0 {
+		t.Errorf("frame must reset to 0 when stopping, got %d", m3.spinnerFrame)
+	}
+	if cmd2 != nil {
+		t.Error("spinner must not re-arm when no creates remain")
+	}
+}
+
+func TestWorktreeCreatedMsgClearsPendingCreate(t *testing.T) {
+	m := makeTestModel(&fakeTmuxOps{available: true}, &fakeGitOps{}, &fakeHarnessOps{}, []workspace.Row{
+		makeRow("/r", "/r", "main", "", workspace.StateStopped, state.AttnInactive, fixedNow),
+	})
+	m.addPendingCreate("/r", "/r-feat", "feat", true)
+	m.workspaceRows = injectPendingCreates(m.workspaceRows, m.pendingCreates)
+
+	updated, _ := m.Update(worktreeCreatedMsg{repo: "/r", branch: "feat", err: errors.New("fetch failed")})
+	m2 := updated.(model)
+
+	if _, ok := m2.pendingCreates[createKey("/r", "feat")]; ok {
+		t.Error("worktreeCreatedMsg must clear the pending create")
+	}
+	for _, r := range m2.workspaceRows {
+		if r.State == workspace.StateCreating {
+			t.Fatal("worktreeCreatedMsg must drop the spinner row")
+		}
+	}
+	if m2.tmuxHint == "" {
+		t.Error("a failed create must surface a hint")
+	}
+}
+
+// TestEnterOnCreatingRowDoesNotLaunch verifies the placeholder row is not
+// enterable: enter surfaces a hint and never touches tmux.
+func TestEnterOnCreatingRowDoesNotLaunch(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{available: true}
+	m := makeTestModel(tmuxFake, &fakeGitOps{}, &fakeHarnessOps{}, []workspace.Row{
+		{Repo: "/r", Worktree: "/r-feat", Branch: "feat", State: workspace.StateCreating},
+	})
+
+	updated, cmd := m.Update(keyMsg("enter"))
+	m2 := updated.(model)
+
+	if cmd != nil {
+		t.Error("enter on a creating row must not dispatch a launch")
+	}
+	if len(tmuxFake.ensureWindowCalls) != 0 || len(tmuxFake.findWindowCalls) != 0 {
+		t.Error("enter on a creating row must not touch tmux")
+	}
+	if m2.tmuxHint == "" {
+		t.Error("enter on a creating row must surface a hint")
+	}
+}
+
+func TestCanDeleteWorktreeRejectsCreatingRow(t *testing.T) {
+	ok, reason := canDeleteWorktree(workspace.Row{
+		Repo: "/r", Worktree: "/r-feat", Branch: "feat", State: workspace.StateCreating,
+	})
+	if ok {
+		t.Error("a creating row must not be deletable")
+	}
+	if reason == "" {
+		t.Error("rejection must carry a reason")
 	}
 }
 

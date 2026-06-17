@@ -110,6 +110,10 @@ var (
 	wtBaseStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("63"))
 )
 
+// spinnerFrames are the braille glyphs cycled (one per spinnerTickMsg) on a
+// pending-create row to signal an in-flight worktree create/fetch.
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
 // taskPriorityGlyph maps Taskwarrior priority codes to display glyphs.
 // No entry means the cell is left blank (normal priority).
 var taskPriorityGlyph = map[string]string{
@@ -496,7 +500,12 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 
 		for _, i := range g.rows {
 			row := rows[i]
-			line := formatWorktreeRow(now, row, width-2)
+			var line string
+			if row.State == workspace.StateCreating {
+				line = m.formatCreatingRow(row, width-2)
+			} else {
+				line = formatWorktreeRow(now, row, width-2)
+			}
 			if i == cursor {
 				// Highlight the cursor row with a background band that keeps
 				// the row's per-cell foreground colours (see
@@ -798,6 +807,34 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int) string {
 		padCell(statusCell, colStateW, lipgloss.Left),
 		padCell(titleStr, sessionW, lipgloss.Left),
 		padCell(activityStr, colActivityW, lipgloss.Right),
+	}
+	return strings.Join(cells, strings.Repeat(" ", colGap))
+}
+
+// formatCreatingRow renders an in-flight worktree create/fetch as a muted row
+// with an animated spinner in the status column. The verb reflects the flow
+// ("fetching…" for 'F', "creating…" for 'n'), looked up from pendingCreates so
+// the synthetic Row needs no extra field. The frame index comes from the model
+// so successive spinnerTickMsgs animate it.
+func (m model) formatCreatingRow(row workspace.Row, width int) string {
+	sessionW := worktreeSessionWidth(width)
+
+	glyph := "⠋"
+	if len(spinnerFrames) > 0 {
+		glyph = spinnerFrames[m.spinnerFrame%len(spinnerFrames)]
+	}
+	statusCell := wtStoppedStyle.Render(glyph) + " "
+
+	verb := "creating"
+	if pc, ok := m.pendingCreates[createKey(row.Repo, row.Branch)]; ok && pc.fromRemote {
+		verb = "fetching"
+	}
+	titleStr := wtStoppedStyle.Render(branchLabel(row)) + "  " + wtPathStyle.Render("("+verb+"…)")
+
+	cells := []string{
+		padCell(statusCell, colStateW, lipgloss.Left),
+		padCell(titleStr, sessionW, lipgloss.Left),
+		padCell("", colActivityW, lipgloss.Right),
 	}
 	return strings.Join(cells, strings.Repeat(" ", colGap))
 }

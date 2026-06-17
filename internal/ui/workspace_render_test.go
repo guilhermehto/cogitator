@@ -704,6 +704,56 @@ func TestPromptFetchBranchRendersFetchLabel(t *testing.T) {
 	}
 }
 
+// TestFormatCreatingRowShowsSpinnerAndFetchingVerb asserts the pending-create
+// placeholder renders the branch, the active spinner glyph, and the fetch verb.
+func TestFormatCreatingRowShowsSpinnerAndFetchingVerb(t *testing.T) {
+	m := model{
+		width:        200,
+		spinnerFrame: 0,
+		pendingCreates: map[string]pendingCreate{
+			createKey("/repo/a", "feature/login"): {
+				repo: "/repo/a", dest: "/repo/a-feature/login", branch: "feature/login", fromRemote: true,
+			},
+		},
+	}
+	rows := []workspace.Row{
+		{Repo: "/repo/a", Worktree: "/repo/a-feature/login", Branch: "feature/login", State: workspace.StateCreating},
+	}
+	got := wsStripANSI(m.renderWorkspaceRows(200, rows, 0, fixedNow))
+
+	if !strings.Contains(got, "feature/login") {
+		t.Fatalf("creating row must show the branch, got %q", got)
+	}
+	if !strings.Contains(got, "(fetching…)") {
+		t.Fatalf("fetch flow must show '(fetching…)', got %q", got)
+	}
+	if !strings.Contains(got, spinnerFrames[0]) {
+		t.Fatalf("creating row must show the spinner glyph %q, got %q", spinnerFrames[0], got)
+	}
+}
+
+// TestFormatCreatingRowShowsCreatingVerbForLocalFlow asserts the 'n' (local)
+// flow labels the placeholder "(creating…)" rather than "(fetching…)".
+func TestFormatCreatingRowShowsCreatingVerbForLocalFlow(t *testing.T) {
+	m := model{
+		width: 200,
+		pendingCreates: map[string]pendingCreate{
+			createKey("/repo/a", "feat"): {repo: "/repo/a", dest: "/repo/a-feat", branch: "feat", fromRemote: false},
+		},
+	}
+	rows := []workspace.Row{
+		{Repo: "/repo/a", Worktree: "/repo/a-feat", Branch: "feat", State: workspace.StateCreating},
+	}
+	got := wsStripANSI(m.renderWorkspaceRows(200, rows, 0, fixedNow))
+
+	if !strings.Contains(got, "(creating…)") {
+		t.Fatalf("local flow must show '(creating…)', got %q", got)
+	}
+	if strings.Contains(got, "(fetching…)") {
+		t.Fatalf("local flow must not show '(fetching…)', got %q", got)
+	}
+}
+
 // TestTaskPromptLineOmitsWorktreePrompts asserts that taskPromptLine does NOT
 // mirror the worktree branch-name prompt: it is a sessions-pane action and must
 // render in one place only (renderWorkspaceRows), not duplicated in the tasks

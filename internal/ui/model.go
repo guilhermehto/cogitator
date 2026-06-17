@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -126,10 +127,32 @@ type launchResultMsg struct {
 // succeeds and the harness window has been opened. canonDest is the
 // post-create canonical path (the overlay key). harnessKind is the harness
 // that was launched so the handler can write a create-time roster entry.
+// repo and branch identify the pending-create placeholder row (keyed by
+// repo+branch) so the handler can clear the optimistic spinner row regardless
+// of how dest canonicalises.
 type worktreeCreatedMsg struct {
 	canonDest   string
 	harnessKind string
+	repo        string
+	branch      string
 	err         error
+}
+
+// spinnerTickMsg drives the animated spinner shown on pending-create rows. It
+// fires on spinnerInterval while a worktree creation is in flight and stops
+// re-arming once no creates remain (so it costs nothing when idle).
+type spinnerTickMsg time.Time
+
+// spinnerInterval is the spinner animation cadence. Fast enough to read as
+// motion, slow enough to be cheap.
+const spinnerInterval = 120 * time.Millisecond
+
+// spinnerTickCmd returns a Cmd that fires a spinnerTickMsg after spinnerInterval.
+// It is re-armed in Update only while pending creates remain.
+func spinnerTickCmd() tea.Cmd {
+	return tea.Tick(spinnerInterval, func(t time.Time) tea.Msg {
+		return spinnerTickMsg(t)
+	})
 }
 
 // mergeStatusMsg carries the result of an async branch merge-status probe used
@@ -343,6 +366,18 @@ type model struct {
 	// snapshot rebuild (the worktree still exists on disk until git finishes)
 	// cannot resurrect the row. Entries clear on deletion success or failure.
 	pendingDeletes map[string]workspace.Row
+	// pendingCreates tracks worktrees being created ('n') or fetched ('F') that
+	// do not exist on disk yet, keyed by createKey(repo, branch). Each is shown
+	// as an optimistic spinner row injected into the table until newWorktreeCmd
+	// reports completion. Injected on every row (re)build so a snapshot rebuild
+	// mid-fetch cannot drop the placeholder. Entries clear on success or failure.
+	pendingCreates map[string]pendingCreate
+	// spinnerFrame indexes spinnerFrames for the pending-create animation. Reset
+	// to 0 when the spinner stops so it always restarts from the first frame.
+	spinnerFrame int
+	// spinnerActive is true while a spinnerTickCmd is in flight, so dispatching a
+	// second concurrent create does not start a duplicate ticker.
+	spinnerActive bool
 
 	// Repo finder ('A') state, meaningful only while prompt == promptAddRepo.
 	// repoFinderScanning is true between opening the finder and the scan result
@@ -496,14 +531,24 @@ func worktreeAddFn(gitOp gitOps, fromRemote bool) func(string, string, string) (
 // (git.FetchAndAddWorktree); otherwise a fresh branch is created off the
 // current HEAD (git.AddWorktree). Both paths share the same launch flow.
 func newWorktreeCmd(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, branch, harnessKind string, mode tmuxctl.LaunchMode, fromRemote bool) tea.Cmd {
+	inner := newWorktreeInner(ops, gitOp, harnOp, repoPath, branch, harnessKind, mode, fromRemote)
 	return func() tea.Msg {
+		// Stamp repo+branch on every result (including error paths) so the
+		// Update handler can clear the matching pending-create spinner row.
+		res := inner()
+		res.repo = repoPath
+		res.branch = branch
+		return res
+	}
+}
+
+func newWorktreeInner(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, branch, harnessKind string, mode tmuxctl.LaunchMode, fromRemote bool) func() worktreeCreatedMsg {
+	return func() worktreeCreatedMsg {
 		if ops == nil || !ops.Available() {
 			return worktreeCreatedMsg{err: tmuxctl.ErrNotAvailable}
 		}
 
-		// Derive the destination path as a sibling of the repo named after the branch.
-		// e.g. /home/user/myrepo → /home/user/myrepo-branch
-		dest := filepath.Join(filepath.Dir(repoPath), filepath.Base(repoPath)+"-"+branch)
+		dest := worktreeDest(repoPath, branch)
 
 		addFn := worktreeAddFn(gitOp, fromRemote)
 
@@ -626,6 +671,107 @@ func filterPendingDeletes(rows []workspace.Row, pending map[string]workspace.Row
 	return filtered
 }
 
+// pendingCreate is an in-flight worktree creation, shown as an optimistic
+// spinner row until newWorktreeCmd reports completion. fromRemote distinguishes
+// the 'F' fetch flow ("fetching…") from the 'n' create flow ("creating…").
+type pendingCreate struct {
+	repo       string // canonical repo path (the render group + Row.Repo)
+	dest       string // raw destination path, used as the placeholder Row.Worktree
+	branch     string
+	fromRemote bool
+}
+
+// createKey identifies a pending create by repo and branch. dest is derived
+// from these, but the post-create canonical dest can differ from the raw dest
+// (symlink resolution), so repo+branch is the stable correlation key between
+// dispatch and the worktreeCreatedMsg that clears it.
+func createKey(repo, branch string) string {
+	return repo + "\x00" + branch
+}
+
+// worktreeDest derives a new worktree's destination path: a sibling of the repo
+// named after the branch (e.g. /home/user/myrepo + "feat" → /home/user/myrepo-feat).
+// Shared by newWorktreeCmd and the dispatch site so the placeholder row's path
+// matches the path the worktree is actually created at.
+func worktreeDest(repoPath, branch string) string {
+	return filepath.Join(filepath.Dir(repoPath), filepath.Base(repoPath)+"-"+branch)
+}
+
+// addPendingCreate records an in-flight creation so injectPendingCreates can
+// render its spinner row.
+func (m *model) addPendingCreate(repo, dest, branch string, fromRemote bool) {
+	if m.pendingCreates == nil {
+		m.pendingCreates = map[string]pendingCreate{}
+	}
+	m.pendingCreates[createKey(repo, branch)] = pendingCreate{
+		repo: repo, dest: dest, branch: branch, fromRemote: fromRemote,
+	}
+}
+
+// clearPendingCreate removes the in-flight create for repo+branch and drops its
+// placeholder spinner row from the visible table (so a completed or failed
+// create stops animating immediately, rather than freezing until the next
+// snapshot rebuild). The session cursor is clamped so it never dangles.
+func (m *model) clearPendingCreate(repo, branch string) {
+	delete(m.pendingCreates, createKey(repo, branch))
+	if len(m.workspaceRows) == 0 {
+		return
+	}
+	filtered := m.workspaceRows[:0:0]
+	for _, row := range m.workspaceRows {
+		if row.State == workspace.StateCreating && row.Repo == repo && row.Branch == branch {
+			continue
+		}
+		filtered = append(filtered, row)
+	}
+	m.workspaceRows = filtered
+	if n := len(m.workspaceRows); n == 0 {
+		m.sessionCursor = 0
+	} else if m.sessionCursor >= n {
+		m.sessionCursor = n - 1
+	}
+}
+
+// injectPendingCreates appends a StateCreating placeholder row for every
+// in-flight create not already present in rows. It is applied after every row
+// (re)build so a snapshot rebuild mid-fetch cannot drop the spinner row. The
+// "already present" check matches by repo+branch (any state), so a real row
+// that has appeared, or a placeholder already injected, is never duplicated.
+// Placeholders are appended in a stable repo+branch order to avoid frame-to-
+// frame jitter when several creates run at once.
+func injectPendingCreates(rows []workspace.Row, pending map[string]pendingCreate) []workspace.Row {
+	if len(pending) == 0 {
+		return rows
+	}
+	keys := make([]string, 0, len(pending))
+	for k := range pending {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	out := rows
+	for _, k := range keys {
+		pc := pending[k]
+		present := false
+		for _, row := range rows {
+			if row.Repo == pc.repo && row.Branch == pc.branch {
+				present = true
+				break
+			}
+		}
+		if present {
+			continue
+		}
+		out = append(out, workspace.Row{
+			Repo:     pc.repo,
+			Worktree: pc.dest,
+			Branch:   pc.branch,
+			State:    workspace.StateCreating,
+		})
+	}
+	return out
+}
+
 // canDeleteWorktree reports whether row may be deleted, returning a user-facing
 // reason when it may not. The repository's primary worktree (Worktree == Repo)
 // and rows not associated with a configured repo are protected: git refuses the
@@ -633,6 +779,9 @@ func filterPendingDeletes(rows []workspace.Row, pending map[string]workspace.Row
 func canDeleteWorktree(row workspace.Row) (bool, string) {
 	if row.Worktree == "" {
 		return false, "no worktree selected"
+	}
+	if row.State == workspace.StateCreating {
+		return false, "worktree is still being created"
 	}
 	if row.Repo == "" {
 		return false, "cannot delete: worktree is not part of a configured repo"
@@ -834,8 +983,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if wsCfg, err := workspace.LoadConfig(); err == nil {
 						launchMode = launchModeFor(wsCfg.LaunchMode)
 					}
+					// Insert an optimistic spinner row for the duration of the
+					// create/fetch (which can take seconds on large repos) so the
+					// keypress reads as "working" rather than ignored.
+					m.addPendingCreate(repoPath, worktreeDest(repoPath, branch), branch, fromRemote)
+					m.workspaceRows = injectPendingCreates(m.workspaceRows, m.pendingCreates)
+					var spinnerC tea.Cmd
+					if !m.spinnerActive {
+						m.spinnerActive = true
+						spinnerC = spinnerTickCmd()
+					}
 					actionCmd := newWorktreeCmd(m.tmux, m.gitOp, m.harnOp, repoPath, branch, chosenKind, launchMode, fromRemote)
-					return m, actionCmd
+					return m, tea.Batch(actionCmd, spinnerC)
 
 				case "esc":
 					m.prompt = promptIdle
@@ -1001,6 +1160,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Missing rows cannot be resumed (directory absent from disk).
 				if row.State == workspace.StateMissing {
 					m.tmuxHint = "worktree directory is missing — cannot resume"
+					return m, nil
+				}
+
+				// Pending-create placeholder rows are not on disk yet.
+				if row.State == workspace.StateCreating {
+					m.tmuxHint = "worktree is still being created…"
 					return m, nil
 				}
 
@@ -1226,10 +1391,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case worktreeCreatedMsg:
-		// A new-worktree Cmd completed. On success, write a create-time roster
-		// entry so the harness kind is persisted before any live-discovery
-		// snapshot arrives (Codex sessions are never live-discovered, so without
-		// this write the roster would never record the harness kind).
+		// A new-worktree Cmd completed. Clear its optimistic spinner row first
+		// (whether it succeeded or failed): on success the real worktree row
+		// arrives via the next snapshot rebuild; on failure nothing was created.
+		m.clearPendingCreate(msg.repo, msg.branch)
+		// On success, write a create-time roster entry so the harness kind is
+		// persisted before any live-discovery snapshot arrives (Codex sessions
+		// are never live-discovered, so without this write the roster would never
+		// record the harness kind).
 		if msg.err != nil {
 			m.tmuxHint = fmt.Sprintf("new worktree error: %v", msg.err)
 		} else if msg.canonDest != "" {
@@ -1284,8 +1453,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.added:
 			m.tmuxHint = "added repo: " + filepath.Base(msg.repoPath)
 			// Rebuild rows so the new repo appears immediately rather than
-			// waiting for the next snapshot.
-			m.workspaceRows, m.launchMode = buildWorkspaceRows(m.snap, m.cfg)
+			// waiting for the next snapshot. Reapply the create overlay so an
+			// in-flight fetch's spinner row is not dropped by the rebuild.
+			rows, mode := buildWorkspaceRows(m.snap, m.cfg)
+			m.workspaceRows = injectPendingCreates(rows, m.pendingCreates)
+			m.launchMode = mode
 			if n := len(m.workspaceRows); n == 0 {
 				m.sessionCursor = 0
 			} else if m.sessionCursor >= n {
@@ -1307,8 +1479,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.removed:
 			m.tmuxHint = "removed repo: " + filepath.Base(msg.repoPath)
 			// Rebuild rows so the repo disappears immediately rather than
-			// waiting for the next snapshot.
-			m.workspaceRows, m.launchMode = buildWorkspaceRows(m.snap, m.cfg)
+			// waiting for the next snapshot. Reapply the create overlay so an
+			// in-flight fetch's spinner row is not dropped by the rebuild.
+			rows, mode := buildWorkspaceRows(m.snap, m.cfg)
+			m.workspaceRows = injectPendingCreates(rows, m.pendingCreates)
+			m.launchMode = mode
 			if n := len(m.workspaceRows); n == 0 {
 				m.sessionCursor = 0
 			} else if m.sessionCursor >= n {
@@ -1384,7 +1559,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(next, bellC, buildC)
 
 	case workspaceRowsMsg:
-		m.workspaceRows = filterPendingDeletes(msg.rows, m.pendingDeletes)
+		// Apply both optimistic overlays: drop rows awaiting deletion, and
+		// re-inject placeholder spinner rows for in-flight creates (a freshly
+		// built list never contains either, so they must be reapplied here).
+		rows := filterPendingDeletes(msg.rows, m.pendingDeletes)
+		m.workspaceRows = injectPendingCreates(rows, m.pendingCreates)
 		m.launchMode = msg.launchMode
 		// Clamp cursor so it never points past the end of the new row list.
 		if n := len(m.workspaceRows); n == 0 {
@@ -1405,6 +1584,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// fresh relative timestamps without calling time.Now() on every frame.
 		m.tickNow = time.Time(msg)
 		return m, tickCmd()
+
+	case spinnerTickMsg:
+		// Advance the pending-create spinner. Stop re-arming once no creates
+		// remain so the ticker costs nothing when idle; reset the frame so the
+		// next create starts the animation from the first glyph.
+		if len(m.pendingCreates) == 0 {
+			m.spinnerActive = false
+			m.spinnerFrame = 0
+			return m, nil
+		}
+		m.spinnerFrame++
+		return m, spinnerTickCmd()
 	}
 	return m, nil
 }
@@ -1647,6 +1838,7 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 		debug:           debug,
 		bellSent:        map[rowKey]state.Attention{},
 		pendingDeletes:  map[string]workspace.Row{},
+		pendingCreates:  map[string]pendingCreate{},
 		cfg:             cfg,
 
 		// Inject real implementations for tmux, git, and harness operations.

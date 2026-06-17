@@ -237,13 +237,12 @@ func TestChooserEnterDispatchesNewWorktreeCmdWithChosenKind(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("enter must return a newWorktreeCmd")
 	}
+	if pc, ok := m2.pendingCreates[createKey("/r", "feat")]; !ok || pc.fromRemote {
+		t.Errorf("n flow must record a pending create with fromRemote=false, got %+v ok=%v", pc, ok)
+	}
 
 	// Execute the cmd and verify the result carries the chosen harness kind.
-	msg := runCmd(cmd)
-	result, ok := msg.(worktreeCreatedMsg)
-	if !ok {
-		t.Fatalf("expected worktreeCreatedMsg, got %T", msg)
-	}
+	result := worktreeCreatedFrom(t, cmd)
 	if result.err != nil {
 		t.Fatalf("unexpected error: %v", result.err)
 	}
@@ -286,9 +285,18 @@ func TestChooserEnterFetchesWhenFromRemote(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("enter must return a worktree cmd")
 	}
+	if !m2.spinnerActive {
+		t.Error("dispatching a fetch must start the spinner ticker")
+	}
+	if _, ok := m2.pendingCreates[createKey("/r", "feat")]; !ok {
+		t.Error("dispatching a fetch must record a pending create for /r+feat")
+	}
 
-	if _, ok := runCmd(cmd).(worktreeCreatedMsg); !ok {
-		t.Fatal("expected worktreeCreatedMsg")
+	result := worktreeCreatedFrom(t, cmd)
+	// repo/branch are stamped on the result so the handler can clear the pending
+	// spinner row; verify they round-trip.
+	if result.repo != "/r" || result.branch != "feat" {
+		t.Errorf("result must carry repo+branch, got repo=%q branch=%q", result.repo, result.branch)
 	}
 	if len(gitFake.fetchAddCalls) != 1 {
 		t.Fatalf("expected 1 FetchAndAddWorktree call, got %d", len(gitFake.fetchAddCalls))
