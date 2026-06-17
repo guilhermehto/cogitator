@@ -44,16 +44,25 @@ var ErrListenerOwned = errors.New("hook socket owned by another instance")
 // the invoking tool never surfaces a "hook failed" banner for an absent monitor.
 var ErrListenerUnavailable = errors.New("hook listener unavailable")
 
-// SocketPath returns the Unix-domain socket path for the given filename.
+// RuntimePath returns a path under the runtime directory for the given
+// filename. It is the single source of truth for where cogitator places
+// ephemeral runtime files (hook sockets, the single-instance pidfile).
 //
 // Preference order:
 //  1. $XDG_RUNTIME_DIR/<filename>
 //  2. os.TempDir()/<filename>
-func SocketPath(filename string) string {
+func RuntimePath(filename string) string {
 	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
 		return filepath.Join(dir, filename)
 	}
 	return filepath.Join(os.TempDir(), filename)
+}
+
+// SocketPath returns the Unix-domain socket path for the given filename. It is
+// a thin wrapper over RuntimePath so the socket and pidfile always resolve to
+// the same runtime directory.
+func SocketPath(filename string) string {
+	return RuntimePath(filename)
 }
 
 // Listen binds the Unix-domain socket at sockPath and calls handler for each
