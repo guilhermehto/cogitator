@@ -238,13 +238,6 @@ func legendLine(width int, includeTasks bool) string {
 	return combined
 }
 
-func toggleVerb(collapsed bool) string {
-	if collapsed {
-		return "show"
-	}
-	return "hide"
-}
-
 func (m model) renderAllSessions(width int, rows []state.SessionView, recentByInstance map[string]int) string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Sessions") + "\n")
@@ -866,6 +859,125 @@ func overlayBox(bg string, fieldW, fieldH int, fg string) string {
 		out[i] = leftPart + reset + strings.Repeat(" ", leftPad) + fgLine + reset + rightPart
 	}
 	return strings.Join(out, "\n")
+}
+
+// helpSection is a titled group of keybindings rendered in the help overlay.
+type helpSection struct {
+	title    string
+	bindings [][2]string // {keys, description}
+}
+
+// helpSections is the full keybinding reference shown by the '?' overlay,
+// grouped so related actions read together. Kept in one place so the overlay
+// stays in sync with the Update key handlers.
+var helpSections = []helpSection{
+	{"Sessions", [][2]string{
+		{"j / k · ↑ / ↓", "move cursor"},
+		{"enter", "jump to / resume session"},
+		{"ctrl+P", "switch session (fuzzy find)"},
+		{"a", "show / hide recent sessions"},
+	}},
+	{"Worktrees", [][2]string{
+		{"n", "new worktree"},
+		{"F", "fetch branch from origin"},
+		{"P", "pull (fast-forward)"},
+		{"D", "delete worktree"},
+		{"A", "add repo"},
+		{"R", "remove (untrack) repo"},
+	}},
+	{"Tasks", [][2]string{
+		{"T", "show / hide tasks pane"},
+		{"tab", "switch focus (sessions / tasks)"},
+		{"a", "add task"},
+		{"e", "edit task"},
+		{"s", "start / stop task"},
+		{"d", "mark done"},
+		{"D", "delete task"},
+		{"U", "undo"},
+	}},
+	{"General", [][2]string{
+		{"?", "toggle this help"},
+		{"q / ctrl+C", "quit"},
+	}},
+}
+
+// helpKeyStyle / helpSectionStyle colour the two columns of the help overlay:
+// the key column in the accent colour, section titles bold.
+var (
+	helpKeyStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("63"))
+	helpSectionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("141"))
+)
+
+// renderHelp builds the floating keybinding-reference box drawn over the
+// sessions pane while prompt == promptHelp. It is composited (centred) by the
+// View via overlayBox, mirroring the ctrl+P switcher. The sections are laid out
+// in two columns so the box stays short enough to fit a typical pane. fieldW is
+// the sessions pane's inner width, used to size the box so it fits.
+func renderHelp(fieldW int) string {
+	// Widest key cell across all bindings, so descriptions align in a column.
+	keyW := 0
+	for _, sec := range helpSections {
+		for _, b := range sec.bindings {
+			if w := lipgloss.Width(b[0]); w > keyW {
+				keyW = w
+			}
+		}
+	}
+
+	contentW := fieldW - 10
+	if contentW > 76 {
+		contentW = 76
+	}
+	if contentW < 16 {
+		contentW = max(1, fieldW-4)
+	}
+
+	// Split the sections across two columns. Sessions+Worktrees lead the left
+	// column; Tasks+General the right. The columns are rendered independently
+	// then zipped row-for-row so the box reads top-to-bottom in two streams.
+	const gap = 3
+	colW := max(1, (contentW-gap)/2)
+	left := helpColumn(helpSections[:2], keyW, colW)
+	right := helpColumn(helpSections[2:], keyW, colW)
+
+	var lines []string
+	lines = append(lines, padToWidth(" "+headerStyle.Render("Keybindings"), contentW))
+	lines = append(lines, padToWidth("", contentW))
+	for i := 0; i < max(len(left), len(right)); i++ {
+		l, r := "", ""
+		if i < len(left) {
+			l = left[i]
+		} else {
+			l = padToWidth("", colW)
+		}
+		if i < len(right) {
+			r = right[i]
+		}
+		lines = append(lines, padToWidth(" "+l+strings.Repeat(" ", gap)+r, contentW))
+	}
+	lines = append(lines, padToWidth("", contentW))
+	lines = append(lines, padToWidth(" "+dimStyle.Render("any key to close"), contentW))
+
+	return paletteBoxStyle.Render(strings.Join(lines, "\n"))
+}
+
+// helpColumn renders sections into a slice of fixed-width (colW) lines: a bold
+// section title, one line per binding (key column padded to keyW so the
+// descriptions align), and a blank line between sections.
+func helpColumn(sections []helpSection, keyW, colW int) []string {
+	var lines []string
+	for i, sec := range sections {
+		if i > 0 {
+			lines = append(lines, padToWidth("", colW))
+		}
+		lines = append(lines, padToWidth(helpSectionStyle.Render(sec.title), colW))
+		for _, b := range sec.bindings {
+			key := padCell(helpKeyStyle.Render(b[0]), keyW, lipgloss.Left)
+			row := key + "  " + dimStyle.Render(b[1])
+			lines = append(lines, padToWidth(ansi.Truncate(row, colW, "…"), colW))
+		}
+	}
+	return lines
 }
 
 // worktreeDeletePromptLine returns the styled confirmation line shown while a

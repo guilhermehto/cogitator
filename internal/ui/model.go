@@ -111,6 +111,11 @@ const (
 	// sessions-pane Enter handler, esc cancels. cmd+P is intentionally not bound
 	// because macOS terminals do not forward it to TUI apps.
 	promptSwitchSession
+	// promptHelp is active while the floating help overlay ('?') is open. It
+	// is a passive modal: it lists every keybinding and is dismissed by any
+	// key. No input is collected. Placed last so existing model{} literals in
+	// tests keep their iota values.
+	promptHelp
 )
 
 // launchResultMsg is returned by launchCmd / resumeCmd after the tmux
@@ -1225,6 +1230,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.sessionPaletteCursor = clampIndex(m.sessionPaletteCursor, len(m.sessionPaletteMatches))
 					return m, cmd
 				}
+
+			case promptHelp:
+				// Passive help overlay: any key dismisses it.
+				m.prompt = promptIdle
+				return m, nil
 			}
 		}
 
@@ -1254,6 +1264,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input.Placeholder = "go to session"
 			m.input.SetValue("")
 			return m, m.input.Focus()
+		}
+
+		// (b.2) Help overlay — '?' opens the floating keybinding reference.
+		// Global (works in either pane) and only reachable here when no prompt
+		// is active, since the prompt pre-empt block short-circuits first.
+		if msg.String() == "?" {
+			m.prompt = promptHelp
+			return m, nil
 		}
 
 		// (c) Tasks pane activation and focus swap.
@@ -1937,18 +1955,10 @@ func (m model) View() string {
 	}
 
 	if viewFocus == focusSessions {
-		tasksHint := ""
-		switch {
-		case tasksActive:
-			tasksHint = "  ·  tab→tasks · T hide tasks"
-		case m.twAvail:
-			tasksHint = "  ·  T show tasks"
-		}
-		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  ctrl+P switch · a to %s recent · A add repo · R rm repo · D del wt · F fetch branch · P pull%s  ·  q quit",
-			live, recent, recentMins, m.snap.UpdatedAt.Format("15:04:05"), toggleVerb(m.recentCollapsed), tasksHint)
+		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  ? help",
+			live, recent, recentMins, m.snap.UpdatedAt.Format("15:04:05"))
 	} else {
-		headerHint = fmt.Sprintf("  %d pending  ·  a add · e edit · s start/stop · d done · D del · U undo · j/k move  ·  tab→sessions · T hide tasks  ·  q quit",
-			len(m.tasks))
+		headerHint = fmt.Sprintf("  %d pending  ·  ? help", len(m.tasks))
 	}
 	header := titleStyle.Render("cogitator") + dimStyle.Render(headerHint)
 
@@ -2019,6 +2029,20 @@ func (m model) View() string {
 		}
 		backdrop := m.renderWorkspaceRows(paneW, m.workspaceRows, m.sessionCursor, now)
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderSessionPalette(paneW, sessionsInnerH))
+	case m.prompt == promptHelp:
+		// Render the normal session list as the backdrop, then composite the
+		// floating help box centred over it so the pane stays visible behind.
+		now := m.tickNow
+		if now.IsZero() {
+			now = time.Now()
+		}
+		var backdrop string
+		if len(m.workspaceRows) > 0 {
+			backdrop = m.renderWorkspaceRows(paneW, m.workspaceRows, m.sessionCursor, now)
+		} else {
+			backdrop = m.renderAllSessions(paneW, rows, recentByInstance)
+		}
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, renderHelp(paneW))
 	case m.prompt == promptChooseHarness:
 		sessionContent = m.renderHarnessChooser(paneW, sessionsInnerH)
 	case len(m.workspaceRows) > 0:

@@ -336,8 +336,8 @@ func TestViewHidesTasksPaneWhenInactive(t *testing.T) {
 	if strings.Contains(out, "Tasks") {
 		t.Fatalf("inactive tasks pane should not render Tasks header, got %q", out)
 	}
-	if !strings.Contains(out, "T show tasks") {
-		t.Fatalf("inactive tasks hint should mention T show tasks, got %q", out)
+	if !strings.Contains(out, "? help") {
+		t.Fatalf("header should point at the help overlay, got %q", out)
 	}
 }
 
