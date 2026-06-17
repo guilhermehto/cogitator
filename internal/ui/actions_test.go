@@ -126,6 +126,10 @@ type fakeGitOps struct {
 	mergeState git.MergeState
 	mergeBase  string
 	mergeCalls []mergeStatusCall
+
+	pullResult string
+	pullErr    error
+	pullCalls  []string // worktree paths passed to Pull
 }
 
 type addWorktreeCall struct {
@@ -168,6 +172,11 @@ func (f *fakeGitOps) RemoveWorktree(repoPath, worktreePath string) error {
 func (f *fakeGitOps) BranchMergeStatus(repoPath, branch string) (git.MergeState, string) {
 	f.mergeCalls = append(f.mergeCalls, mergeStatusCall{repoPath: repoPath, branch: branch})
 	return f.mergeState, f.mergeBase
+}
+
+func (f *fakeGitOps) Pull(worktreePath string) (string, error) {
+	f.pullCalls = append(f.pullCalls, worktreePath)
+	return f.pullResult, f.pullErr
 }
 
 // fakeHarnessOps returns a fixed argv for any kind.
