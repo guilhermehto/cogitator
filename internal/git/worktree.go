@@ -72,6 +72,16 @@ func AddWorktree(repoPath, branch, dest string) (string, error) {
 // branch does not exist on origin) or when a local branch named branch already
 // exists.
 func FetchAndAddWorktree(repoPath, branch, dest string) (string, error) {
+	// Register the branch in origin's fetch refspec so the fetch below creates
+	// refs/remotes/origin/<branch>. A full clone's wildcard refspec already
+	// covers every branch (so this is a no-op there), but a single-branch clone
+	// only maps its one branch; without this, the fetch updates FETCH_HEAD only
+	// and "origin/<branch>" fails to resolve in the worktree add. Registering it
+	// is also what lets --track set up @{upstream}, which git validates against
+	// the configured refspec.
+	if _, err := runGit(repoPath, "remote", "set-branches", "--add", "origin", branch); err != nil {
+		return "", fmt.Errorf("git remote set-branches origin %s: %w", branch, err)
+	}
 	if _, err := runGit(repoPath, "fetch", "origin", branch); err != nil {
 		return "", fmt.Errorf("git fetch origin %s: %w", branch, err)
 	}
