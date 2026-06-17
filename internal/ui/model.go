@@ -105,6 +105,12 @@ const (
 	// gate is enough: removal only forgets the repo from cogitator's config —
 	// the repo and its worktrees stay on disk and can be re-added with 'A'.
 	promptConfirmRemoveRepo
+	// promptSwitchSession is active while the ctrl+P session switcher is open.
+	// It presents the worktree rows as a fuzzy-filtered list (matched on repo
+	// name + branch); enter jumps/attaches to the selection exactly like the
+	// sessions-pane Enter handler, esc cancels. cmd+P is intentionally not bound
+	// because macOS terminals do not forward it to TUI apps.
+	promptSwitchSession
 )
 
 // launchResultMsg is returned by launchCmd / resumeCmd after the tmux
@@ -390,6 +396,18 @@ type model struct {
 	repoFinderMatches  []string
 	repoFinderCursor   int
 	repoFinderErr      string
+
+	// Session switcher (ctrl+P) state, meaningful only while
+	// prompt == promptSwitchSession. sessionPaletteRows is a snapshot of the
+	// candidate worktree rows captured when the palette opens; sessionPaletteLabels
+	// is the parallel "repo branch" match text for each row; sessionPaletteMatches
+	// indexes those slices, holding the current fuzzy-filtered view ordered
+	// best-first; sessionPaletteCursor indexes sessionPaletteMatches. Zero values
+	// are safe (palette closed).
+	sessionPaletteRows    []workspace.Row
+	sessionPaletteLabels  []string
+	sessionPaletteMatches []int
+	sessionPaletteCursor  int
 
 	// Injectable seams for tmux, git, and harness operations. Nil values are
 	// replaced with the real implementations in newModel. Tests inject fakes.
@@ -1090,6 +1108,58 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.prompt = promptIdle
 				m.removeRepoTarget = ""
 				return m, nil
+
+			case promptSwitchSession:
+				// Session switcher. Enter jumps to the highlighted row; the
+				// arrow keys (and ctrl+n/p) move the selection; esc closes;
+				// everything else edits the filter query and re-ranks matches.
+				switch msg.String() {
+				case "esc":
+					m.closeSessionPalette()
+					return m, nil
+				case "enter":
+					if len(m.sessionPaletteMatches) == 0 {
+						return m, nil
+					}
+					sel := clampIndex(m.sessionPaletteCursor, len(m.sessionPaletteMatches))
+					row := m.sessionPaletteRows[m.sessionPaletteMatches[sel]]
+					m.closeSessionPalette()
+					// Apply the same guards as the sessions-pane Enter handler.
+					tmuxAvail := m.tmux != nil && m.tmux.Available()
+					if !tmuxAvail {
+						m.tmuxHint = "tmux not available — start cogitator inside a tmux session to use jump/resume"
+						return m, nil
+					}
+					if row.State == workspace.StateMissing {
+						m.tmuxHint = "worktree directory is missing — cannot resume"
+						return m, nil
+					}
+					if row.State == workspace.StateCreating {
+						m.tmuxHint = "worktree is still being created…"
+						return m, nil
+					}
+					// Sync the sessions-pane cursor to the chosen row so the
+					// highlight reflects where the jump landed.
+					for i, r := range m.workspaceRows {
+						if r.Worktree == row.Worktree {
+							m.sessionCursor = i
+							break
+						}
+					}
+					return m, launchCmd(m.tmux, row, m.harnOp, m.launchMode)
+				case "up", "ctrl+p":
+					m.sessionPaletteCursor = clampIndex(m.sessionPaletteCursor-1, len(m.sessionPaletteMatches))
+					return m, nil
+				case "down", "ctrl+n":
+					m.sessionPaletteCursor = clampIndex(m.sessionPaletteCursor+1, len(m.sessionPaletteMatches))
+					return m, nil
+				default:
+					var cmd tea.Cmd
+					m.input, cmd = m.input.Update(msg)
+					m.sessionPaletteMatches = fuzzyMatchIndices(m.input.Value(), m.sessionPaletteLabels)
+					m.sessionPaletteCursor = clampIndex(m.sessionPaletteCursor, len(m.sessionPaletteMatches))
+					return m, cmd
+				}
 			}
 		}
 
@@ -1097,6 +1167,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
+		}
+
+		// (b.1) Session switcher — ctrl+P opens the fuzzy "go to session"
+		// palette over the worktree rows. Global (works regardless of which
+		// pane is focused) and only reachable here when no prompt is active,
+		// since the prompt pre-empt block above short-circuits first.
+		if msg.String() == "ctrl+p" {
+			if len(m.workspaceRows) == 0 {
+				m.tmuxHint = "no sessions to switch to"
+				return m, nil
+			}
+			m.sessionPaletteRows = append([]workspace.Row(nil), m.workspaceRows...)
+			m.sessionPaletteLabels = make([]string, len(m.sessionPaletteRows))
+			for i, row := range m.sessionPaletteRows {
+				m.sessionPaletteLabels[i] = sessionPaletteLabel(row)
+			}
+			m.sessionPaletteMatches = fuzzyMatchIndices("", m.sessionPaletteLabels)
+			m.sessionPaletteCursor = 0
+			m.prompt = promptSwitchSession
+			m.input.Placeholder = "go to session"
+			m.input.SetValue("")
+			return m, m.input.Focus()
 		}
 
 		// (c) Tasks pane activation and focus swap.
@@ -1647,6 +1739,35 @@ func (m *model) closeRepoFinder() {
 	m.repoFinderErr = ""
 }
 
+// closeSessionPalette resets the ctrl+P session switcher back to the idle
+// state, mirroring closeRepoFinder. Callers that need to jump afterwards read
+// the selected row before calling this, since it clears the candidate slices.
+func (m *model) closeSessionPalette() {
+	m.prompt = promptIdle
+	m.input.Blur()
+	m.input.SetValue("")
+	m.sessionPaletteRows = nil
+	m.sessionPaletteLabels = nil
+	m.sessionPaletteMatches = nil
+	m.sessionPaletteCursor = 0
+}
+
+// sessionPaletteLabel builds the fuzzy-match text for a worktree row in the
+// session switcher: the repo's base name and the branch, space-separated. The
+// repo path falls back to the worktree path when Repo is unset, matching the
+// fallback used by the 'n'/'F'/'R' handlers.
+func sessionPaletteLabel(row workspace.Row) string {
+	repo := row.Repo
+	if repo == "" {
+		repo = row.Worktree
+	}
+	label := filepath.Base(repo)
+	if row.Branch != "" {
+		label += " " + row.Branch
+	}
+	return label
+}
+
 // renderHarnessChooser renders the harness-selection list shown in the sessions
 // pane while prompt == promptChooseHarness. The user moves the cursor with
 // up/down and confirms with enter; esc cancels the whole new-worktree flow.
@@ -1714,7 +1835,7 @@ func (m model) View() string {
 		case m.twAvail:
 			tasksHint = "  ·  T show tasks"
 		}
-		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s recent · A add repo · R rm repo · D del wt · F fetch branch%s  ·  q quit",
+		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  ctrl+P switch · a to %s recent · A add repo · R rm repo · D del wt · F fetch branch%s  ·  q quit",
 			live, recent, recentMins, m.snap.UpdatedAt.Format("15:04:05"), toggleVerb(m.recentCollapsed), tasksHint)
 	} else {
 		headerHint = fmt.Sprintf("  %d pending  ·  a add · e edit · s start/stop · d done · D del · U undo · j/k move  ·  tab→sessions · T hide tasks  ·  q quit",
@@ -1780,6 +1901,15 @@ func (m model) View() string {
 	switch {
 	case m.prompt == promptAddRepo:
 		sessionContent = m.renderRepoFinder(paneW, sessionsInnerH)
+	case m.prompt == promptSwitchSession:
+		// Render the worktree list as the backdrop, then composite the floating
+		// switcher box centred over it so the surrounding sessions stay visible.
+		now := m.tickNow
+		if now.IsZero() {
+			now = time.Now()
+		}
+		backdrop := m.renderWorkspaceRows(paneW, m.workspaceRows, m.sessionCursor, now)
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderSessionPalette(paneW, sessionsInnerH))
 	case m.prompt == promptChooseHarness:
 		sessionContent = m.renderHarnessChooser(paneW, sessionsInnerH)
 	case len(m.workspaceRows) > 0:

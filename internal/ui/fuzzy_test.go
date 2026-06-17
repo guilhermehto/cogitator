@@ -59,6 +59,68 @@ func TestFuzzyRank_ContiguousBeatsScattered(t *testing.T) {
 	}
 }
 
+func TestFuzzyMatchIndices_EmptyQueryReturnsAllIndicesInOrder(t *testing.T) {
+	in := []string{"/c", "/a", "/b"}
+	got := fuzzyMatchIndices("  ", in)
+	want := []int{0, 1, 2}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("empty query: got %v, want %v", got, want)
+	}
+}
+
+func TestFuzzyMatchIndices_IndicesAgreeWithFuzzyRank(t *testing.T) {
+	// The indices returned must map, in order, to exactly the values fuzzyRank
+	// returns — they are the same ranking, one by index and one by value.
+	in := []string{"/src/incognito", "/src/cogitator", "/home/notes"}
+	idx := fuzzyMatchIndices("cog", in)
+	ranked := fuzzyRank("cog", in)
+	if len(idx) != len(ranked) {
+		t.Fatalf("length mismatch: indices %v vs ranked %v", idx, ranked)
+	}
+	for i, j := range idx {
+		if in[j] != ranked[i] {
+			t.Errorf("index %d → %q, want %q", i, in[j], ranked[i])
+		}
+	}
+}
+
+func TestFuzzyMatchPositions_AlignsWithLabelRunes(t *testing.T) {
+	// "cm" against "cogitator main": 'c' at 0, 'm' at the start of "main" (8).
+	pos, ok := fuzzyMatchPositions("cm", "cogitator main")
+	if !ok {
+		t.Fatal("expected cm to match")
+	}
+	runes := []rune("cogitator main")
+	if len(pos) != 2 || runes[pos[0]] != 'c' || runes[pos[1]] != 'm' {
+		t.Errorf("positions = %v (runes %c,%c), want indices of 'c' then 'm'", pos, runes[pos[0]], runes[pos[1]])
+	}
+}
+
+func TestFuzzyMatchPositions_CaseInsensitiveEarliestBinding(t *testing.T) {
+	// Greedy earliest binding: the two 'a's bind to the first two 'A'/'a'.
+	pos, ok := fuzzyMatchPositions("AA", "abracadabra")
+	if !ok {
+		t.Fatal("expected aa to match abracadabra")
+	}
+	want := []int{0, 3} // 'a' at 0, next 'a' at 3 (after 'br')
+	if len(pos) != 2 || pos[0] != want[0] || pos[1] != want[1] {
+		t.Errorf("positions = %v, want %v", pos, want)
+	}
+}
+
+func TestFuzzyMatchPositions_NoMatchReturnsFalse(t *testing.T) {
+	if _, ok := fuzzyMatchPositions("xyz", "cogitator"); ok {
+		t.Error("xyz must not match cogitator")
+	}
+}
+
+func TestFuzzyMatchPositions_EmptyQueryMatchesWithNoPositions(t *testing.T) {
+	pos, ok := fuzzyMatchPositions("  ", "anything")
+	if !ok || pos != nil {
+		t.Errorf("empty query: pos=%v ok=%v, want nil,true", pos, ok)
+	}
+}
+
 func TestFuzzyScore_Subsequence(t *testing.T) {
 	if _, ok := fuzzyScore("abc", "xaybzc"); !ok {
 		t.Errorf("abc should be a subsequence of xaybzc")

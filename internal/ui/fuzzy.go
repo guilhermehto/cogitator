@@ -3,6 +3,7 @@ package ui
 import (
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // fuzzyRank filters candidates to those that fuzzily match query — a
@@ -21,21 +22,39 @@ import (
 //
 // Remaining ties break lexicographically for a stable, predictable order.
 func fuzzyRank(query string, candidates []string) []string {
+	idx := fuzzyMatchIndices(query, candidates)
+	out := make([]string, len(idx))
+	for i, j := range idx {
+		out[i] = candidates[j]
+	}
+	return out
+}
+
+// fuzzyMatchIndices ranks candidates exactly like fuzzyRank but returns the
+// matched candidates' indices (best-first) instead of their values, so callers
+// holding a parallel slice (e.g. a row per candidate) can map a match back to
+// its source. An empty (or whitespace-only) query returns every index in input
+// order. The scoring and tiebreaks are identical to fuzzyRank — this is the
+// single shared implementation; fuzzyRank is a thin value-returning wrapper.
+func fuzzyMatchIndices(query string, candidates []string) []int {
 	if strings.TrimSpace(query) == "" {
-		out := make([]string, len(candidates))
-		copy(out, candidates)
+		out := make([]int, len(candidates))
+		for i := range candidates {
+			out[i] = i
+		}
 		return out
 	}
 	q := strings.ToLower(query)
 
 	type scored struct {
+		index int
 		value string
 		score int
 	}
 	matches := make([]scored, 0, len(candidates))
-	for _, c := range candidates {
+	for i, c := range candidates {
 		if s, ok := fuzzyScore(q, strings.ToLower(c)); ok {
-			matches = append(matches, scored{value: c, score: s})
+			matches = append(matches, scored{index: i, value: c, score: s})
 		}
 	}
 	sort.SliceStable(matches, func(i, j int) bool {
@@ -48,11 +67,38 @@ func fuzzyRank(query string, candidates []string) []string {
 		return matches[i].value < matches[j].value
 	})
 
-	out := make([]string, len(matches))
+	out := make([]int, len(matches))
 	for i, m := range matches {
-		out[i] = m.value
+		out[i] = m.index
 	}
 	return out
+}
+
+// fuzzyMatchPositions returns the rune indices in target that query matches as
+// a greedy, earliest-binding subsequence (case-insensitive), and whether query
+// matched at all. The indices align with target's runes so callers can
+// highlight the matched characters in the original (un-lowercased) string. An
+// empty (or whitespace-only) query matches with no positions. The matched
+// decision agrees with fuzzyScore / fuzzyMatchIndices: the same greedy walk
+// decides both whether a candidate matches and where.
+func fuzzyMatchPositions(query, target string) ([]int, bool) {
+	if strings.TrimSpace(query) == "" {
+		return nil, true
+	}
+	qr := []rune(strings.ToLower(query))
+	tr := []rune(target)
+	positions := make([]int, 0, len(qr))
+	qi := 0
+	for ti := 0; ti < len(tr) && qi < len(qr); ti++ {
+		if unicode.ToLower(tr[ti]) == qr[qi] {
+			positions = append(positions, ti)
+			qi++
+		}
+	}
+	if qi != len(qr) {
+		return nil, false
+	}
+	return positions, true
 }
 
 // fuzzyScore reports whether query is a subsequence of target (both already

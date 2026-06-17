@@ -108,6 +108,18 @@ var (
 	// new worktrees ('n') are created. Reuses the accent colour (63) used by the
 	// repo header so the tag reads as the repo's primary checkout.
 	wtBaseStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("63"))
+
+	// paletteMatchStyle highlights the query characters matched within a
+	// session-switcher row, so the user can see why a row matched (typing "cm"
+	// lights the 'c' of the repo and the 'm' of the branch). Bright amber + bold
+	// to stand out over both the normal and the selected-row background.
+	paletteMatchStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
+	// paletteBoxStyle frames the floating ctrl+P switcher: a rounded accent
+	// border drawn around content the caller has already padded to a fixed
+	// width, so the box reads as a modal floating over the session list.
+	paletteBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("63"))
 )
 
 // spinnerFrames are the braille glyphs cycled (one per spinnerTickMsg) on a
@@ -667,6 +679,192 @@ func (m model) renderRepoFinder(width, height int) string {
 	return b.String()
 }
 
+// renderSessionPalette builds the floating ctrl+P switcher box. It is rendered
+// independently of the session list and then composited (centred) over it by
+// the View via overlayBox, so the surrounding sessions stay visible around the
+// modal. fieldW/fieldH are the sessions pane's inner dimensions, used to size
+// the box and window the result list so the whole modal fits the pane.
+//
+// Each row shows the worktree's status glyph and its repo/branch label with the
+// matched query characters highlighted; the selected row carries the same
+// colour-preserving background band the list uses (see highlightSelectedRow),
+// instead of the plain reverse-video used by the repo finder.
+func (m model) renderSessionPalette(fieldW, fieldH int) string {
+	contentW := fieldW - 10
+	if contentW > 56 {
+		contentW = 56
+	}
+	if contentW < 16 {
+		contentW = max(1, fieldW-4)
+	}
+
+	lines := []string{
+		padToWidth(" "+headerStyle.Render("Switch session"), contentW),
+		padToWidth(ansi.Truncate(" "+dimStyle.Render("> ")+m.input.View(), contentW, ""), contentW),
+		"",
+	}
+
+	if len(m.sessionPaletteMatches) == 0 {
+		lines = append(lines, padToWidth(" "+dimStyle.Render("no match"), contentW))
+	} else {
+		// Window the result list around the cursor. The box reserves the title,
+		// query, and a blank line above and a blank + footer below; the rest is
+		// list rows, capped so the bordered box still fits the pane height.
+		maxRows := fieldH - 7
+		if maxRows < 1 {
+			maxRows = 1
+		}
+		listH := min(len(m.sessionPaletteMatches), maxRows)
+		cursor := clampIndex(m.sessionPaletteCursor, len(m.sessionPaletteMatches))
+		start := 0
+		if cursor >= listH {
+			start = cursor - listH + 1
+		}
+		end := min(start+listH, len(m.sessionPaletteMatches))
+
+		query := m.input.Value()
+		for i := start; i < end; i++ {
+			ci := m.sessionPaletteMatches[i]
+			line := padToWidth(m.renderPaletteRow(m.sessionPaletteRows[ci], m.sessionPaletteLabels[ci], query, contentW), contentW)
+			if i == cursor {
+				line = highlightSelectedRow(line)
+			}
+			lines = append(lines, line)
+		}
+	}
+
+	footer := fmt.Sprintf("%d sessions · ↑↓ move · enter go · esc cancel", len(m.sessionPaletteMatches))
+	lines = append(lines, "", padToWidth(" "+dimStyle.Render(footer), contentW))
+
+	return paletteBoxStyle.Render(strings.Join(lines, "\n"))
+}
+
+// renderPaletteRow renders one session-switcher result: the worktree status
+// glyph followed by the repo and branch, with the matched query characters
+// highlighted in place. Colours mirror the session list — accent repo,
+// state-coloured branch — so the switcher reads the same as the pane it jumps
+// into. width is the row's cell budget; the line is ellipsis-truncated to fit.
+// The selection band is applied by the caller.
+func (m model) renderPaletteRow(row workspace.Row, label, query string, width int) string {
+	positions, _ := fuzzyMatchPositions(query, label)
+	matched := make(map[int]bool, len(positions))
+	for _, p := range positions {
+		matched[p] = true
+	}
+
+	// label is "repo branch" (or just "repo"); split on the first space so the
+	// repo and branch segments are styled distinctly while the match positions —
+	// which index the whole label — still line up via the per-segment offset.
+	repoText, branchText := label, ""
+	if sp := strings.IndexByte(label, ' '); sp >= 0 {
+		repoText, branchText = label[:sp], label[sp+1:]
+	}
+
+	line := " " + worktreeStatusCell(row) + highlightSegment(repoText, wtRepoStyle, matched, 0)
+	if branchText != "" {
+		line += " " + highlightSegment(branchText, paletteBranchStyle(row.State), matched, len([]rune(repoText))+1)
+	}
+	return ansi.Truncate(line, width, "…")
+}
+
+// paletteBranchStyle returns the colour for a switcher row's branch text,
+// mirroring how the session list styles a branch by run-state: running branches
+// read in the default foreground, stopped are dimmed, missing/unknown carry
+// their warning colours.
+func paletteBranchStyle(s workspace.RowState) lipgloss.Style {
+	switch s {
+	case workspace.StateRunning:
+		return lipgloss.NewStyle()
+	case workspace.StateMissing:
+		return wtMissingStyle
+	case workspace.StateUnknown:
+		return wtUnknownStyle
+	default:
+		return wtStoppedStyle
+	}
+}
+
+// highlightSegment renders text in base, except runes whose index within the
+// full label is in matched, which render in paletteMatchStyle. offset is the
+// index of text's first rune within the label, so the caller's match positions
+// (which index the whole label) align with this segment. Consecutive runes of
+// the same kind are coalesced into one styled span to limit escape churn.
+func highlightSegment(text string, base lipgloss.Style, matched map[int]bool, offset int) string {
+	if text == "" {
+		return ""
+	}
+	runes := []rune(text)
+	var b strings.Builder
+	for i := 0; i < len(runes); {
+		hit := matched[offset+i]
+		j := i + 1
+		for j < len(runes) && matched[offset+j] == hit {
+			j++
+		}
+		seg := string(runes[i:j])
+		if hit {
+			b.WriteString(paletteMatchStyle.Render(seg))
+		} else {
+			b.WriteString(base.Render(seg))
+		}
+		i = j
+	}
+	return b.String()
+}
+
+// padToWidth right-pads s with spaces to exactly w visible cells (ANSI-aware).
+// Strings already at or beyond w are returned unchanged. Used to square off
+// palette lines so the selection band and box border align regardless of the
+// styling embedded in the line.
+func padToWidth(s string, w int) string {
+	cur := ansi.StringWidth(s)
+	if cur >= w {
+		return s
+	}
+	return s + strings.Repeat(" ", w-cur)
+}
+
+// overlayBox composites fg centred over a fieldW×fieldH backdrop drawn from bg.
+// bg is the session-list content; it is padded to fieldH lines so the box
+// centres within the full pane even when few sessions exist, and trimmed if it
+// is taller. Each line the box covers is rebuilt as
+// [backdrop-left | box | backdrop-right] using ANSI-aware slicing, so the
+// surrounding sessions keep their colours around the modal; lines the box does
+// not cover pass through unchanged. ansi.TruncateLeft replays the SGR codes
+// preceding the cut, so the right backdrop segment keeps its styling.
+func overlayBox(bg string, fieldW, fieldH int, fg string) string {
+	bgLines := strings.Split(bg, "\n")
+	for len(bgLines) < fieldH {
+		bgLines = append(bgLines, "")
+	}
+	bgLines = bgLines[:fieldH]
+
+	fgLines := strings.Split(fg, "\n")
+	fgW := 0
+	for _, l := range fgLines {
+		if w := ansi.StringWidth(l); w > fgW {
+			fgW = w
+		}
+	}
+	top := max(0, (fieldH-len(fgLines))/2)
+	left := max(0, (fieldW-fgW)/2)
+
+	const reset = "\x1b[0m"
+	out := make([]string, len(bgLines))
+	for i, bgLine := range bgLines {
+		if i < top || i >= top+len(fgLines) {
+			out[i] = bgLine
+			continue
+		}
+		fgLine := fgLines[i-top]
+		leftPart := ansi.Truncate(bgLine, left, "")
+		leftPad := max(0, left-ansi.StringWidth(leftPart))
+		rightPart := ansi.TruncateLeft(bgLine, left+ansi.StringWidth(fgLine), "")
+		out[i] = leftPart + reset + strings.Repeat(" ", leftPad) + fgLine + reset + rightPart
+	}
+	return strings.Join(out, "\n")
+}
+
 // worktreeDeletePromptLine returns the styled confirmation line shown while a
 // worktree deletion is being confirmed. The first confirmation is a warning
 // tone; the second is rendered in the error style and spells out that it is
@@ -725,6 +923,34 @@ func sessionTitleSuffix(title string) string {
 	return "  " + wtPathStyle.Render(ansi.Truncate(title, maxSessionTitleW, "…"))
 }
 
+// worktreeStatusCell renders the left-most status column for a worktree row:
+// the live attention badge for a running session, or the run-state glyph
+// (stopped / missing / unknown) otherwise. Shared by the session list and the
+// ctrl+P switcher so both speak the same status vocabulary. The returned cell
+// is glyph + trailing space (two cells wide for single-width glyphs).
+func worktreeStatusCell(row workspace.Row) string {
+	if row.State == workspace.StateRunning {
+		return attnLabel(row.Attention, state.SourceLive)
+	}
+	var glyph string
+	var glyphStyle lipgloss.Style
+	switch row.State {
+	case workspace.StateStopped:
+		glyph = glyphWtStopped
+		glyphStyle = wtStoppedStyle
+	case workspace.StateMissing:
+		glyph = glyphWtMissing
+		glyphStyle = wtMissingStyle
+	case workspace.StateUnknown:
+		glyph = glyphWtUnknown
+		glyphStyle = wtUnknownStyle
+	default:
+		glyph = "·"
+		glyphStyle = dimStyle
+	}
+	return glyphStyle.Render(glyph) + " "
+}
+
 // formatWorktreeRow renders a single workspace.Row as a fixed-width line.
 //
 // Columns are status | session | activity. The status column is left-most so
@@ -735,30 +961,7 @@ func sessionTitleSuffix(title string) string {
 func formatWorktreeRow(now time.Time, row workspace.Row, width int) string {
 	sessionW := worktreeSessionWidth(width)
 
-	// Status column (left-most). Running rows carry a live attention label;
-	// everything else shows the run-state glyph.
-	var statusCell string
-	if row.State == workspace.StateRunning {
-		statusCell = attnLabel(row.Attention, state.SourceLive)
-	} else {
-		var glyph string
-		var glyphStyle lipgloss.Style
-		switch row.State {
-		case workspace.StateStopped:
-			glyph = glyphWtStopped
-			glyphStyle = wtStoppedStyle
-		case workspace.StateMissing:
-			glyph = glyphWtMissing
-			glyphStyle = wtMissingStyle
-		case workspace.StateUnknown:
-			glyph = glyphWtUnknown
-			glyphStyle = wtUnknownStyle
-		default:
-			glyph = "·"
-			glyphStyle = dimStyle
-		}
-		statusCell = glyphStyle.Render(glyph) + " "
-	}
+	statusCell := worktreeStatusCell(row)
 
 	// Title / description column. The branch leads each row (it is what you
 	// navigate by); the session title trails as muted, truncated text.
