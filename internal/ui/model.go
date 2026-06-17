@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -74,6 +75,11 @@ const (
 	// On enter, the branch name is passed to git.AddWorktree + harness launch.
 	// On esc, the prompt is cancelled without creating anything.
 	promptNewWorktree
+	// promptFetchBranch is active while the user types a branch name for 'F'.
+	// It mirrors promptNewWorktree but, on enter, the branch is fetched from
+	// origin and checked out (git.FetchAndAddWorktree) instead of created fresh.
+	// The distinction is carried forward via model.worktreeFromRemote.
+	promptFetchBranch
 	// promptAddRepo is active while the embedded "add repo" fuzzy finder is
 	// open ('A'). cogitator scans $HOME for git repositories; the user filters
 	// the discovered list with the shared text input and selects one to add.
@@ -121,10 +127,32 @@ type launchResultMsg struct {
 // succeeds and the harness window has been opened. canonDest is the
 // post-create canonical path (the overlay key). harnessKind is the harness
 // that was launched so the handler can write a create-time roster entry.
+// repo and branch identify the pending-create placeholder row (keyed by
+// repo+branch) so the handler can clear the optimistic spinner row regardless
+// of how dest canonicalises.
 type worktreeCreatedMsg struct {
 	canonDest   string
 	harnessKind string
+	repo        string
+	branch      string
 	err         error
+}
+
+// spinnerTickMsg drives the animated spinner shown on pending-create rows. It
+// fires on spinnerInterval while a worktree creation is in flight and stops
+// re-arming once no creates remain (so it costs nothing when idle).
+type spinnerTickMsg time.Time
+
+// spinnerInterval is the spinner animation cadence. Fast enough to read as
+// motion, slow enough to be cheap.
+const spinnerInterval = 120 * time.Millisecond
+
+// spinnerTickCmd returns a Cmd that fires a spinnerTickMsg after spinnerInterval.
+// It is re-armed in Update only while pending creates remain.
+func spinnerTickCmd() tea.Cmd {
+	return tea.Tick(spinnerInterval, func(t time.Time) tea.Msg {
+		return spinnerTickMsg(t)
+	})
 }
 
 // mergeStatusMsg carries the result of an async branch merge-status probe used
@@ -211,6 +239,7 @@ func launchModeFor(m workspace.LaunchMode) tmuxctl.LaunchMode {
 // gitOps is the injectable seam for git worktree operations.
 type gitOps interface {
 	AddWorktree(repoPath, branch, dest string) (string, error)
+	FetchAndAddWorktree(repoPath, branch, dest string) (string, error)
 	RemoveWorktree(repoPath, worktreePath string) error
 	BranchMergeStatus(repoPath, branch string) (git.MergeState, string)
 }
@@ -220,6 +249,10 @@ type realGitOps struct{}
 
 func (realGitOps) AddWorktree(repoPath, branch, dest string) (string, error) {
 	return git.AddWorktree(repoPath, branch, dest)
+}
+
+func (realGitOps) FetchAndAddWorktree(repoPath, branch, dest string) (string, error) {
+	return git.FetchAndAddWorktree(repoPath, branch, dest)
 }
 
 func (realGitOps) RemoveWorktree(repoPath, worktreePath string) error {
@@ -281,6 +314,12 @@ type model struct {
 	// newWorktreeBranch is the branch name typed in promptNewWorktree, carried
 	// forward to promptChooseHarness so the chooser can dispatch newWorktreeCmd.
 	newWorktreeBranch string
+	// worktreeFromRemote records whether the in-progress new-worktree flow
+	// should fetch the branch from origin ('F') rather than create a fresh
+	// branch off the base ('n'). It is set when the flow begins, read by the
+	// harness chooser when it dispatches the create Cmd, and reset when the flow
+	// completes or is cancelled.
+	worktreeFromRemote bool
 	// harnessChooserKinds is the ordered list of harness kinds shown in the
 	// promptChooseHarness list. Populated when entering the chooser.
 	harnessChooserKinds []harness.Kind
@@ -327,6 +366,18 @@ type model struct {
 	// snapshot rebuild (the worktree still exists on disk until git finishes)
 	// cannot resurrect the row. Entries clear on deletion success or failure.
 	pendingDeletes map[string]workspace.Row
+	// pendingCreates tracks worktrees being created ('n') or fetched ('F') that
+	// do not exist on disk yet, keyed by createKey(repo, branch). Each is shown
+	// as an optimistic spinner row injected into the table until newWorktreeCmd
+	// reports completion. Injected on every row (re)build so a snapshot rebuild
+	// mid-fetch cannot drop the placeholder. Entries clear on success or failure.
+	pendingCreates map[string]pendingCreate
+	// spinnerFrame indexes spinnerFrames for the pending-create animation. Reset
+	// to 0 when the spinner stops so it always restarts from the first frame.
+	spinnerFrame int
+	// spinnerActive is true while a spinnerTickCmd is in flight, so dispatching a
+	// second concurrent create does not start a duplicate ticker.
+	spinnerActive bool
 
 	// Repo finder ('A') state, meaningful only while prompt == promptAddRepo.
 	// repoFinderScanning is true between opening the finder and the scan result
@@ -455,25 +506,51 @@ func launchInner(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl
 	}
 }
 
+// worktreeAddFn selects the worktree-creation function for newWorktreeCmd: the
+// fetch-then-checkout path when fromRemote is true, the create-fresh-branch path
+// otherwise. It prefers the injected gitOp seam and falls back to the
+// package-level git functions when gitOp is nil (zero-value model in tests).
+func worktreeAddFn(gitOp gitOps, fromRemote bool) func(string, string, string) (string, error) {
+	switch {
+	case gitOp != nil && fromRemote:
+		return gitOp.FetchAndAddWorktree
+	case gitOp != nil:
+		return gitOp.AddWorktree
+	case fromRemote:
+		return git.FetchAndAddWorktree
+	default:
+		return git.AddWorktree
+	}
+}
+
 // newWorktreeCmd creates a git worktree for branch under repoPath, then
 // launches the harness in a new tmux window. Returns worktreeCreatedMsg with
 // the canonical post-create dest (the overlay key).
-func newWorktreeCmd(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, branch, harnessKind string, mode tmuxctl.LaunchMode) tea.Cmd {
+//
+// When fromRemote is true the branch is fetched from origin and checked out
+// (git.FetchAndAddWorktree); otherwise a fresh branch is created off the
+// current HEAD (git.AddWorktree). Both paths share the same launch flow.
+func newWorktreeCmd(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, branch, harnessKind string, mode tmuxctl.LaunchMode, fromRemote bool) tea.Cmd {
+	inner := newWorktreeInner(ops, gitOp, harnOp, repoPath, branch, harnessKind, mode, fromRemote)
 	return func() tea.Msg {
+		// Stamp repo+branch on every result (including error paths) so the
+		// Update handler can clear the matching pending-create spinner row.
+		res := inner()
+		res.repo = repoPath
+		res.branch = branch
+		return res
+	}
+}
+
+func newWorktreeInner(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, branch, harnessKind string, mode tmuxctl.LaunchMode, fromRemote bool) func() worktreeCreatedMsg {
+	return func() worktreeCreatedMsg {
 		if ops == nil || !ops.Available() {
 			return worktreeCreatedMsg{err: tmuxctl.ErrNotAvailable}
 		}
 
-		// Derive the destination path as a sibling of the repo named after the branch.
-		// e.g. /home/user/myrepo → /home/user/myrepo-branch
-		dest := filepath.Join(filepath.Dir(repoPath), filepath.Base(repoPath)+"-"+branch)
+		dest := worktreeDest(repoPath, branch)
 
-		var addFn func(string, string, string) (string, error)
-		if gitOp != nil {
-			addFn = gitOp.AddWorktree
-		} else {
-			addFn = git.AddWorktree
-		}
+		addFn := worktreeAddFn(gitOp, fromRemote)
 
 		canonDest, err := addFn(repoPath, branch, dest)
 		if err != nil {
@@ -594,6 +671,107 @@ func filterPendingDeletes(rows []workspace.Row, pending map[string]workspace.Row
 	return filtered
 }
 
+// pendingCreate is an in-flight worktree creation, shown as an optimistic
+// spinner row until newWorktreeCmd reports completion. fromRemote distinguishes
+// the 'F' fetch flow ("fetching…") from the 'n' create flow ("creating…").
+type pendingCreate struct {
+	repo       string // canonical repo path (the render group + Row.Repo)
+	dest       string // raw destination path, used as the placeholder Row.Worktree
+	branch     string
+	fromRemote bool
+}
+
+// createKey identifies a pending create by repo and branch. dest is derived
+// from these, but the post-create canonical dest can differ from the raw dest
+// (symlink resolution), so repo+branch is the stable correlation key between
+// dispatch and the worktreeCreatedMsg that clears it.
+func createKey(repo, branch string) string {
+	return repo + "\x00" + branch
+}
+
+// worktreeDest derives a new worktree's destination path: a sibling of the repo
+// named after the branch (e.g. /home/user/myrepo + "feat" → /home/user/myrepo-feat).
+// Shared by newWorktreeCmd and the dispatch site so the placeholder row's path
+// matches the path the worktree is actually created at.
+func worktreeDest(repoPath, branch string) string {
+	return filepath.Join(filepath.Dir(repoPath), filepath.Base(repoPath)+"-"+branch)
+}
+
+// addPendingCreate records an in-flight creation so injectPendingCreates can
+// render its spinner row.
+func (m *model) addPendingCreate(repo, dest, branch string, fromRemote bool) {
+	if m.pendingCreates == nil {
+		m.pendingCreates = map[string]pendingCreate{}
+	}
+	m.pendingCreates[createKey(repo, branch)] = pendingCreate{
+		repo: repo, dest: dest, branch: branch, fromRemote: fromRemote,
+	}
+}
+
+// clearPendingCreate removes the in-flight create for repo+branch and drops its
+// placeholder spinner row from the visible table (so a completed or failed
+// create stops animating immediately, rather than freezing until the next
+// snapshot rebuild). The session cursor is clamped so it never dangles.
+func (m *model) clearPendingCreate(repo, branch string) {
+	delete(m.pendingCreates, createKey(repo, branch))
+	if len(m.workspaceRows) == 0 {
+		return
+	}
+	filtered := m.workspaceRows[:0:0]
+	for _, row := range m.workspaceRows {
+		if row.State == workspace.StateCreating && row.Repo == repo && row.Branch == branch {
+			continue
+		}
+		filtered = append(filtered, row)
+	}
+	m.workspaceRows = filtered
+	if n := len(m.workspaceRows); n == 0 {
+		m.sessionCursor = 0
+	} else if m.sessionCursor >= n {
+		m.sessionCursor = n - 1
+	}
+}
+
+// injectPendingCreates appends a StateCreating placeholder row for every
+// in-flight create not already present in rows. It is applied after every row
+// (re)build so a snapshot rebuild mid-fetch cannot drop the spinner row. The
+// "already present" check matches by repo+branch (any state), so a real row
+// that has appeared, or a placeholder already injected, is never duplicated.
+// Placeholders are appended in a stable repo+branch order to avoid frame-to-
+// frame jitter when several creates run at once.
+func injectPendingCreates(rows []workspace.Row, pending map[string]pendingCreate) []workspace.Row {
+	if len(pending) == 0 {
+		return rows
+	}
+	keys := make([]string, 0, len(pending))
+	for k := range pending {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	out := rows
+	for _, k := range keys {
+		pc := pending[k]
+		present := false
+		for _, row := range rows {
+			if row.Repo == pc.repo && row.Branch == pc.branch {
+				present = true
+				break
+			}
+		}
+		if present {
+			continue
+		}
+		out = append(out, workspace.Row{
+			Repo:     pc.repo,
+			Worktree: pc.dest,
+			Branch:   pc.branch,
+			State:    workspace.StateCreating,
+		})
+	}
+	return out
+}
+
 // canDeleteWorktree reports whether row may be deleted, returning a user-facing
 // reason when it may not. The repository's primary worktree (Worktree == Repo)
 // and rows not associated with a configured repo are protected: git refuses the
@@ -601,6 +779,9 @@ func filterPendingDeletes(rows []workspace.Row, pending map[string]workspace.Row
 func canDeleteWorktree(row workspace.Row) (bool, string) {
 	if row.Worktree == "" {
 		return false, "no worktree selected"
+	}
+	if row.State == workspace.StateCreating {
+		return false, "worktree is still being created"
 	}
 	if row.Repo == "" {
 		return false, "cannot delete: worktree is not part of a configured repo"
@@ -724,9 +905,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, cmd
 				}
 
-			case promptNewWorktree:
-				// Branch-name prompt for 'n' (new worktree). On enter, advance
-				// to the harness chooser. On esc, cancel.
+			case promptNewWorktree, promptFetchBranch:
+				// Branch-name prompt for 'n' (new worktree) and 'F' (fetch from
+				// origin). On enter, advance to the harness chooser; the fetch-vs-
+				// create distinction is carried by m.worktreeFromRemote. On esc,
+				// cancel.
 				switch msg.String() {
 				case "enter":
 					branch := strings.TrimSpace(m.input.Value())
@@ -738,6 +921,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.input.Blur()
 						m.input.SetValue("")
 						m.newWorktreeRepo = ""
+						m.worktreeFromRemote = false
 						return m, inputCmd
 					}
 					// Carry the branch forward and open the harness chooser.
@@ -764,6 +948,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.input.SetValue("")
 					m.newWorktreeRepo = ""
 					m.newWorktreeBranch = ""
+					m.worktreeFromRemote = false
 					return m, nil
 
 				default:
@@ -787,22 +972,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if chosenKind == "" {
 						chosenKind = string(harness.KindOpenCode)
 					}
+					fromRemote := m.worktreeFromRemote
 					m.prompt = promptIdle
 					m.newWorktreeRepo = ""
 					m.newWorktreeBranch = ""
+					m.worktreeFromRemote = false
 					m.harnessChooserKinds = nil
 					m.harnessChooserCursor = 0
 					launchMode := m.launchMode
 					if wsCfg, err := workspace.LoadConfig(); err == nil {
 						launchMode = launchModeFor(wsCfg.LaunchMode)
 					}
-					actionCmd := newWorktreeCmd(m.tmux, m.gitOp, m.harnOp, repoPath, branch, chosenKind, launchMode)
-					return m, actionCmd
+					// Insert an optimistic spinner row for the duration of the
+					// create/fetch (which can take seconds on large repos) so the
+					// keypress reads as "working" rather than ignored.
+					m.addPendingCreate(repoPath, worktreeDest(repoPath, branch), branch, fromRemote)
+					m.workspaceRows = injectPendingCreates(m.workspaceRows, m.pendingCreates)
+					var spinnerC tea.Cmd
+					if !m.spinnerActive {
+						m.spinnerActive = true
+						spinnerC = spinnerTickCmd()
+					}
+					actionCmd := newWorktreeCmd(m.tmux, m.gitOp, m.harnOp, repoPath, branch, chosenKind, launchMode, fromRemote)
+					return m, tea.Batch(actionCmd, spinnerC)
 
 				case "esc":
 					m.prompt = promptIdle
 					m.newWorktreeRepo = ""
 					m.newWorktreeBranch = ""
+					m.worktreeFromRemote = false
 					m.harnessChooserKinds = nil
 					m.harnessChooserCursor = 0
 					return m, nil
@@ -965,6 +1163,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 
+				// Pending-create placeholder rows are not on disk yet.
+				if row.State == workspace.StateCreating {
+					m.tmuxHint = "worktree is still being created…"
+					return m, nil
+				}
+
 				return m, launchCmd(m.tmux, row, m.harnOp, m.launchMode)
 
 			case "n":
@@ -987,8 +1191,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.newWorktreeRepo = repoPath
+				m.worktreeFromRemote = false
 				m.prompt = promptNewWorktree
 				m.input.Placeholder = "branch name"
+				m.input.SetValue("")
+				focusCmd := m.input.Focus()
+				return m, focusCmd
+
+			case "F":
+				// Fetch a branch from origin into a new worktree: collect the
+				// branch name via prompt, then (after the harness chooser) fetch
+				// and check it out. Mirrors 'n' but sets worktreeFromRemote so the
+				// chooser dispatches the fetch path.
+				tmuxAvail := m.tmux != nil && m.tmux.Available()
+				if !tmuxAvail {
+					m.tmuxHint = "tmux not available — start cogitator inside a tmux session to create worktrees"
+					return m, nil
+				}
+				if len(m.workspaceRows) == 0 {
+					return m, nil
+				}
+				row := m.workspaceRows[m.sessionCursor]
+				// Determine the repo path: use row.Repo if set, else row.Worktree.
+				repoPath := row.Repo
+				if repoPath == "" {
+					repoPath = row.Worktree
+				}
+				if repoPath == "" {
+					return m, nil
+				}
+				m.newWorktreeRepo = repoPath
+				m.worktreeFromRemote = true
+				m.prompt = promptFetchBranch
+				m.input.Placeholder = "branch name to fetch from origin"
 				m.input.SetValue("")
 				focusCmd := m.input.Focus()
 				return m, focusCmd
@@ -1156,10 +1391,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case worktreeCreatedMsg:
-		// A new-worktree Cmd completed. On success, write a create-time roster
-		// entry so the harness kind is persisted before any live-discovery
-		// snapshot arrives (Codex sessions are never live-discovered, so without
-		// this write the roster would never record the harness kind).
+		// A new-worktree Cmd completed. Clear its optimistic spinner row first
+		// (whether it succeeded or failed): on success the real worktree row
+		// arrives via the next snapshot rebuild; on failure nothing was created.
+		m.clearPendingCreate(msg.repo, msg.branch)
+		// On success, write a create-time roster entry so the harness kind is
+		// persisted before any live-discovery snapshot arrives (Codex sessions
+		// are never live-discovered, so without this write the roster would never
+		// record the harness kind).
 		if msg.err != nil {
 			m.tmuxHint = fmt.Sprintf("new worktree error: %v", msg.err)
 		} else if msg.canonDest != "" {
@@ -1214,8 +1453,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.added:
 			m.tmuxHint = "added repo: " + filepath.Base(msg.repoPath)
 			// Rebuild rows so the new repo appears immediately rather than
-			// waiting for the next snapshot.
-			m.workspaceRows, m.launchMode = buildWorkspaceRows(m.snap, m.cfg)
+			// waiting for the next snapshot. Reapply the create overlay so an
+			// in-flight fetch's spinner row is not dropped by the rebuild.
+			rows, mode := buildWorkspaceRows(m.snap, m.cfg)
+			m.workspaceRows = injectPendingCreates(rows, m.pendingCreates)
+			m.launchMode = mode
 			if n := len(m.workspaceRows); n == 0 {
 				m.sessionCursor = 0
 			} else if m.sessionCursor >= n {
@@ -1237,8 +1479,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.removed:
 			m.tmuxHint = "removed repo: " + filepath.Base(msg.repoPath)
 			// Rebuild rows so the repo disappears immediately rather than
-			// waiting for the next snapshot.
-			m.workspaceRows, m.launchMode = buildWorkspaceRows(m.snap, m.cfg)
+			// waiting for the next snapshot. Reapply the create overlay so an
+			// in-flight fetch's spinner row is not dropped by the rebuild.
+			rows, mode := buildWorkspaceRows(m.snap, m.cfg)
+			m.workspaceRows = injectPendingCreates(rows, m.pendingCreates)
+			m.launchMode = mode
 			if n := len(m.workspaceRows); n == 0 {
 				m.sessionCursor = 0
 			} else if m.sessionCursor >= n {
@@ -1314,7 +1559,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(next, bellC, buildC)
 
 	case workspaceRowsMsg:
-		m.workspaceRows = filterPendingDeletes(msg.rows, m.pendingDeletes)
+		// Apply both optimistic overlays: drop rows awaiting deletion, and
+		// re-inject placeholder spinner rows for in-flight creates (a freshly
+		// built list never contains either, so they must be reapplied here).
+		rows := filterPendingDeletes(msg.rows, m.pendingDeletes)
+		m.workspaceRows = injectPendingCreates(rows, m.pendingCreates)
 		m.launchMode = msg.launchMode
 		// Clamp cursor so it never points past the end of the new row list.
 		if n := len(m.workspaceRows); n == 0 {
@@ -1335,6 +1584,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// fresh relative timestamps without calling time.Now() on every frame.
 		m.tickNow = time.Time(msg)
 		return m, tickCmd()
+
+	case spinnerTickMsg:
+		// Advance the pending-create spinner. Stop re-arming once no creates
+		// remain so the ticker costs nothing when idle; reset the frame so the
+		// next create starts the animation from the first glyph.
+		if len(m.pendingCreates) == 0 {
+			m.spinnerActive = false
+			m.spinnerFrame = 0
+			return m, nil
+		}
+		m.spinnerFrame++
+		return m, spinnerTickCmd()
 	}
 	return m, nil
 }
@@ -1453,7 +1714,7 @@ func (m model) View() string {
 		case m.twAvail:
 			tasksHint = "  ·  T show tasks"
 		}
-		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s recent · A add repo · R rm repo · D del wt%s  ·  q quit",
+		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  a to %s recent · A add repo · R rm repo · D del wt · F fetch branch%s  ·  q quit",
 			live, recent, recentMins, m.snap.UpdatedAt.Format("15:04:05"), toggleVerb(m.recentCollapsed), tasksHint)
 	} else {
 		headerHint = fmt.Sprintf("  %d pending  ·  a add · e edit · s start/stop · d done · D del · U undo · j/k move  ·  tab→sessions · T hide tasks  ·  q quit",
@@ -1577,6 +1838,7 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 		debug:           debug,
 		bellSent:        map[rowKey]state.Attention{},
 		pendingDeletes:  map[string]workspace.Row{},
+		pendingCreates:  map[string]pendingCreate{},
 		cfg:             cfg,
 
 		// Inject real implementations for tmux, git, and harness operations.

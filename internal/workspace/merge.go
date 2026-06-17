@@ -31,6 +31,11 @@ const (
 	// cannot be determined. A tmux window exists for the dir, suggesting the
 	// harness may be alive, but cogitator cannot confirm it.
 	StateUnknown RowState = "unknown"
+	// StateCreating: a worktree is being created ('n') or fetched ('F') and does
+	// not exist on disk yet. Merge never produces this state — it is injected by
+	// the UI as an optimistic placeholder row (rendered with a spinner) for the
+	// duration of newWorktreeCmd, then cleared when creation completes or fails.
+	StateCreating RowState = "creating"
 )
 
 // Row is one entry in the merged worktree list. Every field that is a path

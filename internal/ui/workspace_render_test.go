@@ -681,6 +681,79 @@ func TestPromptNewWorktreeShowsBaseBranchWhenRootRowKnown(t *testing.T) {
 	}
 }
 
+// TestPromptFetchBranchRendersFetchLabel asserts that the 'F' branch prompt
+// shows a fetch-specific label (not the new-worktree label) plus the typed
+// value, so the user can tell the fetch flow apart from 'n'.
+func TestPromptFetchBranchRendersFetchLabel(t *testing.T) {
+	rows := []workspace.Row{
+		makeRow("/repo/a", "/repo/a", "main", "running", workspace.StateRunning, state.AttnActive, fixedNow),
+	}
+	ti := textinput.New()
+	ti.SetValue("feature/remote-only")
+	m := model{width: 200, prompt: promptFetchBranch, input: ti}
+	got := wsStripANSI(m.renderWorkspaceRows(200, rows, 0, fixedNow))
+
+	if !strings.Contains(got, "fetch branch from origin:") {
+		t.Fatalf("sessions pane must contain 'fetch branch from origin:' label, got %q", got)
+	}
+	if !strings.Contains(got, "feature/remote-only") {
+		t.Fatalf("sessions pane must contain typed branch value, got %q", got)
+	}
+	if strings.Contains(got, "new worktree branch:") {
+		t.Fatalf("fetch prompt must not show the new-worktree label, got %q", got)
+	}
+}
+
+// TestFormatCreatingRowShowsSpinnerAndFetchingVerb asserts the pending-create
+// placeholder renders the branch, the active spinner glyph, and the fetch verb.
+func TestFormatCreatingRowShowsSpinnerAndFetchingVerb(t *testing.T) {
+	m := model{
+		width:        200,
+		spinnerFrame: 0,
+		pendingCreates: map[string]pendingCreate{
+			createKey("/repo/a", "feature/login"): {
+				repo: "/repo/a", dest: "/repo/a-feature/login", branch: "feature/login", fromRemote: true,
+			},
+		},
+	}
+	rows := []workspace.Row{
+		{Repo: "/repo/a", Worktree: "/repo/a-feature/login", Branch: "feature/login", State: workspace.StateCreating},
+	}
+	got := wsStripANSI(m.renderWorkspaceRows(200, rows, 0, fixedNow))
+
+	if !strings.Contains(got, "feature/login") {
+		t.Fatalf("creating row must show the branch, got %q", got)
+	}
+	if !strings.Contains(got, "(fetching…)") {
+		t.Fatalf("fetch flow must show '(fetching…)', got %q", got)
+	}
+	if !strings.Contains(got, spinnerFrames[0]) {
+		t.Fatalf("creating row must show the spinner glyph %q, got %q", spinnerFrames[0], got)
+	}
+}
+
+// TestFormatCreatingRowShowsCreatingVerbForLocalFlow asserts the 'n' (local)
+// flow labels the placeholder "(creating…)" rather than "(fetching…)".
+func TestFormatCreatingRowShowsCreatingVerbForLocalFlow(t *testing.T) {
+	m := model{
+		width: 200,
+		pendingCreates: map[string]pendingCreate{
+			createKey("/repo/a", "feat"): {repo: "/repo/a", dest: "/repo/a-feat", branch: "feat", fromRemote: false},
+		},
+	}
+	rows := []workspace.Row{
+		{Repo: "/repo/a", Worktree: "/repo/a-feat", Branch: "feat", State: workspace.StateCreating},
+	}
+	got := wsStripANSI(m.renderWorkspaceRows(200, rows, 0, fixedNow))
+
+	if !strings.Contains(got, "(creating…)") {
+		t.Fatalf("local flow must show '(creating…)', got %q", got)
+	}
+	if strings.Contains(got, "(fetching…)") {
+		t.Fatalf("local flow must not show '(fetching…)', got %q", got)
+	}
+}
+
 // TestTaskPromptLineOmitsWorktreePrompts asserts that taskPromptLine does NOT
 // mirror the worktree branch-name prompt: it is a sessions-pane action and must
 // render in one place only (renderWorkspaceRows), not duplicated in the tasks
@@ -688,7 +761,7 @@ func TestPromptNewWorktreeShowsBaseBranchWhenRootRowKnown(t *testing.T) {
 func TestTaskPromptLineOmitsWorktreePrompts(t *testing.T) {
 	ti := textinput.New()
 	ti.SetValue("feat/task-pane")
-	for _, p := range []promptMode{promptNewWorktree, promptConfirmDeleteWorktree, promptConfirmDeleteWorktree2} {
+	for _, p := range []promptMode{promptNewWorktree, promptFetchBranch, promptConfirmDeleteWorktree, promptConfirmDeleteWorktree2} {
 		m := model{prompt: p, input: ti}
 		if isTaskPrompt(p) {
 			t.Fatalf("isTaskPrompt(%v) must be false", p)

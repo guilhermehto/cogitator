@@ -237,18 +237,72 @@ func TestChooserEnterDispatchesNewWorktreeCmdWithChosenKind(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("enter must return a newWorktreeCmd")
 	}
+	if pc, ok := m2.pendingCreates[createKey("/r", "feat")]; !ok || pc.fromRemote {
+		t.Errorf("n flow must record a pending create with fromRemote=false, got %+v ok=%v", pc, ok)
+	}
 
 	// Execute the cmd and verify the result carries the chosen harness kind.
-	msg := runCmd(cmd)
-	result, ok := msg.(worktreeCreatedMsg)
-	if !ok {
-		t.Fatalf("expected worktreeCreatedMsg, got %T", msg)
-	}
+	result := worktreeCreatedFrom(t, cmd)
 	if result.err != nil {
 		t.Fatalf("unexpected error: %v", result.err)
 	}
 	if result.harnessKind != "codex" {
 		t.Errorf("harnessKind = %q, want codex", result.harnessKind)
+	}
+}
+
+// TestChooserEnterFetchesWhenFromRemote verifies the chooser dispatches the
+// fetch-from-origin path (FetchAndAddWorktree) when the flow was started by 'F'
+// (worktreeFromRemote set), and resets the flag afterwards.
+func TestChooserEnterFetchesWhenFromRemote(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{available: true, ensureWindowResult: "main:1"}
+	gitFake := &fakeGitOps{fetchAddResult: "/r-feat"}
+	harnFake := &fakeHarnessOpsWithKinds{kinds: []harness.Kind{"codex", "opencode"}}
+
+	m := model{
+		width:                120,
+		input:                newTestInput(),
+		prompt:               promptChooseHarness,
+		newWorktreeRepo:      "/r",
+		newWorktreeBranch:    "feat",
+		worktreeFromRemote:   true,
+		harnessChooserKinds:  []harness.Kind{"codex", "opencode"},
+		harnessChooserCursor: 1, // opencode
+		tmux:                 tmuxFake,
+		gitOp:                gitFake,
+		harnOp:               harnFake,
+	}
+
+	updated, cmd := m.Update(keyMsg("enter"))
+	m2 := updated.(model)
+
+	if m2.prompt != promptIdle {
+		t.Errorf("enter must return to promptIdle, got %v", m2.prompt)
+	}
+	if m2.worktreeFromRemote {
+		t.Error("enter must reset worktreeFromRemote")
+	}
+	if cmd == nil {
+		t.Fatal("enter must return a worktree cmd")
+	}
+	if !m2.spinnerActive {
+		t.Error("dispatching a fetch must start the spinner ticker")
+	}
+	if _, ok := m2.pendingCreates[createKey("/r", "feat")]; !ok {
+		t.Error("dispatching a fetch must record a pending create for /r+feat")
+	}
+
+	result := worktreeCreatedFrom(t, cmd)
+	// repo/branch are stamped on the result so the handler can clear the pending
+	// spinner row; verify they round-trip.
+	if result.repo != "/r" || result.branch != "feat" {
+		t.Errorf("result must carry repo+branch, got repo=%q branch=%q", result.repo, result.branch)
+	}
+	if len(gitFake.fetchAddCalls) != 1 {
+		t.Fatalf("expected 1 FetchAndAddWorktree call, got %d", len(gitFake.fetchAddCalls))
+	}
+	if len(gitFake.addCalls) != 0 {
+		t.Errorf("AddWorktree must not be called in the fetch flow, got %d", len(gitFake.addCalls))
 	}
 }
 
