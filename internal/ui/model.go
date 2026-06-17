@@ -248,6 +248,7 @@ type gitOps interface {
 	FetchAndAddWorktree(repoPath, branch, dest string) (string, error)
 	RemoveWorktree(repoPath, worktreePath string) error
 	BranchMergeStatus(repoPath, branch string) (git.MergeState, string)
+	Pull(worktreePath string) (string, error)
 }
 
 // realGitOps delegates to the package-level git functions.
@@ -267,6 +268,10 @@ func (realGitOps) RemoveWorktree(repoPath, worktreePath string) error {
 
 func (realGitOps) BranchMergeStatus(repoPath, branch string) (git.MergeState, string) {
 	return git.BranchMergeStatus(repoPath, branch)
+}
+
+func (realGitOps) Pull(worktreePath string) (string, error) {
+	return git.Pull(worktreePath)
 }
 
 // harnessOps is the injectable seam for harness registry lookups.
@@ -384,6 +389,12 @@ type model struct {
 	// spinnerActive is true while a spinnerTickCmd is in flight, so dispatching a
 	// second concurrent create does not start a duplicate ticker.
 	spinnerActive bool
+	// pulling is the set of canonical worktree paths with an in-flight
+	// `git pull --ff-only` ('P'). Each is rendered with the animated spinner and
+	// a "(pulling…)" suffix until pullCmd reports completion. Keyed by worktree
+	// path so a repeated 'P' on the same row is ignored and the pullFinishedMsg
+	// can clear the matching indicator. Reads on a nil map are safe (closed).
+	pulling map[string]bool
 
 	// Repo finder ('A') state, meaningful only while prompt == promptAddRepo.
 	// repoFinderScanning is true between opening the finder and the scan result
@@ -647,6 +658,60 @@ func deleteWorktreeCmd(ops tmuxOps, gitOp gitOps, repo, path string, mode tmuxct
 		}
 		return worktreeDeletedMsg{path: path}
 	}
+}
+
+// pullFinishedMsg is returned by pullCmd after `git pull --ff-only` completes
+// for the worktree at path. branch is the branch that was pulled (used to phrase
+// the status hint); summary is git's one-line result on success; err is non-nil
+// when the pull failed (e.g. diverged history, no upstream, network error). path
+// tags the result so the handler can clear the matching in-flight indicator.
+type pullFinishedMsg struct {
+	path    string
+	branch  string
+	summary string
+	err     error
+}
+
+// pullCmd fast-forwards the branch checked out in the worktree at path off the
+// UI goroutine, reporting the outcome as a pullFinishedMsg tagged with path. It
+// prefers the injected gitOp seam and falls back to the package-level git.Pull
+// when gitOp is nil (zero-value model in tests).
+func pullCmd(gitOp gitOps, path, branch string) tea.Cmd {
+	return func() tea.Msg {
+		pullFn := git.Pull
+		if gitOp != nil {
+			pullFn = gitOp.Pull
+		}
+		summary, err := pullFn(path)
+		return pullFinishedMsg{path: path, branch: branch, summary: summary, err: err}
+	}
+}
+
+// addPulling records an in-flight pull for the worktree at path so the row
+// renders its spinner and a repeated 'P' is ignored while it is running.
+func (m *model) addPulling(path string) {
+	if m.pulling == nil {
+		m.pulling = map[string]bool{}
+	}
+	m.pulling[path] = true
+}
+
+// canPullWorktree reports whether the branch in row's worktree can be pulled,
+// returning a user-facing reason when it cannot. A worktree that is not yet on
+// disk (creating) or whose directory is missing has nowhere to run git; a
+// detached HEAD (empty branch) has no upstream to fast-forward from.
+func canPullWorktree(row workspace.Row) (bool, string) {
+	switch {
+	case row.Worktree == "":
+		return false, "no worktree selected"
+	case row.State == workspace.StateCreating:
+		return false, "worktree is still being created"
+	case row.State == workspace.StateMissing:
+		return false, "worktree directory is missing — cannot pull"
+	case row.Branch == "":
+		return false, "cannot pull: detached HEAD has no upstream"
+	}
+	return true, ""
 }
 
 // removeWorktreeRow optimistically drops target's row from the visible table
@@ -1368,6 +1433,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.removeRepoTarget = row.Repo
 				m.prompt = promptConfirmRemoveRepo
 				return m, nil
+
+			case "P":
+				// Pull latest into the highlighted worktree's branch via
+				// `git pull --ff-only`. Handy for refreshing a base branch before
+				// branching a new worktree off it. tmux is not required — this is
+				// a pure git operation.
+				if len(m.workspaceRows) == 0 {
+					return m, nil
+				}
+				row := m.workspaceRows[m.sessionCursor]
+				if ok, reason := canPullWorktree(row); !ok {
+					m.tmuxHint = reason
+					return m, nil
+				}
+				if m.pulling[row.Worktree] {
+					// A pull for this worktree is already in flight; ignore the
+					// repeated keypress rather than dispatching a duplicate.
+					return m, nil
+				}
+				m.addPulling(row.Worktree)
+				var spinnerC tea.Cmd
+				if !m.spinnerActive {
+					m.spinnerActive = true
+					spinnerC = spinnerTickCmd()
+				}
+				return m, tea.Batch(pullCmd(m.gitOp, row.Worktree, row.Branch), spinnerC)
 			}
 			return m, nil
 		}
@@ -1628,6 +1719,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case pullFinishedMsg:
+		// Clear the in-flight indicator and surface the outcome as a transient
+		// hint (the next snapshot rebuild reconciles the row's real state).
+		delete(m.pulling, msg.path)
+		branch := msg.branch
+		if branch == "" {
+			branch = "branch"
+		}
+		switch {
+		case msg.err != nil:
+			m.tmuxHint = fmt.Sprintf("pull %s failed: %v", branch, msg.err)
+		case msg.summary != "":
+			m.tmuxHint = fmt.Sprintf("pulled %s: %s", branch, msg.summary)
+		default:
+			m.tmuxHint = "pulled " + branch
+		}
+		return m, nil
+
 	case snapshotMsg:
 		m.snap = state.Snapshot(msg)
 		// Re-arm the snapshot listener and handle bell transitions immediately;
@@ -1678,10 +1787,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickCmd()
 
 	case spinnerTickMsg:
-		// Advance the pending-create spinner. Stop re-arming once no creates
-		// remain so the ticker costs nothing when idle; reset the frame so the
-		// next create starts the animation from the first glyph.
-		if len(m.pendingCreates) == 0 {
+		// Advance the spinner shared by pending creates and in-flight pulls. Stop
+		// re-arming once neither remains so the ticker costs nothing when idle;
+		// reset the frame so the next operation starts from the first glyph.
+		if len(m.pendingCreates) == 0 && len(m.pulling) == 0 {
 			m.spinnerActive = false
 			m.spinnerFrame = 0
 			return m, nil
@@ -1835,7 +1944,7 @@ func (m model) View() string {
 		case m.twAvail:
 			tasksHint = "  ·  T show tasks"
 		}
-		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  ctrl+P switch · a to %s recent · A add repo · R rm repo · D del wt · F fetch branch%s  ·  q quit",
+		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  ctrl+P switch · a to %s recent · A add repo · R rm repo · D del wt · F fetch branch · P pull%s  ·  q quit",
 			live, recent, recentMins, m.snap.UpdatedAt.Format("15:04:05"), toggleVerb(m.recentCollapsed), tasksHint)
 	} else {
 		headerHint = fmt.Sprintf("  %d pending  ·  a add · e edit · s start/stop · d done · D del · U undo · j/k move  ·  tab→sessions · T hide tasks  ·  q quit",
@@ -1969,6 +2078,7 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 		bellSent:        map[rowKey]state.Attention{},
 		pendingDeletes:  map[string]workspace.Row{},
 		pendingCreates:  map[string]pendingCreate{},
+		pulling:         map[string]bool{},
 		cfg:             cfg,
 
 		// Inject real implementations for tmux, git, and harness operations.

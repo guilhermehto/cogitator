@@ -96,6 +96,34 @@ func FetchAndAddWorktree(repoPath, branch, dest string) (string, error) {
 	return canonical, nil
 }
 
+// Pull fast-forwards the branch checked out in the worktree at worktreePath to
+// its configured upstream by running `git pull --ff-only` there.
+//
+// --ff-only keeps the pull non-interactive and side-effect-free: rather than
+// creating a merge commit or opening an editor, git returns a non-nil error
+// when the branch has diverged from — or has no — upstream. Callers should
+// surface that error to the user. On success it returns a one-line summary of
+// git's output ("Already up to date." or the "Updating <range>" fast-forward
+// line) suitable for a transient status hint.
+func Pull(worktreePath string) (string, error) {
+	out, err := runGit(worktreePath, "pull", "--ff-only")
+	if err != nil {
+		return "", fmt.Errorf("git pull: %w", err)
+	}
+	return firstNonEmptyLine(out), nil
+}
+
+// firstNonEmptyLine returns the first non-blank line of s, trimmed of
+// surrounding whitespace, or "" when s holds no non-blank line.
+func firstNonEmptyLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 // RemoveWorktree removes the worktree at worktreePath belonging to the
 // repository rooted at repoPath. It runs `git worktree remove <worktreePath>`
 // from repoPath.

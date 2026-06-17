@@ -237,6 +237,7 @@ minimal hook variant, and `CODEX_HOME` override), and
 | `D` | Tasks pane focused | prompt to delete the selected task (confirm with `y`) |
 | `U` | Tasks pane focused | undo the last Taskwarrior mutation |
 | `a` | Sessions pane focused | toggle collapsed/expanded recent sessions |
+| `P` | Sessions pane focused | pull latest into the highlighted worktree's branch (`git pull --ff-only`); handy for refreshing a base branch before branching off it |
 | `Esc` | inside add/edit prompt | cancel the prompt without quitting |
 | `Enter` | inside add/edit prompt | submit the prompt |
 

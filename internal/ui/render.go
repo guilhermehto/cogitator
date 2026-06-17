@@ -75,9 +75,9 @@ const (
 	glyphTaskActive = "\U000f040a" // 󰐊 play
 
 	// Workspace / worktree row glyphs.
-	glyphWtStopped   = "\U000f0766" // 󰝦 same as glyphInactive — agent stopped
-	glyphWtMissing   = "\U000f0e7a" // 󰹺 directory absent from disk
-	glyphWtUnknown   = "?"          // harness has no LiveStatus, tmux window present
+	glyphWtStopped = "\U000f0766" // 󰝦 same as glyphInactive — agent stopped
+	glyphWtMissing = "\U000f0e7a" // 󰹺 directory absent from disk
+	glyphWtUnknown = "?"          // harness has no LiveStatus, tmux window present
 )
 
 var (
@@ -513,9 +513,12 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 		for _, i := range g.rows {
 			row := rows[i]
 			var line string
-			if row.State == workspace.StateCreating {
+			switch {
+			case row.State == workspace.StateCreating:
 				line = m.formatCreatingRow(row, width-2)
-			} else {
+			case m.pulling[row.Worktree]:
+				line = m.formatSpinnerRow(row, width-2, "pulling")
+			default:
 				line = formatWorktreeRow(now, row, width-2)
 			}
 			if i == cursor {
@@ -1017,9 +1020,20 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int) string {
 // formatCreatingRow renders an in-flight worktree create/fetch as a muted row
 // with an animated spinner in the status column. The verb reflects the flow
 // ("fetching…" for 'F', "creating…" for 'n'), looked up from pendingCreates so
-// the synthetic Row needs no extra field. The frame index comes from the model
-// so successive spinnerTickMsgs animate it.
+// the synthetic Row needs no extra field.
 func (m model) formatCreatingRow(row workspace.Row, width int) string {
+	verb := "creating"
+	if pc, ok := m.pendingCreates[createKey(row.Repo, row.Branch)]; ok && pc.fromRemote {
+		verb = "fetching"
+	}
+	return m.formatSpinnerRow(row, width, verb)
+}
+
+// formatSpinnerRow renders row as a muted line with an animated spinner in the
+// status column and a "(<verb>…)" suffix, signalling an in-flight git operation
+// (creating/fetching a worktree, or pulling its branch). The frame index comes
+// from the model so successive spinnerTickMsgs animate it.
+func (m model) formatSpinnerRow(row workspace.Row, width int, verb string) string {
 	sessionW := worktreeSessionWidth(width)
 
 	glyph := "⠋"
@@ -1028,10 +1042,6 @@ func (m model) formatCreatingRow(row workspace.Row, width int) string {
 	}
 	statusCell := wtStoppedStyle.Render(glyph) + " "
 
-	verb := "creating"
-	if pc, ok := m.pendingCreates[createKey(row.Repo, row.Branch)]; ok && pc.fromRemote {
-		verb = "fetching"
-	}
 	titleStr := wtStoppedStyle.Render(branchLabel(row)) + "  " + wtPathStyle.Render("("+verb+"…)")
 
 	cells := []string{
