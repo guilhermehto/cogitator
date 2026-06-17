@@ -242,6 +242,67 @@ func addOrigin(t *testing.T, repo, remote string) {
 	}
 }
 
+// cloneSingleBranch makes a single-branch clone of remote (refspec narrowed to
+// +refs/heads/main:refs/remotes/origin/main, as `git clone --single-branch`
+// produces) and returns its path. Unlike addOrigin's wildcard refspec, a branch
+// other than main is not mapped, so fetching it would not create
+// refs/remotes/origin/<branch> without FetchAndAddWorktree registering it first.
+func cloneSingleBranch(t *testing.T, remote string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "single-branch-clone")
+	cmd := exec.Command("git", "clone", "--single-branch", "--branch", "main", remote, dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git clone --single-branch: %v\n%s", err, out)
+	}
+	return dir
+}
+
+// TestFetchAndAddWorktree_SingleBranchCloneTracksRemote is a regression test for
+// a single-branch clone, whose fetch refspec maps only main. Without registering
+// the branch in origin's refspec, `git fetch origin <branch>` updates FETCH_HEAD
+// only and the subsequent worktree add fails to resolve origin/<branch>. This
+// asserts the branch is checked out and tracks origin/<branch> regardless.
+func TestFetchAndAddWorktree_SingleBranchCloneTracksRemote(t *testing.T) {
+	const branch = "mpetersen/remove-cupac-ff"
+	remote := initRemoteWithBranch(t, branch)
+	local := cloneSingleBranch(t, remote)
+
+	wtDir := filepath.Join(t.TempDir(), "feature-wt")
+	gotPath, err := git.FetchAndAddWorktree(local, branch, wtDir)
+	if err != nil {
+		t.Fatalf("FetchAndAddWorktree on single-branch clone: %v", err)
+	}
+
+	wts, err := git.ListWorktrees(local)
+	if err != nil {
+		t.Fatalf("ListWorktrees: %v", err)
+	}
+	var found bool
+	for _, wt := range wts {
+		if wt.Path == gotPath {
+			found = true
+			if wt.Branch != branch {
+				t.Errorf("branch: got %q, want %q", wt.Branch, branch)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("new worktree %q not found in list: %v", gotPath, wts)
+	}
+
+	// Tracking must be wired even though the original clone refspec excluded the
+	// branch — git validates @{upstream} against the configured refspec.
+	track := exec.Command("git", "rev-parse", "--abbrev-ref", branch+"@{upstream}")
+	track.Dir = local
+	out, err := track.CombinedOutput()
+	if err != nil {
+		t.Fatalf("rev-parse upstream: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "origin/"+branch {
+		t.Errorf("upstream: got %q, want %q", got, "origin/"+branch)
+	}
+}
+
 // TestFetchAndAddWorktree_FetchesRemoteBranch verifies the core contract:
 // FetchAndAddWorktree fetches a branch that exists only on origin, checks it out
 // into a new worktree at a canonical path, and sets the new local branch to
