@@ -10,6 +10,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/codex"
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/provider"
+	"github.com/guilhermehto/cogitator/internal/singleinstance"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/supervisor"
 	"github.com/guilhermehto/cogitator/internal/taskwarrior"
@@ -26,6 +27,16 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Enforce a single live cogitator: a newer process evicts an older one so a
+	// freshly built binary always becomes the hook-socket owner instead of
+	// degrading to poll-only mode behind a stale instance. A failure here is
+	// non-fatal — the TUI still runs, just without the single-instance guarantee.
+	if release, err := singleinstance.New(logger).Acquire(); err != nil {
+		logger.Warn("single-instance acquire failed; continuing without it", "err", err)
+	} else {
+		defer release()
+	}
 
 	store := state.New(ctx, cfg, logger)
 
