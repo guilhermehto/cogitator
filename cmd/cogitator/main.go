@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"runtime/debug"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/codex"
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/logging"
+	"github.com/guilhermehto/cogitator/internal/omp"
 	"github.com/guilhermehto/cogitator/internal/ui"
 )
 
@@ -22,31 +24,9 @@ var (
 )
 
 func main() {
-	// Route subcommands before flag.Parse() so bare subcommand names are not
-	// misinterpreted as unknown flags.
-	if len(os.Args) > 1 && os.Args[1] == "codex-hook" {
-		if err := codex.SendHook(context.Background(), os.Stdin); err != nil {
-			// A closed cogitator TUI is the expected case, not a failure:
-			// exit 0 silently so Codex never shows a "hook failed" banner.
-			if errors.Is(err, codex.ErrListenerUnavailable) {
-				return
-			}
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	if len(os.Args) > 1 && os.Args[1] == "claude-hook" {
-		if err := claudecode.SendHook(context.Background(), os.Stdin); err != nil {
-			// A closed cogitator TUI is the expected case, not a failure:
-			// exit 0 silently so Claude Code never shows a "hook failed" banner.
-			if errors.Is(err, claudecode.ErrListenerUnavailable) {
-				return
-			}
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
+	// Route hook subcommands before flag.Parse() so bare subcommand names are
+	// not misinterpreted as unknown flags.
+	if routeSubcommand(os.Args) {
 		return
 	}
 
@@ -94,6 +74,62 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// routeSubcommand handles the hook subcommands (codex-hook, claude-hook,
+// omp-hook[ install]) that must run before flag parsing. It returns true when a
+// subcommand was handled and main should exit.
+func routeSubcommand(args []string) bool {
+	if len(args) < 2 {
+		return false
+	}
+	switch args[1] {
+	case "codex-hook":
+		forwardHook(codex.SendHook, codex.ErrListenerUnavailable)
+	case "claude-hook":
+		forwardHook(claudecode.SendHook, claudecode.ErrListenerUnavailable)
+	case "omp-hook":
+		// `omp-hook install` writes the JS bridge extension; the bare form
+		// forwards a hook event from stdin.
+		if len(args) > 2 && args[2] == "install" {
+			installOMPHook()
+		} else {
+			forwardHook(omp.SendHook, omp.ErrListenerUnavailable)
+		}
+	default:
+		return false
+	}
+	return true
+}
+
+// forwardHook reads a hook event from stdin and relays it via send. A closed
+// cogitator TUI is the expected case, not a failure: exit 0 silently (when send
+// reports unavailable) so the invoking agent never shows a "hook failed"
+// banner. Any other error exits non-zero.
+func forwardHook(send func(context.Context, io.Reader) error, unavailable error) {
+	if err := send(context.Background(), os.Stdin); err != nil {
+		if errors.Is(err, unavailable) {
+			return
+		}
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+// installOMPHook writes the omp live-attention bridge extension into the omp
+// extensions directory, baking in this binary's absolute path.
+func installOMPHook() {
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "" // fall back to "cogitator" on PATH
+	}
+	path, err := omp.InstallExtension("", exe)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Printf("Installed omp live-attention bridge: %s\n", path)
+	fmt.Println("Restart any running omp sessions for it to take effect.")
 }
 
 func versionLine() string {

@@ -132,3 +132,67 @@ func TestDefault_ClaudeCodeHome_Unset(t *testing.T) {
 		t.Errorf("ClaudeCodeHome = %q, want empty string when CLAUDE_HOME unset", cfg.ClaudeCodeHome)
 	}
 }
+
+// TestOMPEnabled verifies that OMPEnabled is derived purely from whether the
+// omp sessions directory exists on disk (auto-detection only).
+func TestOMPEnabled(t *testing.T) {
+	existingBase := t.TempDir()
+	if err := os.Mkdir(filepath.Join(existingBase, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	absentBase := filepath.Join(t.TempDir(), "no-such-subdir")
+
+	tests := []struct {
+		name    string
+		ompHome string
+		wantOn  bool
+	}{
+		{name: "existing sessions dir → ON", ompHome: existingBase, wantOn: true},
+		{name: "absent dir → OFF", ompHome: absentBase, wantOn: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("PI_CODING_AGENT_DIR", tc.ompHome)
+			cfg := Default()
+			if cfg.OMPEnabled != tc.wantOn {
+				t.Errorf("OMPEnabled = %v, want %v (PI_CODING_AGENT_DIR=%q)",
+					cfg.OMPEnabled, tc.wantOn, tc.ompHome)
+			}
+		})
+	}
+}
+
+// TestOMPEnabled_FileNotDir verifies that a sessions path pointing to a regular
+// file (not a directory) is treated as absent.
+func TestOMPEnabled_FileNotDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sessions"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PI_CODING_AGENT_DIR", dir)
+	cfg := Default()
+	if cfg.OMPEnabled {
+		t.Errorf("OMPEnabled = true, want false when PI_CODING_AGENT_DIR/sessions points to a file, not a directory")
+	}
+}
+
+// TestDefault_OMPHome verifies that PI_CODING_AGENT_DIR is read from the environment.
+func TestDefault_OMPHome(t *testing.T) {
+	t.Setenv("PI_CODING_AGENT_DIR", "/custom/omp/agent")
+	cfg := Default()
+	if cfg.OMPHome != "/custom/omp/agent" {
+		t.Errorf("OMPHome = %q, want %q", cfg.OMPHome, "/custom/omp/agent")
+	}
+}
+
+// TestDefault_OMPHome_Unset verifies that an unset PI_CODING_AGENT_DIR yields
+// an empty string (the provider resolves ~/.omp/agent itself).
+func TestDefault_OMPHome_Unset(t *testing.T) {
+	t.Setenv("PI_CODING_AGENT_DIR", "")
+	cfg := Default()
+	if cfg.OMPHome != "" {
+		t.Errorf("OMPHome = %q, want empty string when PI_CODING_AGENT_DIR unset", cfg.OMPHome)
+	}
+}

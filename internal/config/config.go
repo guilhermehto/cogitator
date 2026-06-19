@@ -65,6 +65,25 @@ type Config struct {
 	// activity is considered "live" (SourceLive). Sessions older than this
 	// window are labelled SourceRecent.
 	ClaudeCodeRecencyWindow time.Duration
+
+	// OMPEnabled enables the polled Oh My Pi (omp) session monitor. When false,
+	// no omp provider is started and cogitator behaves exactly as before omp
+	// support was added.
+	OMPEnabled bool
+
+	// OMPHome is the path to the omp agent directory (PI_CODING_AGENT_DIR).
+	// When empty the provider defaults to ~/.omp/agent (resolved by the
+	// reader). Populated from the PI_CODING_AGENT_DIR environment variable in
+	// Default().
+	OMPHome string
+
+	// OMPPollInterval is how often the omp provider polls OMPHome.
+	OMPPollInterval time.Duration
+
+	// OMPRecencyWindow is the duration within which a session's last activity
+	// is considered "live" (SourceLive). Sessions older than this window are
+	// labelled SourceRecent.
+	OMPRecencyWindow time.Duration
 }
 
 // codexHomeDirExists reports whether the resolved Codex home directory exists
@@ -101,6 +120,24 @@ func claudeProjectsDirExists() bool {
 	return err == nil && info.IsDir()
 }
 
+// ompSessionsDirExists reports whether the resolved omp sessions directory
+// exists and is a directory. It mirrors the resolution logic used by the omp
+// provider: $PI_CODING_AGENT_DIR when set, otherwise ~/.omp/agent. Detection
+// checks the sessions subdirectory to avoid false positives from an empty
+// agent directory.
+func ompSessionsDirExists() bool {
+	dir := os.Getenv("PI_CODING_AGENT_DIR")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false
+		}
+		dir = filepath.Join(home, ".omp", "agent")
+	}
+	info, err := os.Stat(filepath.Join(dir, "sessions"))
+	return err == nil && info.IsDir()
+}
+
 func Default() *Config {
 	return &Config{
 		RecentWindow:            30 * time.Minute,
@@ -128,5 +165,10 @@ func Default() *Config {
 		ClaudeCodeHome:          os.Getenv("CLAUDE_HOME"),
 		ClaudeCodePollInterval:  5 * time.Second,
 		ClaudeCodeRecencyWindow: 30 * time.Minute,
+
+		OMPEnabled:       ompSessionsDirExists(),
+		OMPHome:          os.Getenv("PI_CODING_AGENT_DIR"),
+		OMPPollInterval:  5 * time.Second,
+		OMPRecencyWindow: 30 * time.Minute,
 	}
 }

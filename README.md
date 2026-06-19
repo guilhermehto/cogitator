@@ -16,11 +16,13 @@ It discovers instances over mDNS, subscribes to their event streams, and renders
     - [opencode](#opencode)
     - [Claude Code](#claude-code)
     - [Codex](#codex)
+    - [Oh My Pi (omp)](#oh-my-pi-omp)
 - [Key bindings](#key-bindings)
 - [Taskwarrior integration](#taskwarrior-integration)
 - [Live attention reference](#live-attention-reference)
   - [Claude Code](#claude-code-reference)
   - [Codex](#codex-reference)
+  - [Oh My Pi (omp)](#omp-reference)
 - [CLI reference](#cli-reference)
 - [Logging](#logging)
 - [Architecture overview](#architecture-overview)
@@ -222,6 +224,34 @@ See [docs/codex.md](docs/codex.md) for the full setup guide (inline TOML alterna
 minimal hook variant, and `CODEX_HOME` override), and
 [Live attention reference → Codex](#codex-reference) for how it behaves.
 
+#### Oh My Pi (omp)
+
+cogitator displays live attention signals for [Oh My Pi](https://github.com/oh-my-pi) (`omp`)
+sessions using a small extension that bridges omp's lifecycle events. Monitoring
+**auto-enables** when `~/.omp/agent/sessions` exists — no environment variable needed.
+
+Unlike Claude Code and Codex, omp loads hooks as in-process JS extensions rather than
+command hooks, so cogitator ships the bridge for you. Install it with one command:
+
+```sh
+cogitator omp-hook install
+```
+
+This writes `cogitator-omp.js` into `~/.omp/agent/extensions/` (honoring
+`$PI_CODING_AGENT_DIR`), where omp auto-discovers it for every session. The absolute path
+to your `cogitator` binary is baked in, so the bridge works even when omp's process does
+not inherit your interactive shell `PATH`. **Restart any running omp sessions** for it to
+take effect.
+
+To remove the bridge, delete the file:
+
+```sh
+rm ~/.omp/agent/extensions/cogitator-omp.js
+```
+
+See [docs/omp.md](docs/omp.md) for the full setup guide and
+[Live attention reference → Oh My Pi (omp)](#omp-reference) for how it behaves.
+
 ## Key bindings
 
 | Key | Context | Action |
@@ -316,6 +346,29 @@ and `PostToolUse` fire on every tool call; for less process churn, wire only
 [docs/codex.md](docs/codex.md)). If cogitator is not running when a hook fires,
 `cogitator codex-hook` exits 0 silently — Codex shows no failure and never blocks your
 tool calls.
+
+<a id="omp-reference"></a>
+
+### Oh My Pi (omp)
+
+cogitator monitors omp by polling its session store and by subscribing to lifecycle events
+through an installed JS bridge extension (`cogitator omp-hook install`). Each event maps to
+an attention state:
+
+| Event | Attention state |
+| --- | --- |
+| `session_start` | active |
+| `turn_start` | active |
+| `turn_end` | idle / awaiting |
+| `tool_call` (`ask` tool) | question-pending |
+| `session_shutdown` | idle |
+
+Monitoring is auto-enabled when `~/.omp/agent/sessions` exists. The bridge forwards only a
+small set of events to keep process churn low. If cogitator is not running when an event
+fires, the bridge's `cogitator omp-hook` spawn fails silently — omp shows no failure and is
+never blocked. omp exposes no distinct tool-approval-prompt event, so an approval-pending
+state is not surfaced this pass; the `ask` tool drives the question-pending signal. See
+[docs/omp.md](docs/omp.md) for the full setup guide.
 
 ## CLI reference
 
