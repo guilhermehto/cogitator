@@ -7,7 +7,7 @@ cogitator can display live attention signals for [Oh My Pi (omp)](https://oh-my-
 Two layers feed the cogitator Sessions pane:
 
 1. **Polling** — cogitator scans `~/.omp/agent/sessions/**/*.jsonl` every few seconds, reading each session's header (id, cwd, title, created) and last-activity timestamp. This makes every omp session appear with a recency-derived liveness label, with no setup beyond having omp installed.
-2. **Live attention hook** — unlike Codex and Claude Code, omp has **no external command-hook** mechanism; its hooks are in-process TypeScript modules. cogitator ships a small extension (`extensions/cogitator.ts`) that you install into omp. It forwards session lifecycle events to the running cogitator over a local Unix-domain socket (`cogitator omp-hook`), so attention updates appear instantly instead of waiting for the next poll.
+2. **Live attention hook** — unlike Codex and Claude Code, omp has **no external command-hook** mechanism; its hooks are in-process TypeScript modules. cogitator ships a small extension (`internal/omp/cogitator.ts`, also embedded in the binary) that you install into omp via `cogitator omp-hook install`. It forwards session lifecycle events to the running cogitator over a local Unix-domain socket (`cogitator omp-hook`), so attention updates appear instantly instead of waiting for the next poll.
 
 | omp event | Attention state |
 | --- | --- |
@@ -37,19 +37,32 @@ cogitator resolves the agent directory as `$PI_CODING_AGENT_DIR`, else `$PI_CONF
 
 ## Step 2 — Install the live-attention extension
 
-`cogitator` must be on the PATH of the process that runs omp. Copy the shipped extension to one of omp's auto-discovered extension directories:
+Run the installer (works for `go install` users — the extension is embedded in
+the binary, no repo checkout needed):
 
 ```sh
-# user-level (applies to every omp session)
+cogitator omp-hook install
+```
+
+This writes `~/.omp/agent/extensions/cogitator.ts` (creating the directory) with
+the **absolute path of the cogitator binary baked in**, so the extension spawns
+cogitator directly and does not depend on the omp process inheriting your
+interactive shell PATH. It honors `$PI_CODING_AGENT_DIR` / `$PI_CONFIG_DIR` for
+the target directory. Restart omp so the extension loads.
+
+**Manual install (repo checkout)** — copy the source and let the bare `cogitator`
+name resolve via the omp process PATH:
+
+```sh
 mkdir -p ~/.omp/agent/extensions
-cp extensions/cogitator.ts ~/.omp/agent/extensions/cogitator.ts
+cp internal/omp/cogitator.ts ~/.omp/agent/extensions/cogitator.ts
 ```
 
 Project-level installs also work — place it at `<repo>/.omp/extensions/cogitator.ts`.
-
-Restart omp so the extension loads. That is the whole setup: the extension has no dependencies, registers its event handlers on load, and forwards events fire-and-forget so it never slows omp down.
-
-If `cogitator` is not on omp's PATH, the spawn fails silently (no live attention, no error). Make sure `which cogitator` resolves in the shell that launches omp.
+The extension has no dependencies, registers its handlers on load, and forwards
+events fire-and-forget so it never slows omp down. With a manual copy, make sure
+`which cogitator` resolves in the shell that launches omp (the installer avoids
+this by baking in the absolute path).
 
 ---
 

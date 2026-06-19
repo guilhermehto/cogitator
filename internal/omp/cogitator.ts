@@ -1,8 +1,12 @@
 // cogitator live-attention extension for Oh My Pi (omp).
 //
-// Install: copy this file to ~/.omp/agent/extensions/cogitator.ts (user-level,
-// auto-discovered) or <repo>/.omp/extensions/cogitator.ts (project-level).
-// `cogitator` must be on the omp process PATH. Restart omp to load it.
+// Recommended install: `cogitator omp-hook install` (writes this file to
+// ~/.omp/agent/extensions/cogitator.ts with the cogitator binary path baked in,
+// so it works even when cogitator is not on the omp process PATH).
+//
+// Manual install: copy this file to ~/.omp/agent/extensions/cogitator.ts
+// (user-level) or <repo>/.omp/extensions/cogitator.ts (project-level); the bare
+// `cogitator` name then resolves via the omp process PATH. Restart omp to load.
 //
 // It forwards session lifecycle events to a running cogitator over the local
 // `cogitator omp-hook` IPC bridge so cogitator can show live attention
@@ -10,6 +14,10 @@
 // running the spawn fails silently and omp is never affected.
 //
 // No external imports: types are declared inline so the file loads standalone.
+
+// `cogitator omp-hook install` rewrites the bare name below with an absolute
+// path. Copied manually it stays "cogitator" and resolves via PATH.
+const COGITATOR_BIN = "cogitator";
 
 type SessionManager = { getSessionFile?: () => string | undefined };
 type HookCtx = { cwd?: string; sessionManager?: SessionManager };
@@ -52,7 +60,7 @@ function send(name: string, ctx: HookCtx, extra: Record<string, unknown> = {}): 
   try {
     // Fire-and-forget: detach so omp never waits on the child, and swallow any
     // spawn error (cogitator absent / not on PATH) — monitoring is best-effort.
-    Bun.spawn(["cogitator", "omp-hook"], {
+    Bun.spawn([COGITATOR_BIN, "omp-hook"], {
       stdin: new Blob([payload]),
       stdout: "ignore",
       stderr: "ignore",

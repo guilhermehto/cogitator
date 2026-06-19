@@ -233,32 +233,33 @@ needed. omp sessions then appear in the Sessions pane from a filesystem poll alo
 
 omp has **no external command-hook** like Codex/Claude (its hooks are in-process
 TypeScript modules), so live attention is wired through a small extension cogitator
-ships. `cogitator` must be on the PATH of the process that runs omp.
+ships (embedded in the binary). Install it with one command:
+
+```sh
+cogitator omp-hook install
+```
+
+This writes `~/.omp/agent/extensions/cogitator.ts` with the absolute cogitator
+binary path baked in, so it works even when `cogitator` is not on the omp process
+PATH. Restart omp afterward.
 
 **Automated** — paste this to omp:
 
 ```text
 Set up cogitator live-attention monitoring for omp on this machine.
 
-1. Run `which cogitator` to find the absolute path to the cogitator binary. If it is not
-   found, stop and tell me to install cogitator first.
-2. Copy the cogitator extension into omp's user extensions directory so every session
-   loads it:
-
-       mkdir -p ~/.omp/agent/extensions
-       cp extensions/cogitator.ts ~/.omp/agent/extensions/cogitator.ts
-
-   (Run this from the cogitator checkout, or fetch extensions/cogitator.ts from the repo.)
+1. Run `which cogitator` to confirm cogitator is installed. If it is not found, stop
+   and tell me to install cogitator first.
+2. Run `cogitator omp-hook install` — it writes the live-attention extension into
+   ~/.omp/agent/extensions/ with the cogitator binary path baked in.
 3. Tell me to restart omp so the extension loads.
 ```
 
-**Manual:**
-
-1. Confirm the omp agent directory exists (it does once you've run omp at least once).
-2. Copy `extensions/cogitator.ts` from the cogitator repo to
-   `~/.omp/agent/extensions/cogitator.ts` (user-level) or `<repo>/.omp/extensions/cogitator.ts`
-   (project-level). cogitator does **not** write this file — install it yourself.
-3. Ensure `which cogitator` resolves in the shell that launches omp, then restart omp.
+**Manual (repo checkout):** copy `internal/omp/cogitator.ts` to
+`~/.omp/agent/extensions/cogitator.ts` (user-level) or `<repo>/.omp/extensions/cogitator.ts`
+(project-level). With a manual copy the extension spawns `cogitator` by name, so ensure
+`which cogitator` resolves in the shell that launches omp; the installer avoids this by
+baking in the absolute path.
 
 See [docs/omp.md](docs/omp.md) for the full setup guide and the event→attention mapping,
 and [Live attention reference → omp](#omp-reference) for how it behaves.
