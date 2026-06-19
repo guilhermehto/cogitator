@@ -16,11 +16,13 @@ It discovers instances over mDNS, subscribes to their event streams, and renders
     - [opencode](#opencode)
     - [Claude Code](#claude-code)
     - [Codex](#codex)
+    - [omp](#omp)
 - [Key bindings](#key-bindings)
 - [Taskwarrior integration](#taskwarrior-integration)
 - [Live attention reference](#live-attention-reference)
   - [Claude Code](#claude-code-reference)
   - [Codex](#codex-reference)
+  - [omp](#omp-reference)
 - [CLI reference](#cli-reference)
 - [Logging](#logging)
 - [Architecture overview](#architecture-overview)
@@ -222,6 +224,45 @@ See [docs/codex.md](docs/codex.md) for the full setup guide (inline TOML alterna
 minimal hook variant, and `CODEX_HOME` override), and
 [Live attention reference → Codex](#codex-reference) for how it behaves.
 
+#### omp
+
+cogitator displays live attention signals for [Oh My Pi (omp)](https://oh-my-pi.dev)
+sessions. Monitoring **auto-enables** when the omp agent directory (`~/.omp/agent`,
+or `$PI_CODING_AGENT_DIR` / `$PI_CONFIG_DIR/agent`) exists — no environment variable
+needed. omp sessions then appear in the Sessions pane from a filesystem poll alone.
+
+omp has **no external command-hook** like Codex/Claude (its hooks are in-process
+TypeScript modules), so live attention is wired through a small extension cogitator
+ships. `cogitator` must be on the PATH of the process that runs omp.
+
+**Automated** — paste this to omp:
+
+```text
+Set up cogitator live-attention monitoring for omp on this machine.
+
+1. Run `which cogitator` to find the absolute path to the cogitator binary. If it is not
+   found, stop and tell me to install cogitator first.
+2. Copy the cogitator extension into omp's user extensions directory so every session
+   loads it:
+
+       mkdir -p ~/.omp/agent/extensions
+       cp extensions/cogitator.ts ~/.omp/agent/extensions/cogitator.ts
+
+   (Run this from the cogitator checkout, or fetch extensions/cogitator.ts from the repo.)
+3. Tell me to restart omp so the extension loads.
+```
+
+**Manual:**
+
+1. Confirm the omp agent directory exists (it does once you've run omp at least once).
+2. Copy `extensions/cogitator.ts` from the cogitator repo to
+   `~/.omp/agent/extensions/cogitator.ts` (user-level) or `<repo>/.omp/extensions/cogitator.ts`
+   (project-level). cogitator does **not** write this file — install it yourself.
+3. Ensure `which cogitator` resolves in the shell that launches omp, then restart omp.
+
+See [docs/omp.md](docs/omp.md) for the full setup guide and the event→attention mapping,
+and [Live attention reference → omp](#omp-reference) for how it behaves.
+
 ## Key bindings
 
 | Key | Context | Action |
@@ -316,6 +357,27 @@ and `PostToolUse` fire on every tool call; for less process churn, wire only
 [docs/codex.md](docs/codex.md)). If cogitator is not running when a hook fires,
 `cogitator codex-hook` exits 0 silently — Codex shows no failure and never blocks your
 tool calls.
+
+<a id="omp-reference"></a>
+
+### omp
+
+cogitator polls `~/.omp/agent/sessions/**/*.jsonl` so omp sessions appear with a
+recency-derived liveness label without any setup. The shipped extension
+(`extensions/cogitator.ts`) adds real-time attention by forwarding lifecycle events
+over `cogitator omp-hook`:
+
+| omp event | Attention state |
+| --- | --- |
+| `session_start` / `turn_start` / `agent_start` | active |
+| `tool_call` (tool `ask`) | question-pending |
+| `tool_result` (error) | errored |
+| `turn_end` / `agent_end` / `session_shutdown` | idle / awaiting |
+
+omp does not expose a permission-request hook event, so there is no distinct
+permission-pending state for omp — the `ask` tool surfaces as question-pending. If
+cogitator is not running, the extension's spawn fails silently and `cogitator omp-hook`
+exits 0 — omp shows no failure and never blocks your turns.
 
 ## CLI reference
 

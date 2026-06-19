@@ -12,6 +12,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/codex"
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/logging"
+	"github.com/guilhermehto/cogitator/internal/omp"
 	"github.com/guilhermehto/cogitator/internal/ui"
 )
 
@@ -42,6 +43,19 @@ func main() {
 			// A closed cogitator TUI is the expected case, not a failure:
 			// exit 0 silently so Claude Code never shows a "hook failed" banner.
 			if errors.Is(err, claudecode.ErrListenerUnavailable) {
+				return
+			}
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "omp-hook" {
+		if err := omp.SendHook(context.Background(), os.Stdin); err != nil {
+			// A closed cogitator TUI is the expected case, not a failure:
+			// exit 0 silently so omp never shows a "hook failed" banner.
+			if errors.Is(err, omp.ErrListenerUnavailable) {
 				return
 			}
 			fmt.Fprintln(os.Stderr, err)
