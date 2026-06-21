@@ -60,8 +60,8 @@ func TestPullKeyDispatchesPullForHighlightedRow(t *testing.T) {
 	}
 
 	got := pullFinishedFrom(t, cmd)
-	if len(gitFake.pullCalls) != 1 || gitFake.pullCalls[0] != "/r" {
-		t.Errorf("expected one Pull(/r) call, got %v", gitFake.pullCalls)
+	if len(gitFake.pullCalls) != 1 || gitFake.pullCalls[0] != (pullCall{worktreePath: "/r", branch: "main"}) {
+		t.Errorf("expected one Pull(/r, main) call, got %v", gitFake.pullCalls)
 	}
 	if got.path != "/r" || got.branch != "main" {
 		t.Errorf("pullFinishedMsg = %+v, want path=/r branch=main", got)

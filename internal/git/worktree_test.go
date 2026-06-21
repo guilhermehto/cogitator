@@ -407,8 +407,7 @@ func TestListWorktrees_BranchNames(t *testing.T) {
 }
 
 // cloneRepo makes a full clone of remote into a fresh temp dir and returns its
-// path. The clone's local "main" tracks origin/main, so git.Pull can
-// fast-forward it.
+// path. The clone has an origin/main branch, so git.Pull can fast-forward it.
 func cloneRepo(t *testing.T, remote string) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "clone")
@@ -430,6 +429,15 @@ func commitOnRemote(t *testing.T, remote, msg string) {
 	}
 }
 
+func tagRemote(t *testing.T, remote, name string) {
+	t.Helper()
+	cmd := exec.Command("git", "tag", name)
+	cmd.Dir = remote
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git tag on remote: %v\n%s", err, out)
+	}
+}
+
 // TestPull_FastForwardsFromOrigin verifies the core contract: Pull fast-forwards
 // the worktree's branch to a commit that exists only on origin and returns a
 // non-empty summary.
@@ -438,8 +446,9 @@ func TestPull_FastForwardsFromOrigin(t *testing.T) {
 	local := cloneRepo(t, remote)
 
 	commitOnRemote(t, remote, "remote work")
+	tagRemote(t, remote, "v-remote-work")
 
-	summary, err := git.Pull(local)
+	summary, err := git.Pull(local, "main")
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
@@ -457,6 +466,16 @@ func TestPull_FastForwardsFromOrigin(t *testing.T) {
 	if !strings.Contains(string(out), "remote work") {
 		t.Errorf("pull did not fast-forward the remote commit in; log:\n%s", out)
 	}
+
+	tagCmd := exec.Command("git", "tag", "--list", "v-remote-work")
+	tagCmd.Dir = local
+	tags, err := tagCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git tag: %v\n%s", err, tags)
+	}
+	if strings.TrimSpace(string(tags)) != "" {
+		t.Errorf("pull fetched tags despite --no-tags: %s", tags)
+	}
 }
 
 // TestPull_AlreadyUpToDate verifies that pulling a branch with nothing new on
@@ -465,7 +484,7 @@ func TestPull_AlreadyUpToDate(t *testing.T) {
 	remote := initRepo(t)
 	local := cloneRepo(t, remote)
 
-	summary, err := git.Pull(local)
+	summary, err := git.Pull(local, "main")
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
@@ -474,13 +493,13 @@ func TestPull_AlreadyUpToDate(t *testing.T) {
 	}
 }
 
-// TestPull_NoUpstreamErrors verifies that pulling a branch with no configured
-// upstream returns a non-nil error (the --ff-only pull has nothing to track).
-func TestPull_NoUpstreamErrors(t *testing.T) {
+// TestPull_NoOriginErrors verifies that pulling without an origin remote returns
+// a non-nil error.
+func TestPull_NoOriginErrors(t *testing.T) {
 	repo := initRepo(t) // no origin configured
 
-	if _, err := git.Pull(repo); err == nil {
-		t.Fatal("expected Pull to error when the branch has no upstream")
+	if _, err := git.Pull(repo, "main"); err == nil {
+		t.Fatal("expected Pull to error when origin is missing")
 	}
 }
 
@@ -498,7 +517,7 @@ func TestPull_DivergedHistoryErrors(t *testing.T) {
 		t.Fatalf("local commit: %v\n%s", err, out)
 	}
 
-	if _, err := git.Pull(local); err == nil {
+	if _, err := git.Pull(local, "main"); err == nil {
 		t.Fatal("expected --ff-only Pull to refuse a diverged branch")
 	}
 }

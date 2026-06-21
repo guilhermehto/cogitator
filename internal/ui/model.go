@@ -253,7 +253,7 @@ type gitOps interface {
 	FetchAndAddWorktree(repoPath, branch, dest string) (string, error)
 	RemoveWorktree(repoPath, worktreePath string) error
 	BranchMergeStatus(repoPath, branch string) (git.MergeState, string)
-	Pull(worktreePath string) (string, error)
+	Pull(worktreePath, branch string) (string, error)
 }
 
 // realGitOps delegates to the package-level git functions.
@@ -275,8 +275,8 @@ func (realGitOps) BranchMergeStatus(repoPath, branch string) (git.MergeState, st
 	return git.BranchMergeStatus(repoPath, branch)
 }
 
-func (realGitOps) Pull(worktreePath string) (string, error) {
-	return git.Pull(worktreePath)
+func (realGitOps) Pull(worktreePath, branch string) (string, error) {
+	return git.Pull(worktreePath, branch)
 }
 
 // harnessOps is the injectable seam for harness registry lookups.
@@ -394,11 +394,11 @@ type model struct {
 	// spinnerActive is true while a spinnerTickCmd is in flight, so dispatching a
 	// second concurrent create does not start a duplicate ticker.
 	spinnerActive bool
-	// pulling is the set of canonical worktree paths with an in-flight
-	// `git pull --ff-only` ('P'). Each is rendered with the animated spinner and
-	// a "(pulling…)" suffix until pullCmd reports completion. Keyed by worktree
-	// path so a repeated 'P' on the same row is ignored and the pullFinishedMsg
-	// can clear the matching indicator. Reads on a nil map are safe (closed).
+	// pulling is the set of canonical worktree paths with an in-flight pull
+	// ('P'). Each is rendered with the animated spinner and a "(pulling…)" suffix
+	// until pullCmd reports completion. Keyed by worktree path so a repeated 'P'
+	// on the same row is ignored and the pullFinishedMsg can clear the matching
+	// indicator. Reads on a nil map are safe (closed).
 	pulling map[string]bool
 
 	// Repo finder ('A') state, meaningful only while prompt == promptAddRepo.
@@ -665,11 +665,12 @@ func deleteWorktreeCmd(ops tmuxOps, gitOp gitOps, repo, path string, mode tmuxct
 	}
 }
 
-// pullFinishedMsg is returned by pullCmd after `git pull --ff-only` completes
-// for the worktree at path. branch is the branch that was pulled (used to phrase
-// the status hint); summary is git's one-line result on success; err is non-nil
-// when the pull failed (e.g. diverged history, no upstream, network error). path
-// tags the result so the handler can clear the matching in-flight indicator.
+// pullFinishedMsg is returned by pullCmd after `git pull --ff-only --no-tags
+// origin <branch>` completes for the worktree at path. branch is the branch that
+// was pulled (used to phrase the status hint); summary is git's one-line result
+// on success; err is non-nil when the pull failed (e.g. diverged history,
+// missing origin, network error). path tags the result so the handler can clear
+// the matching in-flight indicator.
 type pullFinishedMsg struct {
 	path    string
 	branch  string
@@ -687,7 +688,7 @@ func pullCmd(gitOp gitOps, path, branch string) tea.Cmd {
 		if gitOp != nil {
 			pullFn = gitOp.Pull
 		}
-		summary, err := pullFn(path)
+		summary, err := pullFn(path, branch)
 		return pullFinishedMsg{path: path, branch: branch, summary: summary, err: err}
 	}
 }
@@ -704,7 +705,7 @@ func (m *model) addPulling(path string) {
 // canPullWorktree reports whether the branch in row's worktree can be pulled,
 // returning a user-facing reason when it cannot. A worktree that is not yet on
 // disk (creating) or whose directory is missing has nowhere to run git; a
-// detached HEAD (empty branch) has no upstream to fast-forward from.
+// detached HEAD (empty branch) has no branch name to pull from origin.
 func canPullWorktree(row workspace.Row) (bool, string) {
 	switch {
 	case row.Worktree == "":
@@ -714,7 +715,7 @@ func canPullWorktree(row workspace.Row) (bool, string) {
 	case row.State == workspace.StateMissing:
 		return false, "worktree directory is missing — cannot pull"
 	case row.Branch == "":
-		return false, "cannot pull: detached HEAD has no upstream"
+		return false, "cannot pull: detached HEAD has no branch"
 	}
 	return true, ""
 }
@@ -1453,10 +1454,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 
 			case "P":
-				// Pull latest into the highlighted worktree's branch via
-				// `git pull --ff-only`. Handy for refreshing a base branch before
-				// branching a new worktree off it. tmux is not required — this is
-				// a pure git operation.
+				// Pull latest into the highlighted worktree's branch from origin.
+				// Handy for refreshing a base branch before branching a new
+				// worktree off it. tmux is not required — this is a pure git
+				// operation.
 				if len(m.workspaceRows) == 0 {
 					return m, nil
 				}

@@ -129,7 +129,7 @@ type fakeGitOps struct {
 
 	pullResult string
 	pullErr    error
-	pullCalls  []string // worktree paths passed to Pull
+	pullCalls  []pullCall
 }
 
 type addWorktreeCall struct {
@@ -146,6 +146,11 @@ type removeWorktreeCall struct {
 type mergeStatusCall struct {
 	repoPath string
 	branch   string
+}
+
+type pullCall struct {
+	worktreePath string
+	branch       string
 }
 
 func (f *fakeGitOps) AddWorktree(repoPath, branch, dest string) (string, error) {
@@ -174,8 +179,8 @@ func (f *fakeGitOps) BranchMergeStatus(repoPath, branch string) (git.MergeState,
 	return f.mergeState, f.mergeBase
 }
 
-func (f *fakeGitOps) Pull(worktreePath string) (string, error) {
-	f.pullCalls = append(f.pullCalls, worktreePath)
+func (f *fakeGitOps) Pull(worktreePath, branch string) (string, error) {
+	f.pullCalls = append(f.pullCalls, pullCall{worktreePath: worktreePath, branch: branch})
 	return f.pullResult, f.pullErr
 }
 
