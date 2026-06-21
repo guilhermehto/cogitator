@@ -429,6 +429,23 @@ func commitOnRemote(t *testing.T, remote, msg string) {
 	}
 }
 
+func commitFile(t *testing.T, repo, name, content, msg string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	add := exec.Command("git", "add", name)
+	add.Dir = repo
+	if out, err := add.CombinedOutput(); err != nil {
+		t.Fatalf("git add %s: %v\n%s", name, err, out)
+	}
+	commit := exec.Command("git", "commit", "-m", msg)
+	commit.Dir = repo
+	if out, err := commit.CombinedOutput(); err != nil {
+		t.Fatalf("git commit %s: %v\n%s", name, err, out)
+	}
+}
+
 func tagRemote(t *testing.T, remote, name string) {
 	t.Helper()
 	cmd := exec.Command("git", "tag", name)
@@ -475,6 +492,29 @@ func TestPull_FastForwardsFromOrigin(t *testing.T) {
 	}
 	if strings.TrimSpace(string(tags)) != "" {
 		t.Errorf("pull fetched tags despite --no-tags: %s", tags)
+	}
+}
+
+func TestPull_AutostashesDirtyTrackedFiles(t *testing.T) {
+	remote := initRepo(t)
+	commitFile(t, remote, "lsp.txt", "one\nlocal-old\nremote-old\n", "add tracked file")
+	local := cloneRepo(t, remote)
+
+	if err := os.WriteFile(filepath.Join(local, "lsp.txt"), []byte("one\nlocal-new\nremote-old\n"), 0o644); err != nil {
+		t.Fatalf("dirty local file: %v", err)
+	}
+	commitFile(t, remote, "lsp.txt", "one\nlocal-old\nremote-new\n", "remote edit")
+
+	if _, err := git.Pull(local, "main"); err != nil {
+		t.Fatalf("Pull with dirty tracked file: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(local, "lsp.txt"))
+	if err != nil {
+		t.Fatalf("read local file: %v", err)
+	}
+	if string(got) != "one\nlocal-new\nremote-new\n" {
+		t.Errorf("file after pull = %q", got)
 	}
 }
 

@@ -666,11 +666,11 @@ func deleteWorktreeCmd(ops tmuxOps, gitOp gitOps, repo, path string, mode tmuxct
 }
 
 // pullFinishedMsg is returned by pullCmd after `git pull --ff-only --no-tags
-// origin <branch>` completes for the worktree at path. branch is the branch that
-// was pulled (used to phrase the status hint); summary is git's one-line result
-// on success; err is non-nil when the pull failed (e.g. diverged history,
-// missing origin, network error). path tags the result so the handler can clear
-// the matching in-flight indicator.
+// --autostash origin <branch>` completes for the worktree at path. branch is the
+// branch that was pulled (used to phrase the status hint); summary is git's
+// one-line result on success; err is non-nil when the pull failed (e.g. diverged
+// history, missing origin, network error). path tags the result so the handler
+// can clear the matching in-flight indicator.
 type pullFinishedMsg struct {
 	path    string
 	branch  string
