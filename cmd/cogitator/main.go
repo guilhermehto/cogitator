@@ -12,6 +12,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/codex"
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/logging"
+	"github.com/guilhermehto/cogitator/internal/omp"
 	"github.com/guilhermehto/cogitator/internal/ui"
 )
 
@@ -42,6 +43,36 @@ func main() {
 			// A closed cogitator TUI is the expected case, not a failure:
 			// exit 0 silently so Claude Code never shows a "hook failed" banner.
 			if errors.Is(err, claudecode.ErrListenerUnavailable) {
+				return
+			}
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "omp-hook" {
+		// `omp-hook install` writes the live-attention extension into the omp
+		// extensions directory, baking in this binary's absolute path; the bare
+		// form forwards a hook event from stdin.
+		if len(os.Args) > 2 && os.Args[2] == "install" {
+			exe, err := os.Executable()
+			if err != nil {
+				exe = "" // fall back to "cogitator" on PATH
+			}
+			path, err := omp.InstallExtension("", exe)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			fmt.Printf("Installed omp live-attention extension: %s\n", path)
+			fmt.Println("Restart any running omp sessions for it to take effect.")
+			return
+		}
+		if err := omp.SendHook(context.Background(), os.Stdin); err != nil {
+			// A closed cogitator TUI is the expected case, not a failure:
+			// exit 0 silently so omp never shows a "hook failed" banner.
+			if errors.Is(err, omp.ErrListenerUnavailable) {
 				return
 			}
 			fmt.Fprintln(os.Stderr, err)

@@ -132,3 +132,63 @@ func TestDefault_ClaudeCodeHome_Unset(t *testing.T) {
 		t.Errorf("ClaudeCodeHome = %q, want empty string when CLAUDE_HOME unset", cfg.ClaudeCodeHome)
 	}
 }
+
+// TestOmpEnabled verifies that OmpEnabled is derived from whether the resolved
+// omp agent directory exists on disk (auto-detection only).
+func TestOmpEnabled(t *testing.T) {
+	existingDir := t.TempDir()
+	absentDir := filepath.Join(t.TempDir(), "no-such-subdir")
+
+	tests := []struct {
+		name string
+		dir  string
+		want bool
+	}{
+		{name: "existing agent dir → enabled", dir: existingDir, want: true},
+		{name: "absent agent dir → disabled", dir: absentDir, want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// PI_CODING_AGENT_DIR wins; clear PI_CONFIG_DIR so it can't interfere.
+			t.Setenv("PI_CONFIG_DIR", "")
+			t.Setenv("PI_CODING_AGENT_DIR", tc.dir)
+			if got := ompAgentDirExists(); got != tc.want {
+				t.Errorf("ompAgentDirExists() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestOmpEnabled_FileNotDir verifies that a path pointing to a regular file
+// (not a directory) is treated as absent.
+func TestOmpEnabled_FileNotDir(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "agent")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PI_CONFIG_DIR", "")
+	t.Setenv("PI_CODING_AGENT_DIR", f)
+	if ompAgentDirExists() {
+		t.Error("ompAgentDirExists() = true for a regular file, want false")
+	}
+}
+
+// TestDefault_OmpHome verifies that PI_CODING_AGENT_DIR is read into OmpHome.
+func TestDefault_OmpHome(t *testing.T) {
+	t.Setenv("PI_CODING_AGENT_DIR", "/custom/omp/agent")
+	cfg := Default()
+	if cfg.OmpHome != "/custom/omp/agent" {
+		t.Errorf("OmpHome = %q, want %q", cfg.OmpHome, "/custom/omp/agent")
+	}
+}
+
+// TestDefault_OmpHome_Unset verifies that an unset PI_CODING_AGENT_DIR yields
+// an empty string (the provider resolves the agent dir itself).
+func TestDefault_OmpHome_Unset(t *testing.T) {
+	t.Setenv("PI_CODING_AGENT_DIR", "")
+	cfg := Default()
+	if cfg.OmpHome != "" {
+		t.Errorf("OmpHome = %q, want empty string when PI_CODING_AGENT_DIR unset", cfg.OmpHome)
+	}
+}

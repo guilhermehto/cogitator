@@ -9,6 +9,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/claudecode"
 	"github.com/guilhermehto/cogitator/internal/codex"
 	"github.com/guilhermehto/cogitator/internal/config"
+	"github.com/guilhermehto/cogitator/internal/omp"
 	"github.com/guilhermehto/cogitator/internal/provider"
 	"github.com/guilhermehto/cogitator/internal/singleinstance"
 	"github.com/guilhermehto/cogitator/internal/state"
@@ -65,6 +66,10 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 	if cfg.ClaudeCodeEnabled {
 		claudeProvider := claudecode.NewProvider(cfg.ClaudeCodeHome, cfg.ClaudeCodePollInterval, cfg.ClaudeCodeRecencyWindow, logger)
 		mgr.Register(claudeProvider)
+	}
+	if cfg.OmpEnabled {
+		ompProvider := omp.NewProvider(cfg.OmpHome, cfg.OmpPollInterval, cfg.OmpRecencyWindow, logger)
+		mgr.Register(ompProvider)
 	}
 	mgr.Start(ctx, store)
 
