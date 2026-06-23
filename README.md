@@ -1,19 +1,25 @@
+<div align="center">
+
 # cogitator
 
+[Install](#1-install)
+
+</div>
+
 <p align="center">
-  <em>Monitor your coding agents, spin up git worktrees, and jump into them — all from one terminal.</em>
+  <em>Monitor coding agents, spin up git worktrees, jump between them, all from one place.</em>
 </p>
 
 <p align="center">
   <img src="tui.png" alt="cogitator TUI" />
 </p>
 
-cogitator is a terminal dashboard for the coding agents ("harnesses") running on your machine. It gives you one live view of every session and drives the git worktrees behind them — without leaving the TUI:
+cogitator is a TUI dashboard for your harnesses. It gives you a live view of sessions and allows you to manage your worktrees:
 
-- **See status at a glance** — discovers running [opencode](https://opencode.ai) instances over mDNS and streams their events, flagging which sessions need you (permission requests, pending questions, errors).
-- **Create git worktrees** — spin up a new worktree for a branch, or fetch, pull, and delete existing ones, straight from the roster.
-- **Navigate into them** — jump to a running agent or resume a stopped one in a tmux window with a single keystroke.
-- **Works across harnesses** — opencode, Claude Code, Codex, and omp, with an optional [Taskwarrior](https://taskwarrior.org) pane for your task list.
+- **See status at a glance**: discovers running instances, flagging which sessions need you (permission requests, pending questions, errors).
+- **Create git worktrees**: spin up a new worktree for a branch, or fetch, pull, and delete existing ones, straight from the roster.
+- **Navigate into them**: jump to a running agent or resume a stopped one in a tmux window with a single keystroke.
+- **Works across harnesses**: opencode, Claude Code, Codex, and omp, with an optional [Taskwarrior](https://taskwarrior.org) pane for your task list.
 
 ## Table of contents
 
@@ -40,10 +46,6 @@ cogitator is a terminal dashboard for the coding agents ("harnesses") running on
 - [Roadmap](#roadmap)
 
 ## Getting started
-
-cogitator monitors **coding agents** ("harnesses") running on your machine. Get up and
-running in three steps: install the binary, run it, then connect each agent you want to
-watch. Every harness offers two setup paths:
 
 - **Automated** — paste a prompt into the agent itself and let it do the setup.
 - **Manual** — do the setup yourself, step by step.
@@ -80,18 +82,14 @@ or from source:
 go run ./cmd/cogitator
 ```
 
-`q`, `Esc`, or `Ctrl+C` quits. Leave cogitator running while you work — it picks up
-agents as they start. (If a hook fires while cogitator is closed, nothing breaks; the
-event is simply dropped.)
-
 ### 3. Connect your coding agent
 
-Pick the harness you use below. You only need to do this once per machine.
+Pick the harness you use below. You only need to do this once.
 
 #### opencode
 
 opencode advertises itself over mDNS and cogitator discovers it automatically. The only
-setup is launching opencode with the `--mdns` flag.
+setup is launching opencode with the `--mdns` flag, which could be added to your `opencode` alias.
 
 **Automated** — paste this to your agent:
 
