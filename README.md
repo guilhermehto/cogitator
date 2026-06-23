@@ -1,11 +1,19 @@
 # cogitator
 
-`cogitator` is a terminal monitor for locally running [opencode](https://opencode.ai) instances.
-It discovers instances over mDNS, subscribes to their event streams, and renders one live sessions view with attention signals (permission requests, pending questions, and errors). When [Taskwarrior](https://taskwarrior.org) is installed, it also embeds a Tasks pane for adding, editing, starting/stopping, completing, and deleting tasks without leaving the TUI.
+<p align="center">
+  <em>Monitor your coding agents, spin up git worktrees, and jump into them — all from one terminal.</em>
+</p>
 
 <p align="center">
   <img src="tui.png" alt="cogitator TUI" />
 </p>
+
+cogitator is a terminal dashboard for the coding agents ("harnesses") running on your machine. It gives you one live view of every session and drives the git worktrees behind them — without leaving the TUI:
+
+- **See status at a glance** — discovers running [opencode](https://opencode.ai) instances over mDNS and streams their events, flagging which sessions need you (permission requests, pending questions, errors).
+- **Create git worktrees** — spin up a new worktree for a branch, or fetch, pull, and delete existing ones, straight from the roster.
+- **Navigate into them** — jump to a running agent or resume a stopped one in a tmux window with a single keystroke.
+- **Works across harnesses** — opencode, Claude Code, Codex, and omp, with an optional [Taskwarrior](https://taskwarrior.org) pane for your task list.
 
 ## Table of contents
 
