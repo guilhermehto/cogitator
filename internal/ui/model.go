@@ -375,6 +375,10 @@ type model struct {
 	// When the in-flight build completes, one follow-up build is dispatched
 	// using the latest m.snap at that moment (coalesced, not stale).
 	rowsDirty bool
+	// demo is true under RunDemo. It curates workspaceRows directly and
+	// suppresses the background git/tmux row build so the capture stays
+	// deterministic and never shells out.
+	demo bool
 	// pendingDeletes tracks worktrees whose row was optimistically removed
 	// from the table the moment deletion was confirmed, keyed by canonical
 	// worktree path. The stored Row lets a failed deletion restore the row.
@@ -1768,13 +1772,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			bellC = bellCmd(len(fired))
 		}
 		var buildC tea.Cmd
-		if m.rowsBuilding {
-			// A build is already in flight; mark dirty so the completion
-			// handler dispatches one follow-up build with the latest snap.
-			m.rowsDirty = true
-		} else {
-			m.rowsBuilding = true
-			buildC = buildWorkspaceRowsCmd(m.snap, m.cfg)
+		// Demo mode curates workspaceRows directly; the git/tmux build must
+		// never run (it would shell out and clobber the fixture with nil).
+		if !m.demo {
+			if m.rowsBuilding {
+				// A build is already in flight; mark dirty so the completion
+				// handler dispatches one follow-up build with the latest snap.
+				m.rowsDirty = true
+			} else {
+				m.rowsBuilding = true
+				buildC = buildWorkspaceRowsCmd(m.snap, m.cfg)
+			}
 		}
 		return m, tea.Batch(next, bellC, buildC)
 

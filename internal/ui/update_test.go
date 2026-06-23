@@ -7,10 +7,12 @@ package ui
 // git, or opencode binary is required.
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 	"github.com/guilhermehto/cogitator/internal/workspace"
@@ -118,6 +120,53 @@ func TestSnapshotMsgSetsRowsBuilding(t *testing.T) {
 
 	if !m2.rowsBuilding {
 		t.Error("rowsBuilding must be true after first snapshotMsg")
+	}
+}
+
+// TestSnapshotMsgDemoSuppressesBuild asserts that in demo mode a snapshotMsg
+// neither dispatches the git/tmux row build (rowsBuilding stays false) nor
+// clobbers the curated workspaceRows. This guards the capture path: the build
+// would shell out and replace the fixture with nil.
+func TestSnapshotMsgDemoSuppressesBuild(t *testing.T) {
+	ch := make(chan state.Snapshot, 1)
+	m := snapshotModel(ch)
+	m.demo = true
+	m.workspaceRows = []workspace.Row{
+		makeRow("/r", "/r/a", "main", "curated", workspace.StateRunning, state.AttnActive, fixedNow),
+	}
+
+	snap := state.Snapshot{Sessions: []state.SessionView{{SessionID: "s1"}}}
+	updated, _ := m.Update(snapshotMsg(snap))
+	m2 := updated.(model)
+
+	if m2.rowsBuilding {
+		t.Error("demo mode must not dispatch a row build (rowsBuilding should stay false)")
+	}
+	if len(m2.workspaceRows) != 1 || m2.workspaceRows[0].Title != "curated" {
+		t.Errorf("demo workspaceRows must be preserved, got %v", m2.workspaceRows)
+	}
+}
+
+// TestLiveSessionsForMatchesRunningRows asserts the header summary stays in
+// sync with the roster: liveSessionsFor yields exactly one live session per
+// running worktree row and nothing for stopped/unknown rows.
+func TestLiveSessionsForMatchesRunningRows(t *testing.T) {
+	rows := demoWorktrees(fixedNow)
+	want := 0
+	for _, r := range rows {
+		if r.State == workspace.StateRunning {
+			want++
+		}
+	}
+
+	got := liveSessionsFor(rows)
+	if len(got) != want {
+		t.Fatalf("liveSessionsFor returned %d sessions, want %d (one per running row)", len(got), want)
+	}
+	for _, sv := range got {
+		if sv.Source != state.SourceLive {
+			t.Errorf("derived header session must be SourceLive, got %v", sv.Source)
+		}
 	}
 }
 
@@ -324,5 +373,29 @@ func TestSnapshotMsgCoalescedBuildUsesLatestSnap(t *testing.T) {
 	msg := followUpCmd()
 	if _, ok := msg.(workspaceRowsMsg); !ok {
 		t.Errorf("follow-up cmd must return workspaceRowsMsg; got %T", msg)
+	}
+}
+
+// TestDemoRendersWorktreeRoster builds the model exactly as RunDemo does and
+// asserts View() renders the merged worktree roster — repo headers, branches
+// across both repos — and not the live-session fallback. This is the capture
+// the README screenshot depends on.
+func TestDemoRendersWorktreeRoster(t *testing.T) {
+	rows := demoWorktrees(fixedNow)
+	ch := make(chan state.Snapshot, 1)
+	m := newModel(ch, config.Default(), false, false, nil) // nil tw → no Tasks pane
+	m.demo = true
+	m.workspaceRows = rows
+	m.snap = state.Snapshot{Sessions: liveSessionsFor(rows), UpdatedAt: fixedNow}
+	m.width, m.height = 120, 40
+
+	out := m.View()
+	for _, want := range []string{"cogitator", "api-gateway", "feat/tmux-launcher", "feat/oauth-pkce"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("demo view missing %q", want)
+		}
+	}
+	if strings.Contains(out, "no live or recent sessions") {
+		t.Error("demo must render the worktree roster, not the live-session fallback")
 	}
 }

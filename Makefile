@@ -2,7 +2,7 @@ BIN := cogitator
 SCHEMA_PORT := 17777
 SCHEMA_URL := http://127.0.0.1:$(SCHEMA_PORT)/doc
 
-.PHONY: test lint build run vet ci clean release generate capture-schema
+.PHONY: test lint build run vet ci clean release generate capture-schema demo
 
 test:
 	go test -race -count=1 ./...
@@ -15,6 +15,9 @@ build:
 
 run:
 	go run ./cmd/cogitator
+
+demo: build
+	vhs demo.tape
 
 vet:
 	go vet ./...

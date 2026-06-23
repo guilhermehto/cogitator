@@ -16,6 +16,15 @@
 - `make test` — `go test -race -count=1 ./...`.
 - `make build` / `make run` — build/run the binary.
 - `make generate` — regenerate opencode API models (requires schema; see CONTRIBUTING).
+- `make demo` — rebuild `tui.png` from `demo.tape` (the `--demo` worktree roster).
+
+## Demo / README screenshot
+
+`tui.png` is generated from `demo.tape` with `vhs`. Run `make demo` (or a bare `vhs demo.tape` — the tape self-builds the gitignored binary first). Two non-obvious gotchas are baked into the tape/code; don't undo them:
+
+- **Font:** use a well-tested patched Nerd Font (`Hack Nerd Font`). `vhs` renders through ttyd + headless Chrome, and `0xProto`'s glyphs do not rasterize in xterm.js's WebGL atlas — they show as boxes even when the font is installed and contains the codepoints.
+- **Colour:** `RunDemo` forces `lipgloss.SetColorProfile(termenv.TrueColor)`. The vhs/ttyd pipeline isn't detected as a colour terminal, so without it the capture renders monochrome with no row-selection highlight band.
+- **Deps (macOS):** `brew install charmbracelet/tap/vhs ttyd && brew install --cask font-hack-nerd-font`.
 
 ## Conventions
 
