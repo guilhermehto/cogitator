@@ -54,8 +54,11 @@ watch. Every harness offers two setup paths:
 go install github.com/guilhermehto/cogitator/cmd/cogitator@latest
 ```
 
-**Homebrew:** support is published through `guilhermehto/homebrew-tap` once release
-automation is configured.
+**Homebrew:**
+
+```sh
+brew install guilhermehto/tap/cogitator
+```
 
 ### 2. Run cogitator
 
