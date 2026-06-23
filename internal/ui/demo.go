@@ -1,28 +1,24 @@
 package ui
 
 import (
-	"context"
 	"log/slog"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/guilhermehto/cogitator/internal/config"
-	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/taskwarrior"
+	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
-// RunDemo starts the TUI populated with a curated synthetic snapshot and a
-// fake Taskwarrior backend. No mDNS discovery is performed; no shell-outs to
-// the `task` binary happen. Intended for screenshots / asciinema captures
-// where on-screen content must be deterministic and exercise every visual
-// state the application can render.
-//
-// Mutations driven through the Tasks pane (a / e / d / D / s / U) are
-// accepted by the fake client but silently dropped; the snapshot is never
-// refreshed so the TUI stays visually stable across any key path needed
-// during the capture.
+// RunDemo starts the TUI populated with a curated synthetic worktree roster —
+// the merged worktree/tmux view that is cogitator's headline feature. No mDNS
+// discovery, no git/tmux shell-outs, and no Taskwarrior pane: the workspace
+// rows are injected directly and the background row build is suppressed (the
+// model.demo flag) so the capture is deterministic. Intended for the README
+// screenshot / asciinema captures.
 func RunDemo(cfg *config.Config, logger *slog.Logger) error {
 	if cfg == nil {
 		cfg = config.Default()
@@ -31,271 +27,113 @@ func RunDemo(cfg *config.Config, logger *slog.Logger) error {
 		logger = slog.Default()
 	}
 
-	now := time.Now()
-	snap := state.Snapshot{
-		Sessions:  demoSessions(now),
-		UpdatedAt: now,
-	}
+	// vhs/ttyd records through a pipeline where termenv can't detect colour
+	// support (no tty / bare TERM), so lipgloss falls back to the no-colour
+	// profile and the capture renders monochrome with no selection band. The
+	// demo exists only for screenshots, so force truecolour unconditionally.
+	lipgloss.SetColorProfile(termenv.TrueColor)
 
-	// Buffered channel + a single send. The model reads the snapshot on the
-	// first waitSnapshot tick and then blocks on subsequent reads. That is
-	// exactly the behaviour we want for a static capture — the display
-	// settles once and stays put.
+	now := time.Now()
+	rows := demoWorktrees(now)
+
+	// The snapshot only feeds the header's "N live" count and the timestamp;
+	// the worktree rows below are what the capture showcases. Derive the live
+	// sessions from the running rows so the header stays in sync with the view.
+	snap := state.Snapshot{Sessions: liveSessionsFor(rows), UpdatedAt: now}
+
+	// Buffered channel + a single send: the model reads the snapshot once and
+	// then blocks, so the display settles and stays put for the capture.
 	snaps := make(chan state.Snapshot, 1)
 	snaps <- snap
 
-	fakeTW := &demoClient{tasks: demoTasks(now)}
+	// nil tw suppresses the Tasks pane (twAvail=false).
+	m := newModel(snaps, cfg, false, false, nil)
+	m.demo = true
+	m.workspaceRows = rows
 
-	m := newModel(snaps, cfg, false, false, fakeTW)
-	// Expand the Recent group so the section is visible in the capture.
-	m.recentCollapsed = false
-
-	logger.Info("running demo mode",
-		"sessions", len(snap.Sessions),
-		"tasks", len(fakeTW.tasks))
+	logger.Info("running demo mode", "worktrees", len(rows))
 
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
 }
 
-// demoClient is the synthetic ClientAPI used by RunDemo. Available() returns
-// true so the Tasks pane renders; Export() returns the curated fixture; all
-// mutations succeed without changing state so the snapshot does not churn
-// while keys are exercised for a capture.
-type demoClient struct {
-	tasks []taskwarrior.TaskView
-}
-
-func (d *demoClient) Available() bool { return true }
-
-func (d *demoClient) Export(_ context.Context) ([]taskwarrior.TaskView, error) {
-	return d.tasks, nil
-}
-
-func (d *demoClient) Add(_ context.Context, _ string) error          { return nil }
-func (d *demoClient) Modify(_ context.Context, _, _ string) error    { return nil }
-func (d *demoClient) Done(_ context.Context, _ string) error         { return nil }
-func (d *demoClient) Delete(_ context.Context, _ string) error       { return nil }
-func (d *demoClient) Start(_ context.Context, _ string) error        { return nil }
-func (d *demoClient) Stop(_ context.Context, _ string) error         { return nil }
-func (d *demoClient) Undo(_ context.Context) error                   { return nil }
-
-// demoSessions returns a fixture covering each attention state, both Source
-// kinds, parent/child rendering, multiple agents (for palette colour
-// variety), and a mix of directories so the home-prefix shortening shows up.
-func demoSessions(now time.Time) []state.SessionView {
+// demoWorktrees returns a curated worktree roster across two repos that
+// exercises every row state the view renders: the repo base, running agents
+// across each attention badge (active / permission / question / finished /
+// error), a stopped worktree, and one whose status is unknown (a tmux window
+// exists but the harness can't be probed). Branches and titles read like real
+// in-flight work so the screenshot tells a story.
+func demoWorktrees(now time.Time) []workspace.Row {
 	mins := func(n int) time.Time { return now.Add(time.Duration(-n) * time.Minute) }
 	hours := func(n int) time.Time { return now.Add(time.Duration(-n) * time.Hour) }
 
-	return []state.SessionView{
-		// Live, busy, active.
+	const cog = "~/src/cogitator"
+	const api = "~/src/api-gateway"
+
+	return []workspace.Row{
 		{
-			InstanceID:   "demo-laptop",
-			InstanceName: "laptop",
-			SessionID:    "ses_001",
-			Title:        "Refactor session-store pagination",
-			Agent:        "fabricator",
-			Directory:    "~/src/cogitator",
-			StatusType:   "busy",
-			Source:       state.SourceLive,
-			Attention:    state.AttnActive,
-			LastActivity: mins(0),
-			Created:      hours(2),
-			Provider:     harness.Kind("opencode"),
-		},
-		// Live root waiting on permission, with a generating child.
-		{
-			InstanceID:   "demo-laptop",
-			InstanceName: "laptop",
-			SessionID:    "ses_002",
-			Title:        "Investigate flaky CI run on darwin-arm64",
-			Agent:        "magos-iterator",
-			Directory:    "~/src/cogitator",
-			Source:       state.SourceLive,
-			Attention:    state.AttnPermissionPending,
-			LastActivity: mins(1),
-			Created:      hours(1),
-			Provider:     harness.Kind("opencode"),
+			Repo: cog, Worktree: cog, Branch: "main", IsRoot: true,
+			Harness: "opencode", Title: "Watch local opencode instances",
+			SessionID: "ses_main", State: workspace.StateRunning,
+			Attention: state.AttnActive, LastActivity: mins(0),
 		},
 		{
-			InstanceID:   "demo-laptop",
-			InstanceName: "laptop",
-			SessionID:    "ses_003",
-			ParentID:     "ses_002",
-			Title:        "Run go test ./internal/state/...",
-			Agent:        "enginseer",
-			StatusType:   "generating",
-			Source:       state.SourceLive,
-			Attention:    state.AttnActive,
-			LastActivity: mins(0),
-			Created:      mins(40),
-			Provider:     harness.Kind("opencode"),
-		},
-		// Live, awaiting an answer (codex — exercises the provider badge).
-		{
-			InstanceID:   "demo-server",
-			InstanceName: "server",
-			SessionID:    "ses_004",
-			Title:        "Draft release notes for v0.4.0",
-			Agent:        "scribe",
-			Directory:    "~/work/notes",
-			Source:       state.SourceLive,
-			Attention:    state.AttnQuestionPending,
-			LastActivity: mins(2),
-			Created:      hours(3),
-			Provider:     harness.Kind("codex"),
-		},
-		// Live, busy (claude-code — exercises the claude-code provider badge).
-		{
-			InstanceID:   "demo-laptop",
-			InstanceName: "laptop",
-			SessionID:    "ses_010",
-			Title:        "Implement OAuth2 PKCE flow",
-			Agent:        "fabricator",
-			Directory:    "~/src/api-gateway",
-			StatusType:   "busy",
-			Source:       state.SourceLive,
-			Attention:    state.AttnActive,
-			LastActivity: mins(1),
-			Created:      hours(1),
-			Provider:     harness.Kind("claude-code"),
-		},
-		// Live, errored.
-		{
-			InstanceID:   "demo-server",
-			InstanceName: "server",
-			SessionID:    "ses_005",
-			Title:        "Triage opencode#412 (mDNS race)",
-			Agent:        "logis",
-			Directory:    "~/src/opencode",
-			Source:       state.SourceLive,
-			Attention:    state.AttnErrored,
-			LastActivity: mins(5),
-			Created:      hours(4),
-			Provider:     harness.Kind("opencode"),
-		},
-		// Live, finished — agent completed a requested task; awaiting your return.
-		{
-			InstanceID:   "demo-server",
-			InstanceName: "server",
-			SessionID:    "ses_009",
-			Title:        "Add --bell flag docs to README",
-			Agent:        "scribe",
-			Directory:    "~/src/cogitator",
-			StatusType:   "idle",
-			Source:       state.SourceLive,
-			Attention:    state.AttnFinished,
-			LastActivity: mins(3),
-			Created:      hours(1),
-			Provider:     harness.Kind("opencode"),
-		},
-		// Live, inactive (idle long enough to dim).
-		{
-			InstanceID:   "demo-server",
-			InstanceName: "server",
-			SessionID:    "ses_006",
-			Title:        "Sweep TODO comments under internal/oc",
-			Agent:        "servitor",
-			Directory:    "~/src/cogitator",
-			Source:       state.SourceLive,
-			Attention:    state.AttnInactive,
-			LastActivity: mins(35),
-			Created:      hours(6),
-			Provider:     harness.Kind("opencode"),
-		},
-		// Recent (collapsed group expanded in RunDemo for visibility).
-		{
-			InstanceID:   "demo-laptop",
-			InstanceName: "laptop",
-			SessionID:    "ses_007",
-			Title:        "Spike: terminal-bell rate limiter",
-			Agent:        "fabricator",
-			Directory:    "~/src/cogitator",
-			Source:       state.SourceRecent,
-			Attention:    state.AttnInactive,
-			LastActivity: mins(45),
-			Created:      hours(5),
-			Provider:     harness.Kind("opencode"),
+			Repo: cog, Worktree: cog + "/.wt/tmux-launcher", Branch: "feat/tmux-launcher",
+			Harness: "opencode", Title: "Launch worktrees into tmux windows",
+			SessionID: "ses_w1", State: workspace.StateRunning,
+			Attention: state.AttnPermissionPending, LastActivity: mins(0),
 		},
 		{
-			InstanceID:   "demo-laptop",
-			InstanceName: "laptop",
-			SessionID:    "ses_008",
-			Title:        "Generate OpenAPI types",
-			Agent:        "enginseer",
-			Directory:    "~/src/cogitator",
-			Source:       state.SourceRecent,
-			Attention:    state.AttnInactive,
-			LastActivity: mins(58),
-			Created:      hours(7),
-			Provider:     harness.Kind("opencode"),
+			Repo: cog, Worktree: cog + "/.wt/mdns-race", Branch: "fix/mdns-race",
+			Harness: "codex", Title: "Resolve discovery race on darwin-arm64",
+			SessionID: "ses_w2", State: workspace.StateRunning,
+			Attention: state.AttnQuestionPending, LastActivity: mins(1),
+		},
+		{
+			Repo: cog, Worktree: cog + "/.wt/release", Branch: "chore/release",
+			Harness: "opencode", Title: "Publish to homebrew tap via goreleaser",
+			SessionID: "ses_w3", State: workspace.StateRunning,
+			Attention: state.AttnFinished, LastActivity: mins(2),
+		},
+		{
+			Repo: cog, Worktree: cog + "/.wt/bell", Branch: "spike/bell-ratelimit",
+			Harness: "opencode", Title: "Terminal-bell rate limiter",
+			SessionID: "ses_w4", State: workspace.StateStopped, LastActivity: hours(3),
+		},
+		{
+			Repo: api, Worktree: api, Branch: "main", IsRoot: true,
+			Harness: "claude-code", Title: "Gateway service baseline",
+			SessionID: "ses_g0", State: workspace.StateRunning,
+			Attention: state.AttnActive, LastActivity: mins(1),
+		},
+		{
+			Repo: api, Worktree: api + "/.wt/oauth-pkce", Branch: "feat/oauth-pkce",
+			Harness: "claude-code", Title: "Implement OAuth2 PKCE flow",
+			SessionID: "ses_g1", State: workspace.StateRunning,
+			Attention: state.AttnErrored, LastActivity: mins(4),
+		},
+		{
+			Repo: api, Worktree: api + "/.wt/rate-limit", Branch: "fix/rate-limit",
+			State: workspace.StateUnknown, LastActivity: hours(6),
 		},
 	}
 }
 
-// demoTasks returns a fixture exercising each priority tier, one running
-// task (bold green + play glyph), and a spread of projects / tags / due
-// dates so the column widths look populated in the capture.
-func demoTasks(now time.Time) []taskwarrior.TaskView {
-	days := func(n int) time.Time { return now.AddDate(0, 0, n) }
-
-	return []taskwarrior.TaskView{
-		// Currently running (Start non-zero) → play glyph + bold row.
-		{
-			ID:          "1",
-			Description: "Wire start/stop key into Tasks pane",
-			Project:     "cogitator",
-			Tags:        []string{"ui", "tui"},
-			Priority:    "H",
-			Start:       now.Add(-25 * time.Minute),
-			Urgency:     12.3,
-			Status:      "pending",
-		},
-		{
-			ID:          "2",
-			Description: "Capture demo screenshot for README",
-			Project:     "cogitator",
-			Tags:        []string{"docs"},
-			Priority:    "H",
-			Due:         days(0),
-			Urgency:     11.0,
-			Status:      "pending",
-		},
-		{
-			ID:          "3",
-			Description: "Add macOS code signing to release pipeline",
-			Project:     "release",
-			Tags:        []string{"build", "ci"},
-			Priority:    "M",
-			Due:         days(7),
-			Urgency:     8.4,
-			Status:      "pending",
-		},
-		{
-			ID:          "4",
-			Description: "Investigate mDNS discovery on Linux",
-			Project:     "discovery",
-			Tags:        []string{"linux"},
-			Priority:    "M",
-			Urgency:     6.1,
-			Status:      "pending",
-		},
-		{
-			ID:          "5",
-			Description: "Polish help-line copy",
-			Project:     "cogitator",
-			Tags:        []string{"polish"},
-			Priority:    "L",
-			Urgency:     2.8,
-			Status:      "pending",
-		},
-		{
-			ID:          "6",
-			Description: "Read up on bubbletea v2 migration plan",
-			Project:     "learning",
-			Tags:        []string{"reading"},
-			Urgency:     1.2,
-			Status:      "pending",
-		},
+// liveSessionsFor synthesises one live SessionView per running worktree so the
+// header's live count matches the rendered roster. These never appear in the
+// worktree view itself; they exist only to populate the header summary.
+func liveSessionsFor(rows []workspace.Row) []state.SessionView {
+	var sessions []state.SessionView
+	for _, r := range rows {
+		if r.State != workspace.StateRunning {
+			continue
+		}
+		sessions = append(sessions, state.SessionView{
+			SessionID:    r.SessionID,
+			Source:       state.SourceLive,
+			Attention:    r.Attention,
+			LastActivity: r.LastActivity,
+		})
 	}
+	return sessions
 }

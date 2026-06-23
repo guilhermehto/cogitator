@@ -32,6 +32,7 @@ brews:
   - repository:
       owner: guilhermehto
       name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     directory: Formula
     homepage: https://github.com/guilhermehto/cogitator
     description: Monitor local opencode instances from a single TUI
