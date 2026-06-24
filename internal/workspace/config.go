@@ -33,14 +33,14 @@ type RepoConfig struct {
 }
 
 // LaunchMode selects how cogitator opens a worktree in tmux: as a new window
-// in the current session ("window", the default) or as a brand-new tmux
-// session ("session").
+// in the current session ("window") or as a brand-new tmux session
+// ("session", the default).
 type LaunchMode string
 
 const (
-	// LaunchWindow opens worktrees as new tmux windows (the default).
+	// LaunchWindow opens worktrees as new tmux windows.
 	LaunchWindow LaunchMode = "window"
-	// LaunchSession opens worktrees as new tmux sessions.
+	// LaunchSession opens worktrees as new tmux sessions (the default).
 	LaunchSession LaunchMode = "session"
 )
 
@@ -52,7 +52,7 @@ type Config struct {
 	// (e.g. "opencode"). Empty means no default is set.
 	DefaultHarness string `json:"defaultHarness,omitempty"`
 	// LaunchMode selects whether worktrees open as a new tmux window or a new
-	// tmux session. Empty defaults to LaunchWindow.
+	// tmux session. Empty defaults to LaunchSession.
 	LaunchMode LaunchMode `json:"launchMode,omitempty"`
 }
 
@@ -79,9 +79,9 @@ func configDir() (string, error) {
 }
 
 // normalizeLaunchMode coerces an arbitrary on-disk value to a known LaunchMode.
-// Empty stays empty (callers treat empty as LaunchWindow); LaunchSession is
-// preserved; any other value falls back to LaunchWindow so a typo can never
-// produce an undefined launch path.
+// Empty stays empty (callers treat empty as the default, LaunchSession);
+// LaunchWindow is preserved; any other value falls back to LaunchSession so a
+// typo can never produce an undefined launch path.
 func normalizeLaunchMode(m LaunchMode) LaunchMode {
 	switch m {
 	case LaunchSession:
@@ -89,7 +89,7 @@ func normalizeLaunchMode(m LaunchMode) LaunchMode {
 	case "", LaunchWindow:
 		return m
 	default:
-		return LaunchWindow
+		return LaunchSession
 	}
 }
 

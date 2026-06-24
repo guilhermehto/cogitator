@@ -238,13 +238,13 @@ type viewMarker interface {
 }
 
 // launchModeFor maps the workspace config's LaunchMode to the tmuxctl mode used
-// by the action Cmds. LaunchSession maps to ModeSession; everything else
-// (including the empty default) maps to ModeWindow.
+// by the action Cmds. LaunchWindow maps to ModeWindow; everything else
+// (including the empty default) maps to ModeSession.
 func launchModeFor(m workspace.LaunchMode) tmuxctl.LaunchMode {
-	if m == workspace.LaunchSession {
-		return tmuxctl.ModeSession
+	if m == workspace.LaunchWindow {
+		return tmuxctl.ModeWindow
 	}
-	return tmuxctl.ModeWindow
+	return tmuxctl.ModeSession
 }
 
 // gitOps is the injectable seam for git worktree operations.
@@ -365,7 +365,8 @@ type model struct {
 	removeRepoTarget string
 	// launchMode is the resolved tmux launch mode (window vs session) read from
 	// workspace config. Refreshed on each buildWorkspaceRows so config edits
-	// take effect without a restart. Zero value (ModeWindow) is safe.
+	// take effect without a restart. The zero value never drives a real launch —
+	// every launch path resolves the mode from config first (default: session).
 	launchMode tmuxctl.LaunchMode
 	// rowsBuilding is true while a background buildWorkspaceRowsCmd is in
 	// flight. Only one build runs at a time; a second snapshotMsg while a

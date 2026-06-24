@@ -18,7 +18,7 @@ cogitator is a TUI dashboard for your harnesses. It gives you a live view of ses
 
 - **See status at a glance**: discovers running instances, flagging which sessions need you (permission requests, pending questions, errors).
 - **Create git worktrees**: spin up a new worktree for a branch, or fetch, pull, and delete existing ones, straight from the roster.
-- **Navigate into them**: jump to a running agent or resume a stopped one in a tmux window with a single keystroke.
+- **Navigate into them**: jump to a running agent or resume a stopped one in a tmux session (or window) with a single keystroke.
 - **Works across harnesses**: opencode, Claude Code, Codex, and omp, with an optional [Taskwarrior](https://taskwarrior.org) pane for your task list.
 
 ## Table of contents
@@ -311,7 +311,7 @@ no in-app setter, so editing this file is the only way to change them.
     "/Users/you/src/another-project"
   ],
   "defaultHarness": "opencode",
-  "launchMode": "window"
+  "launchMode": "session"
 }
 ```
 
@@ -319,19 +319,20 @@ no in-app setter, so editing this file is the only way to change them.
 | --- | --- | --- | --- |
 | `repos` | string array | `[]` | Absolute paths to the git repositories cogitator tracks for worktree launching. Normally managed from the UI — press `A` in the Sessions pane to fuzzy-find and add a repo — so entries usually appear here without hand-editing. Paths are canonicalized; a configured repo missing from disk is still listed but its worktree actions are disabled. |
 | `defaultHarness` | string | `opencode` | Harness pre-selected when you create a new worktree (`n`). One of `opencode`, `claude-code`, `codex`, `omp`. Empty falls back to `opencode`. |
-| `launchMode` | string | `window` | How a worktree opens in tmux: `window` or `session`. Empty or any unrecognized value falls back to `window`. |
+| `launchMode` | string | `session` | How a worktree opens in tmux: `window` or `session`. Empty or any unrecognized value falls back to `session`. |
 
 ### tmux window vs session
 
 `launchMode` controls how launching or jumping to a worktree places it in tmux:
 
-- **`window`** (default) — opens each worktree as a new **window in your current tmux
-  session**. Worktrees stay grouped under one session; move between them with your usual
-  tmux window keys (`prefix` + number / `n` / `p`). Best when you run cogitator inside an
-  existing tmux session and want everything in one place.
-- **`session`** — opens each worktree as its own **new tmux session**. Each worktree is
-  isolated with its own window list; switch with tmux's session switcher (`prefix` + `s`)
-  or cogitator's own switcher (`ctrl+P`). Best when you prefer one session per task or branch.
+- **`session`** (default) — opens each worktree as its own **new tmux session**. Each
+  worktree is isolated with its own window list; switch with tmux's session switcher
+  (`prefix` + `s`) or cogitator's own switcher (`ctrl+P`). Best when you prefer one session
+  per task or branch.
+- **`window`** — opens each worktree as a new **window in your current tmux session**.
+  Worktrees stay grouped under one session; move between them with your usual tmux window
+  keys (`prefix` + number / `n` / `p`). Best when you run cogitator inside an existing tmux
+  session and want everything in one place.
 
 Either way, cogitator reuses an existing window/session for a worktree when one is already
 open instead of creating a duplicate. Edits to `launchMode` take effect on the next launch —

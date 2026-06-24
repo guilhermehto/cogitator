@@ -22,6 +22,26 @@ import (
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
+// TestLaunchModeForDefaultsToSession locks the default launch mode: an unset
+// (empty) or unrecognized workspace LaunchMode resolves to a tmux session;
+// only an explicit "window" resolves to a tmux window.
+func TestLaunchModeForDefaultsToSession(t *testing.T) {
+	cases := []struct {
+		in   workspace.LaunchMode
+		want tmuxctl.LaunchMode
+	}{
+		{"", tmuxctl.ModeSession},
+		{workspace.LaunchSession, tmuxctl.ModeSession},
+		{workspace.LaunchWindow, tmuxctl.ModeWindow},
+		{"bogus", tmuxctl.ModeSession},
+	}
+	for _, c := range cases {
+		if got := launchModeFor(c.in); got != c.want {
+			t.Errorf("launchModeFor(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Fake implementations
 // ---------------------------------------------------------------------------

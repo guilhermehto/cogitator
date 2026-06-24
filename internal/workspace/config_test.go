@@ -360,7 +360,7 @@ func TestLoadConfigDefaultsLaunchMode(t *testing.T) {
 	}
 }
 
-func TestLoadConfigUnknownLaunchModeFallsBackToWindow(t *testing.T) {
+func TestLoadConfigUnknownLaunchModeFallsBackToSession(t *testing.T) {
 	tmp := t.TempDir()
 	withConfigEnv(t, tmp)
 
@@ -379,7 +379,7 @@ func TestLoadConfigUnknownLaunchModeFallsBackToWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if loaded.LaunchMode != workspace.LaunchWindow {
-		t.Errorf("LaunchMode: got %q, want %q (fallback)", loaded.LaunchMode, workspace.LaunchWindow)
+	if loaded.LaunchMode != workspace.LaunchSession {
+		t.Errorf("LaunchMode: got %q, want %q (fallback)", loaded.LaunchMode, workspace.LaunchSession)
 	}
 }
