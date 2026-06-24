@@ -383,3 +383,43 @@ func TestLoadConfigUnknownLaunchModeFallsBackToSession(t *testing.T) {
 		t.Errorf("LaunchMode: got %q, want %q (fallback)", loaded.LaunchMode, workspace.LaunchSession)
 	}
 }
+
+func TestForceDeleteEnabledDefaultsToTrueWhenUnset(t *testing.T) {
+	tmp := t.TempDir()
+	withConfigEnv(t, tmp)
+
+	// No forceDeleteWorktree key on disk → force is the default (enabled).
+	if err := workspace.SaveConfig(workspace.Config{}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	loaded, err := workspace.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if loaded.ForceDeleteWorktree != nil {
+		t.Errorf("unset force-delete must stay nil on disk, got %v", *loaded.ForceDeleteWorktree)
+	}
+	if !loaded.ForceDeleteEnabled() {
+		t.Error("ForceDeleteEnabled must default to true when unset")
+	}
+}
+
+func TestForceDeleteEnabledRespectsExplicitFalse(t *testing.T) {
+	tmp := t.TempDir()
+	withConfigEnv(t, tmp)
+
+	disabled := false
+	if err := workspace.SaveConfig(workspace.Config{ForceDeleteWorktree: &disabled}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	loaded, err := workspace.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if loaded.ForceDeleteWorktree == nil || *loaded.ForceDeleteWorktree {
+		t.Fatalf("explicit false must round-trip, got %v", loaded.ForceDeleteWorktree)
+	}
+	if loaded.ForceDeleteEnabled() {
+		t.Error("ForceDeleteEnabled must be false when explicitly disabled")
+	}
+}

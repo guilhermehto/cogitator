@@ -251,7 +251,7 @@ func launchModeFor(m workspace.LaunchMode) tmuxctl.LaunchMode {
 type gitOps interface {
 	AddWorktree(repoPath, branch, dest string) (string, error)
 	FetchAndAddWorktree(repoPath, branch, dest string) (string, error)
-	RemoveWorktree(repoPath, worktreePath string) error
+	RemoveWorktree(repoPath, worktreePath string, force bool) error
 	BranchMergeStatus(repoPath, branch string) (git.MergeState, string)
 	Pull(worktreePath, branch string) (string, error)
 }
@@ -267,8 +267,8 @@ func (realGitOps) FetchAndAddWorktree(repoPath, branch, dest string) (string, er
 	return git.FetchAndAddWorktree(repoPath, branch, dest)
 }
 
-func (realGitOps) RemoveWorktree(repoPath, worktreePath string) error {
-	return git.RemoveWorktree(repoPath, worktreePath)
+func (realGitOps) RemoveWorktree(repoPath, worktreePath string, force bool) error {
+	return git.RemoveWorktree(repoPath, worktreePath, force)
 }
 
 func (realGitOps) BranchMergeStatus(repoPath, branch string) (git.MergeState, string) {
@@ -646,15 +646,15 @@ func mergeStatusCmd(gitOp gitOps, repo, branch, path string) tea.Cmd {
 // then best-effort closes its attached tmux window/session so no dead pane is
 // left pointing at a missing directory. The git removal is the only step that
 // can fail the operation; tmux cleanup is advisory and its error is ignored.
-func deleteWorktreeCmd(ops tmuxOps, gitOp gitOps, repo, path string, mode tmuxctl.LaunchMode) tea.Cmd {
+func deleteWorktreeCmd(ops tmuxOps, gitOp gitOps, repo, path string, mode tmuxctl.LaunchMode, force bool) tea.Cmd {
 	return func() tea.Msg {
-		var removeFn func(string, string) error
+		var removeFn func(string, string, bool) error
 		if gitOp != nil {
 			removeFn = gitOp.RemoveWorktree
 		} else {
 			removeFn = git.RemoveWorktree
 		}
-		if err := removeFn(repo, path); err != nil {
+		if err := removeFn(repo, path, force); err != nil {
 			return worktreeDeletedMsg{path: path, err: err}
 		}
 
@@ -1191,7 +1191,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// the keypress was ignored. removeWorktreeRow stashes the row
 					// in pendingDeletes so a failed deletion can restore it.
 					m.removeWorktreeRow(target)
-					return m, deleteWorktreeCmd(m.tmux, m.gitOp, target.Repo, target.Worktree, m.launchMode)
+					// Force is the default; honour an explicit opt-out in config.
+					force := true
+					if wsCfg, err := workspace.LoadConfig(); err == nil {
+						force = wsCfg.ForceDeleteEnabled()
+					}
+					return m, deleteWorktreeCmd(m.tmux, m.gitOp, target.Repo, target.Worktree, m.launchMode, force)
 				}
 				m.prompt = promptIdle
 				m.deleteTarget = workspace.Row{}

@@ -127,16 +127,25 @@ func firstNonEmptyLine(s string) string {
 }
 
 // RemoveWorktree removes the worktree at worktreePath belonging to the
-// repository rooted at repoPath. It runs `git worktree remove <worktreePath>`
-// from repoPath.
+// repository rooted at repoPath. It runs `git worktree remove [--force]
+// <worktreePath>` from repoPath.
 //
-// No --force is passed: git refuses (returning a non-nil error) when the
-// worktree has uncommitted or untracked changes, which protects unsaved work.
-// Callers should surface that error to the user. Only the worktree directory
-// and its administrative files are removed; the branch it had checked out is
-// left intact, so committed work is never lost by this call.
-func RemoveWorktree(repoPath, worktreePath string) error {
-	if _, err := runGit(repoPath, "worktree", "remove", worktreePath); err != nil {
+// When force is false, git refuses (returning a non-nil error) if the worktree
+// has uncommitted or untracked changes, protecting unsaved work. When force is
+// true, `--force` is passed so a dirty worktree is removed and its uncommitted
+// changes are discarded. A single --force does not override a *locked* worktree
+// (git requires `-f -f` for that); such a removal still returns an error.
+//
+// Only the worktree directory and its administrative files are removed; the
+// branch it had checked out is left intact, so committed work is never lost by
+// this call.
+func RemoveWorktree(repoPath, worktreePath string, force bool) error {
+	args := []string{"worktree", "remove"}
+	if force {
+		args = append(args, "--force")
+	}
+	args = append(args, worktreePath)
+	if _, err := runGit(repoPath, args...); err != nil {
 		return fmt.Errorf("git worktree remove: %w", err)
 	}
 	return nil

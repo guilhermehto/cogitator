@@ -54,14 +54,27 @@ type Config struct {
 	// LaunchMode selects whether worktrees open as a new tmux window or a new
 	// tmux session. Empty defaults to LaunchSession.
 	LaunchMode LaunchMode `json:"launchMode,omitempty"`
+	// ForceDeleteWorktree controls whether deleting a worktree passes
+	// `git worktree remove --force`, discarding any uncommitted changes. A nil
+	// pointer (the unset default) enables force; set it to false to require a
+	// clean worktree before deletion. Resolve via ForceDeleteEnabled.
+	ForceDeleteWorktree *bool `json:"forceDeleteWorktree,omitempty"`
+}
+
+// ForceDeleteEnabled reports whether worktree deletion should pass
+// `git worktree remove --force`. Force is the default: it is enabled unless the
+// user explicitly set ForceDeleteWorktree to false in the config.
+func (c Config) ForceDeleteEnabled() bool {
+	return c.ForceDeleteWorktree == nil || *c.ForceDeleteWorktree
 }
 
 // configFile is the on-disk JSON representation. It mirrors Config but uses
 // raw string slices so the file stays human-editable without the Missing field.
 type configFile struct {
-	Repos          []string   `json:"repos"`
-	DefaultHarness string     `json:"defaultHarness,omitempty"`
-	LaunchMode     LaunchMode `json:"launchMode,omitempty"`
+	Repos               []string   `json:"repos"`
+	DefaultHarness      string     `json:"defaultHarness,omitempty"`
+	LaunchMode          LaunchMode `json:"launchMode,omitempty"`
+	ForceDeleteWorktree *bool      `json:"forceDeleteWorktree,omitempty"`
 }
 
 // configDir returns the directory that holds cogitator's config file.
@@ -133,9 +146,10 @@ func LoadConfig() (Config, error) {
 	}
 
 	cfg := Config{
-		DefaultHarness: raw.DefaultHarness,
-		LaunchMode:     normalizeLaunchMode(raw.LaunchMode),
-		Repos:          make([]RepoConfig, 0, len(raw.Repos)),
+		DefaultHarness:      raw.DefaultHarness,
+		LaunchMode:          normalizeLaunchMode(raw.LaunchMode),
+		ForceDeleteWorktree: raw.ForceDeleteWorktree,
+		Repos:               make([]RepoConfig, 0, len(raw.Repos)),
 	}
 
 	for _, rawPath := range raw.Repos {
@@ -172,9 +186,10 @@ func SaveConfig(cfg Config) error {
 	}
 
 	raw := configFile{
-		DefaultHarness: cfg.DefaultHarness,
-		LaunchMode:     normalizeLaunchMode(cfg.LaunchMode),
-		Repos:          make([]string, 0, len(cfg.Repos)),
+		DefaultHarness:      cfg.DefaultHarness,
+		LaunchMode:          normalizeLaunchMode(cfg.LaunchMode),
+		ForceDeleteWorktree: cfg.ForceDeleteWorktree,
+		Repos:               make([]string, 0, len(cfg.Repos)),
 	}
 	for _, r := range cfg.Repos {
 		raw.Repos = append(raw.Repos, r.Path)
