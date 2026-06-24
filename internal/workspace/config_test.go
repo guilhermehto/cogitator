@@ -423,3 +423,51 @@ func TestForceDeleteEnabledRespectsExplicitFalse(t *testing.T) {
 		t.Error("ForceDeleteEnabled must be false when explicitly disabled")
 	}
 }
+
+// TestSetDefaultHarness_RoundTrip verifies the setter persists a kind and that
+// an empty kind clears the default.
+func TestSetDefaultHarness_RoundTrip(t *testing.T) {
+	withConfigEnv(t, t.TempDir())
+
+	if err := workspace.SetDefaultHarness("codex"); err != nil {
+		t.Fatalf("SetDefaultHarness: %v", err)
+	}
+	cfg, err := workspace.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.DefaultHarness != "codex" {
+		t.Errorf("DefaultHarness = %q, want codex", cfg.DefaultHarness)
+	}
+
+	if err := workspace.SetDefaultHarness(""); err != nil {
+		t.Fatalf("SetDefaultHarness clear: %v", err)
+	}
+	cfg, _ = workspace.LoadConfig()
+	if cfg.DefaultHarness != "" {
+		t.Errorf("DefaultHarness = %q, want empty after clear", cfg.DefaultHarness)
+	}
+}
+
+// TestSetLaunchMode_PreservesOtherFields verifies the load-modify-save setters
+// do not clobber each other's fields.
+func TestSetLaunchMode_PreservesOtherFields(t *testing.T) {
+	withConfigEnv(t, t.TempDir())
+
+	if err := workspace.SetDefaultHarness("opencode"); err != nil {
+		t.Fatalf("seed harness: %v", err)
+	}
+	if err := workspace.SetLaunchMode(workspace.LaunchWindow); err != nil {
+		t.Fatalf("SetLaunchMode: %v", err)
+	}
+	cfg, err := workspace.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.LaunchMode != workspace.LaunchWindow {
+		t.Errorf("LaunchMode = %q, want window", cfg.LaunchMode)
+	}
+	if cfg.DefaultHarness != "opencode" {
+		t.Errorf("SetLaunchMode must preserve DefaultHarness; got %q", cfg.DefaultHarness)
+	}
+}
