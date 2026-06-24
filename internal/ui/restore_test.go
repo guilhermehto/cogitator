@@ -103,3 +103,24 @@ func TestRosterToRestored_HarnessToProviderMapping(t *testing.T) {
 		}
 	}
 }
+
+func TestRosterToRestored_PrefersProviderOverHarness(t *testing.T) {
+	now := time.Now()
+	roster := map[string]workspace.RosterEntry{
+		"/repo/x": {
+			Dir:          "/repo/x",
+			Harness:      "opencode",
+			Provider:     "codex",
+			SessionID:    "s1",
+			Attention:    "finished",
+			LastActivity: now,
+		},
+	}
+	got := rosterToRestored(roster)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(got))
+	}
+	if got[0].Provider != harness.Kind("codex") {
+		t.Fatalf("provider = %q, want codex", got[0].Provider)
+	}
+}

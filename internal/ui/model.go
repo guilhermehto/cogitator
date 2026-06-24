@@ -468,7 +468,10 @@ func launchCmd(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl.L
 		res := inner()
 		// Stamp the session identity so the Update handler can mark it viewed
 		// (clearing AttnFinished) when the select succeeds.
-		res.provider = row.Harness
+		res.provider = row.Provider
+		if res.provider == "" {
+			res.provider = row.Harness
+		}
 		res.sessionID = row.SessionID
 		return res
 	}
@@ -1621,6 +1624,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				entry := workspace.RosterEntry{
 					Dir:          msg.canonDest,
 					Harness:      kind,
+					Provider:     kind,
 					LastActivity: time.Now(),
 				}
 				select {

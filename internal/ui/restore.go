@@ -11,9 +11,9 @@ import (
 //   - empty SessionID (no session to key on)
 //   - attention outside the sticky set (active/inactive are transient)
 //
-// The Harness field maps to the provider kind; an empty Harness defaults to
-// "opencode", matching the defaulting in workspace/applySnapshot so the seed
-// key (provider, sessionID) aligns with the snapshot row's Provider.
+// The Provider field maps to the provider kind; legacy entries fall back to
+// Harness, and an empty value defaults to "opencode", matching the defaulting
+// in workspace/applySnapshot so the seed key aligns with snapshot Provider.
 func rosterToRestored(roster map[string]workspace.RosterEntry) []state.RestoredSession {
 	if len(roster) == 0 {
 		return nil
@@ -27,7 +27,10 @@ func rosterToRestored(roster map[string]workspace.RosterEntry) []state.RestoredS
 		if !attn.IsSticky() {
 			continue
 		}
-		kind := harness.Kind(e.Harness)
+		kind := harness.Kind(e.Provider)
+		if kind == "" {
+			kind = harness.Kind(e.Harness)
+		}
 		if kind == "" {
 			kind = harness.Kind("opencode")
 		}

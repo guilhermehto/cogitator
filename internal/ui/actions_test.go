@@ -358,6 +358,28 @@ func TestEnterOnRunningRowCallsSelect(t *testing.T) {
 	}
 }
 
+func TestEnterOnRunningRowMarksLiveProvider(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{
+		available:        true,
+		findWindowResult: "main:1",
+		processAlive:     true,
+	}
+	row := makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnFinished, fixedNow)
+	row.Harness = "opencode"
+	row.Provider = "codex"
+	row.SessionID = "C1"
+	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []workspace.Row{row})
+
+	_, cmd := m.Update(keyMsg("enter"))
+	result, ok := runCmd(cmd).(launchResultMsg)
+	if !ok {
+		t.Fatal("expected launchResultMsg")
+	}
+	if result.provider != "codex" {
+		t.Fatalf("provider = %q, want codex", result.provider)
+	}
+}
+
 // In session mode, jumping to a running row must switch to the session (and
 // let tmux restore its last-active window) rather than forcing the worktree's
 // original window via Select.
