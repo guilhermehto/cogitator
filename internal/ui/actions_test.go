@@ -1439,6 +1439,45 @@ func TestWorktreeDeletedMsgErrorRestoresPendingRow(t *testing.T) {
 	}
 }
 
+// A failed deletion in a multi-repo table must re-insert the row adjacent to
+// its repo's other rows, not append it to the end. renderWorkspaceRows groups
+// rows by repo while the session cursor indexes the flat slice, so an
+// out-of-group append leaves the row rendered inside its group but with an
+// out-of-sequence index — making j/k navigation skip over it, so the user
+// cannot select the failed worktree to clean it up. Regression test for that
+// "jump over" bug.
+func TestWorktreeDeletedMsgErrorRestoresRowGroupedByRepo(t *testing.T) {
+	saved := makeRow("/r1", "/r1/b", "feat", "b", workspace.StateStopped, state.AttnInactive, fixedNow)
+	m := model{
+		width: 120,
+		// /r1/b was optimistically removed; /r2 sits between /r1's rows, so a
+		// naive append would land /r1/b after /r2/x and break grouping.
+		workspaceRows: []workspace.Row{
+			makeRow("/r1", "/r1/a", "main", "a", workspace.StateRunning, state.AttnActive, fixedNow),
+			makeRow("/r2", "/r2/x", "main", "x", workspace.StateStopped, state.AttnInactive, fixedNow),
+		},
+		sessionCursor:  1, // on /r2/x
+		pendingDeletes: map[string]workspace.Row{"/r1/b": saved},
+	}
+
+	updated, _ := m.Update(worktreeDeletedMsg{path: "/r1/b", err: errors.New("modified files")})
+	m2 := updated.(model)
+
+	want := []string{"/r1/a", "/r1/b", "/r2/x"}
+	if len(m2.workspaceRows) != len(want) {
+		t.Fatalf("row count = %d, want %d (%+v)", len(m2.workspaceRows), len(want), m2.workspaceRows)
+	}
+	for i, w := range want {
+		if m2.workspaceRows[i].Worktree != w {
+			t.Fatalf("flat row order must keep same-repo rows contiguous so navigation matches the view\n got index %d = %q, want %q", i, m2.workspaceRows[i].Worktree, w)
+		}
+	}
+	// The cursor must follow its row (/r2/x) past the inserted row.
+	if m2.sessionCursor != 2 || m2.workspaceRows[m2.sessionCursor].Worktree != "/r2/x" {
+		t.Errorf("cursor must stay on /r2/x at index 2; got index %d (%q)", m2.sessionCursor, m2.workspaceRows[m2.sessionCursor].Worktree)
+	}
+}
+
 // A successful deletion must clear the pending entry so a later snapshot
 // rebuild is no longer filtered for that path.
 func TestWorktreeDeletedMsgSuccessClearsPending(t *testing.T) {

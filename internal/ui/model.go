@@ -750,6 +750,30 @@ func (m *model) removeWorktreeRow(target workspace.Row) {
 	}
 }
 
+// restoreWorktreeRow re-inserts a row that was optimistically removed for a
+// deletion that then failed. It is placed immediately after its repo's last
+// existing row (appended only when the repo has no other rows) so same-repo
+// rows stay contiguous in the flat list. This matters because renderWorkspaceRows
+// groups rows by repo while the session cursor indexes the flat slice: a row
+// appended out of group order renders inside its group but carries an
+// out-of-sequence index, making j/k navigation skip over it. The session cursor
+// is nudged so it keeps pointing at the same row. The next snapshot rebuild
+// reconciles exact intra-repo ordering.
+func (m *model) restoreWorktreeRow(saved workspace.Row) {
+	insertAt := len(m.workspaceRows)
+	for i, row := range m.workspaceRows {
+		if row.Repo == saved.Repo {
+			insertAt = i + 1
+		}
+	}
+	m.workspaceRows = append(m.workspaceRows, workspace.Row{})
+	copy(m.workspaceRows[insertAt+1:], m.workspaceRows[insertAt:])
+	m.workspaceRows[insertAt] = saved
+	if insertAt <= m.sessionCursor {
+		m.sessionCursor++
+	}
+}
+
 // filterPendingDeletes drops rows whose worktree is awaiting deletion. A
 // snapshot-driven rebuild can list a worktree that git has not finished
 // removing yet; without this filter the row would flash back into the table
@@ -1722,9 +1746,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tmuxHint = fmt.Sprintf("delete failed: %v", msg.err)
 			// The row was optimistically removed at confirm time; restore it so
 			// a failed deletion does not silently drop the worktree from view.
-			// The next snapshot rebuild reconciles ordering.
 			if saved, ok := m.pendingDeletes[msg.path]; ok {
-				m.workspaceRows = append(m.workspaceRows, saved)
+				m.restoreWorktreeRow(saved)
 				delete(m.pendingDeletes, msg.path)
 			}
 			return m, nil
