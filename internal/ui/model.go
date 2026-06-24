@@ -116,6 +116,12 @@ const (
 	// key. No input is collected. Placed last so existing model{} literals in
 	// tests keep their iota values.
 	promptHelp
+	// promptSettings is active while the floating settings modal ('S') is
+	// open. It lets the user choose a persistent default harness (or "always
+	// ask") and the launch mode; changes are written to config.json
+	// immediately. Placed last so existing model{} literals keep their iota
+	// values.
+	promptSettings
 )
 
 // launchResultMsg is returned by launchCmd / resumeCmd after the tmux
@@ -132,6 +138,10 @@ type launchResultMsg struct {
 	provider   string
 	instanceID string
 	sessionID  string
+	// harnessKind is the effective harness actually (re)launched when a
+	// configured default overrode the row's recorded harness; empty otherwise.
+	// The launch handler upserts the roster to match only when it is set.
+	harnessKind string
 }
 
 // worktreeCreatedMsg is returned by newWorktreeCmd after git.AddWorktree
@@ -343,6 +353,17 @@ type model struct {
 	// currently highlighted choice. Defaults to the index of DefaultHarness
 	// (or opencode when unset).
 	harnessChooserCursor int
+	// settingsCursor is the highlighted row in the settings modal
+	// (promptSettings): 0 = default harness, 1 = launch mode.
+	settingsCursor int
+	// settingsDefaultHarness and settingsLaunchMode are the settings modal's
+	// working copy of the persisted config, snapshotted on open and written
+	// back on each change. An empty settingsDefaultHarness means "always ask".
+	settingsDefaultHarness string
+	settingsLaunchMode     workspace.LaunchMode
+	// settingsErr holds the last config-save error shown in the settings modal
+	// (empty when the last write succeeded).
+	settingsErr string
 	// rosterUpserts is the channel used to inject create-time roster entries
 	// into the recorder without calling workspace.Save directly. Nil when the
 	// recorder is not wired (e.g. in tests that don't need roster writes).
@@ -468,8 +489,8 @@ type model struct {
 //   - no window: EnsureWindow → Select
 //
 // The function is a tea.Cmd (runs off the UI goroutine).
-func launchCmd(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl.LaunchMode) tea.Cmd {
-	inner := launchInner(ops, row, harnOp, mode)
+func launchCmd(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl.LaunchMode, defaultKind string) tea.Cmd {
+	inner := launchInner(ops, row, harnOp, mode, defaultKind)
 	return func() tea.Msg {
 		res := inner()
 		// Stamp the session identity so the Update handler can mark it viewed
@@ -483,7 +504,38 @@ func launchCmd(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl.L
 	}
 }
 
-func launchInner(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl.LaunchMode) func() launchResultMsg {
+// launchArgv resolves the harness launch argv for row. A configured,
+// already-validated default kind overrides the row's recorded harness;
+// overrideKind is the new kind when an override happened and empty otherwise,
+// so callers upsert the roster only on a real switch. Falls back to opencode
+// when the harness cannot be resolved.
+func launchArgv(row workspace.Row, harnOp harnessOps, defaultKind string) (argv []string, overrideKind harness.Kind) {
+	kind := harness.Kind(row.Harness)
+	if kind == "" {
+		kind = harness.KindOpenCode
+	}
+	if defaultKind != "" && harness.Kind(defaultKind) != kind {
+		kind = harness.Kind(defaultKind)
+		overrideKind = kind
+	}
+	if harnOp != nil {
+		if h, err := harnOp.Get(kind); err == nil {
+			// On an override the row's SessionID belongs to the previous
+			// harness and is invalid for the new one; start a fresh session.
+			token := row.SessionID
+			if overrideKind != "" {
+				token = ""
+			}
+			argv = h.LaunchArgv(row.Worktree, token)
+		}
+	}
+	if len(argv) == 0 {
+		argv = []string{"opencode", "--mdns", row.Worktree}
+	}
+	return argv, overrideKind
+}
+
+func launchInner(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl.LaunchMode, defaultKind string) func() launchResultMsg {
 	return func() launchResultMsg {
 		if ops == nil || !ops.Available() {
 			return launchResultMsg{dir: row.Worktree, err: tmuxctl.ErrNotAvailable}
@@ -491,21 +543,9 @@ func launchInner(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl
 
 		dir := row.Worktree
 
-		// Resolve the harness argv for resume/launch.
-		harnessKind := harness.Kind(row.Harness)
-		if harnessKind == "" {
-			harnessKind = harness.KindOpenCode
-		}
-		var argv []string
-		if harnOp != nil {
-			if h, err := harnOp.Get(harnessKind); err == nil {
-				argv = h.LaunchArgv(dir, row.SessionID)
-			}
-		}
-		if len(argv) == 0 {
-			// Fallback: use opencode directly.
-			argv = []string{"opencode", "--mdns", dir}
-		}
+		// Resolve the harness argv; a configured default overrides the row's
+		// recorded harness on a cold (re)launch (overrideKind set only then).
+		argv, overrideKind := launchArgv(row, harnOp, defaultKind)
 
 		// selectTarget moves the client to target. In session mode it switches
 		// to the session and lets tmux restore its last-active window (so you
@@ -537,7 +577,7 @@ func launchInner(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl
 			if err := ops.RelaunchInWindow(target, argv); err != nil {
 				return launchResultMsg{dir: dir, err: err}
 			}
-			return launchResultMsg{dir: dir, launched: true, err: selectTarget(target)}
+			return launchResultMsg{dir: dir, launched: true, harnessKind: string(overrideKind), err: selectTarget(target)}
 		}
 
 		// No window exists — create one and select it.
@@ -549,7 +589,7 @@ func launchInner(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl
 		if err != nil {
 			return launchResultMsg{dir: dir, err: err}
 		}
-		return launchResultMsg{dir: dir, launched: true, err: selectTarget(newTarget)}
+		return launchResultMsg{dir: dir, launched: true, harnessKind: string(overrideKind), err: selectTarget(newTarget)}
 	}
 }
 
@@ -1050,22 +1090,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.worktreeFromRemote = false
 						return m, inputCmd
 					}
-					// Carry the branch forward and open the harness chooser.
+					// Carry the branch forward. When a resolvable default harness
+					// is configured, skip the chooser and launch with it directly;
+					// otherwise open the chooser for a per-launch choice.
 					m.newWorktreeBranch = branch
 					m.input.Blur()
 					m.input.SetValue("")
+					fromRemote := m.worktreeFromRemote
+					if dk := resolvedDefaultHarness(m.harnOp); dk != "" {
+						m2, cmd := m.startNewWorktree(repoPath, branch, dk, fromRemote)
+						return m2, tea.Batch(inputCmd, cmd)
+					}
 					m.prompt = promptChooseHarness
 					m.harnessChooserKinds = harnessChooserKinds(m.harnOp)
 					m.harnessChooserCursor = defaultHarnessIndex(m.harnessChooserKinds)
-					// Override default cursor from workspace config when set.
-					if wsCfg, err := workspace.LoadConfig(); err == nil && wsCfg.DefaultHarness != "" {
-						for i, k := range m.harnessChooserKinds {
-							if string(k) == wsCfg.DefaultHarness {
-								m.harnessChooserCursor = i
-								break
-							}
-						}
-					}
 					return m, inputCmd
 
 				case "esc":
@@ -1098,29 +1136,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if chosenKind == "" {
 						chosenKind = string(harness.KindOpenCode)
 					}
-					fromRemote := m.worktreeFromRemote
-					m.prompt = promptIdle
-					m.newWorktreeRepo = ""
-					m.newWorktreeBranch = ""
-					m.worktreeFromRemote = false
-					m.harnessChooserKinds = nil
-					m.harnessChooserCursor = 0
-					launchMode := m.launchMode
-					if wsCfg, err := workspace.LoadConfig(); err == nil {
-						launchMode = launchModeFor(wsCfg.LaunchMode)
-					}
-					// Insert an optimistic spinner row for the duration of the
-					// create/fetch (which can take seconds on large repos) so the
-					// keypress reads as "working" rather than ignored.
-					m.addPendingCreate(repoPath, worktreeDest(repoPath, branch), branch, fromRemote)
-					m.workspaceRows = injectPendingCreates(m.workspaceRows, m.pendingCreates)
-					var spinnerC tea.Cmd
-					if !m.spinnerActive {
-						m.spinnerActive = true
-						spinnerC = spinnerTickCmd()
-					}
-					actionCmd := newWorktreeCmd(m.tmux, m.gitOp, m.harnOp, repoPath, branch, chosenKind, launchMode, fromRemote)
-					return m, tea.Batch(actionCmd, spinnerC)
+					return m.startNewWorktree(repoPath, branch, chosenKind, m.worktreeFromRemote)
 
 				case "esc":
 					m.prompt = promptIdle
@@ -1256,7 +1272,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							break
 						}
 					}
-					return m, launchCmd(m.tmux, row, m.harnOp, m.launchMode)
+					return m, launchCmd(m.tmux, row, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
 				case "up", "ctrl+p":
 					m.sessionPaletteCursor = clampIndex(m.sessionPaletteCursor-1, len(m.sessionPaletteMatches))
 					return m, nil
@@ -1275,6 +1291,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Passive help overlay: any key dismisses it.
 				m.prompt = promptIdle
 				return m, nil
+
+			case promptSettings:
+				return m.updateSettings(msg)
 			}
 		}
 
@@ -1311,6 +1330,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// is active, since the prompt pre-empt block short-circuits first.
 		if msg.String() == "?" {
 			m.prompt = promptHelp
+			return m, nil
+		}
+
+		// (b.3) Settings overlay — 'S' opens the persistent-settings modal
+		// (default harness, launch mode). Global; only reachable when no prompt
+		// is active, since the pre-empt block above short-circuits first.
+		if msg.String() == "S" {
+			m.openSettings()
 			return m, nil
 		}
 
@@ -1384,7 +1411,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 
-				return m, launchCmd(m.tmux, row, m.harnOp, m.launchMode)
+				return m, launchCmd(m.tmux, row, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
 
 			case "n":
 				// New worktree: collect a branch name via prompt.
@@ -1628,12 +1655,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case launchResultMsg:
 		// A launch/resume Cmd completed.
 		if msg.err != nil {
-			// Surface the error as a transient hint.
 			m.tmuxHint = fmt.Sprintf("launch error: %v", msg.err)
-		} else if m.viewMarker != nil && msg.sessionID != "" {
-			// The user successfully landed in the session — clear any
-			// "work finished" badge regardless of whether they act on it.
+			return m, nil
+		}
+		if m.viewMarker != nil && msg.sessionID != "" {
+			// The user landed in the session — clear any "work finished" badge.
 			m.viewMarker.MarkViewed(harness.Kind(msg.provider), msg.instanceID, msg.sessionID)
+		}
+		// When a configured default overrode the row's recorded harness on a
+		// cold (re)launch, persist the new harness to the roster so the row and
+		// status display reflect what is now running. Mirrors the create-time
+		// roster write; Title/SessionID refresh on the next discovery snapshot.
+		if msg.launched && msg.harnessKind != "" && msg.dir != "" && m.rosterUpserts != nil {
+			entry := workspace.RosterEntry{
+				Dir:          msg.dir,
+				Harness:      msg.harnessKind,
+				Provider:     msg.harnessKind,
+				LastActivity: time.Now(),
+			}
+			select {
+			case m.rosterUpserts <- entry:
+			default:
+			}
 		}
 		return m, nil
 
@@ -2093,6 +2136,20 @@ func (m model) View() string {
 			backdrop = m.renderAllSessions(paneW, rows, recentByInstance)
 		}
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, renderHelp(paneW))
+	case m.prompt == promptSettings:
+		// Render the session list as the backdrop, then composite the settings
+		// modal centred over it so the pane stays visible behind.
+		now := m.tickNow
+		if now.IsZero() {
+			now = time.Now()
+		}
+		var backdrop string
+		if len(m.workspaceRows) > 0 {
+			backdrop = m.renderWorkspaceRows(paneW, m.workspaceRows, m.sessionCursor, now)
+		} else {
+			backdrop = m.renderAllSessions(paneW, rows, recentByInstance)
+		}
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderSettings(paneW))
 	case m.prompt == promptChooseHarness:
 		sessionContent = m.renderHarnessChooser(paneW, sessionsInnerH)
 	case len(m.workspaceRows) > 0:
@@ -2254,4 +2311,151 @@ func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) ([]workspace.Ro
 	}
 
 	return workspace.Merge(wsCfg.Repos, worktreesByRepo, roster, liveTopLevel, tmuxDirs), mode
+}
+
+// resolvedDefaultHarness returns the configured default harness kind when one
+// is set AND currently registered in harnOp; otherwise "". A configured but
+// unregistered default (e.g. removed or renamed) resolves to "", so callers
+// fall back to the per-launch "always ask" behaviour.
+func resolvedDefaultHarness(harnOp harnessOps) string {
+	wsCfg, err := workspace.LoadConfig()
+	if err != nil || wsCfg.DefaultHarness == "" || harnOp == nil {
+		return ""
+	}
+	if _, err := harnOp.Get(harness.Kind(wsCfg.DefaultHarness)); err != nil {
+		return ""
+	}
+	return wsCfg.DefaultHarness
+}
+
+// startNewWorktree resets the new-worktree prompt state, inserts an optimistic
+// spinner row, and dispatches newWorktreeCmd for branch under repoPath with the
+// given harness. Shared by the chooser-confirm path and the default-harness
+// skip-the-chooser path.
+func (m model) startNewWorktree(repoPath, branch, harnessKind string, fromRemote bool) (model, tea.Cmd) {
+	m.prompt = promptIdle
+	m.newWorktreeRepo = ""
+	m.newWorktreeBranch = ""
+	m.worktreeFromRemote = false
+	m.harnessChooserKinds = nil
+	m.harnessChooserCursor = 0
+	launchMode := m.launchMode
+	if wsCfg, err := workspace.LoadConfig(); err == nil {
+		launchMode = launchModeFor(wsCfg.LaunchMode)
+	}
+	// Optimistic spinner row for the duration of the create/fetch.
+	m.addPendingCreate(repoPath, worktreeDest(repoPath, branch), branch, fromRemote)
+	m.workspaceRows = injectPendingCreates(m.workspaceRows, m.pendingCreates)
+	var spinnerC tea.Cmd
+	if !m.spinnerActive {
+		m.spinnerActive = true
+		spinnerC = spinnerTickCmd()
+	}
+	actionCmd := newWorktreeCmd(m.tmux, m.gitOp, m.harnOp, repoPath, branch, harnessKind, launchMode, fromRemote)
+	return m, tea.Batch(actionCmd, spinnerC)
+}
+
+// settingsRowCount is the number of rows in the settings modal.
+const settingsRowCount = 2
+
+// settingsHarnessOptions returns the harness choices for the settings modal: an
+// "always ask" sentinel ("") followed by the registered kinds (sorted). The
+// sentinel clears the persisted default.
+func settingsHarnessOptions(harnOp harnessOps) []string {
+	opts := []string{""}
+	for _, k := range harnessChooserKinds(harnOp) {
+		opts = append(opts, string(k))
+	}
+	return opts
+}
+
+// normalizeSettingsLaunchMode maps the unset launch mode to its effective
+// default (session) so the modal always displays a concrete value.
+func normalizeSettingsLaunchMode(mode workspace.LaunchMode) workspace.LaunchMode {
+	if mode == workspace.LaunchWindow {
+		return workspace.LaunchWindow
+	}
+	return workspace.LaunchSession
+}
+
+// openSettings snapshots the persisted config into the modal's working copy and
+// opens the settings overlay.
+func (m *model) openSettings() {
+	wsCfg, _ := workspace.LoadConfig()
+	m.settingsDefaultHarness = wsCfg.DefaultHarness
+	m.settingsLaunchMode = normalizeSettingsLaunchMode(wsCfg.LaunchMode)
+	m.settingsCursor = 0
+	m.settingsErr = ""
+	m.prompt = promptSettings
+}
+
+// updateSettings handles key input while the settings modal is open: up/down
+// move between rows, left/right (and enter/space) cycle the highlighted
+// setting's value, and esc/q/S close the modal.
+func (m model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q", "S":
+		m.prompt = promptIdle
+	case "up", "k", "ctrl+p":
+		m.settingsCursor = clampIndex(m.settingsCursor-1, settingsRowCount)
+	case "down", "j", "ctrl+n":
+		m.settingsCursor = clampIndex(m.settingsCursor+1, settingsRowCount)
+	case "left", "h":
+		m.cycleSetting(-1)
+	case "right", "l", "enter", " ":
+		m.cycleSetting(1)
+	}
+	return m, nil
+}
+
+// cycleSetting advances the highlighted setting by delta (wrapping) and writes
+// the change to config.json immediately, recording any save error for display.
+func (m *model) cycleSetting(delta int) {
+	switch m.settingsCursor {
+	case 0:
+		opts := settingsHarnessOptions(m.harnOp)
+		i := indexOfString(opts, m.settingsDefaultHarness)
+		m.settingsDefaultHarness = opts[wrapIndex(i+delta, len(opts))]
+		m.recordSettingsErr(workspace.SetDefaultHarness(m.settingsDefaultHarness))
+	case 1:
+		// Only two launch modes, so ±1 always toggles.
+		if m.settingsLaunchMode == workspace.LaunchWindow {
+			m.settingsLaunchMode = workspace.LaunchSession
+		} else {
+			m.settingsLaunchMode = workspace.LaunchWindow
+		}
+		if err := workspace.SetLaunchMode(m.settingsLaunchMode); err != nil {
+			m.recordSettingsErr(err)
+		} else {
+			m.recordSettingsErr(nil)
+			m.launchMode = launchModeFor(m.settingsLaunchMode)
+		}
+	}
+}
+
+func (m *model) recordSettingsErr(err error) {
+	if err != nil {
+		m.settingsErr = fmt.Sprintf("save failed: %v", err)
+	} else {
+		m.settingsErr = ""
+	}
+}
+
+// indexOfString returns the index of want in ss, or 0 when absent.
+func indexOfString(ss []string, want string) int {
+	for i, s := range ss {
+		if s == want {
+			return i
+		}
+	}
+	return 0
+}
+
+// wrapIndex returns i wrapped into [0,n); n<=0 yields 0. Used for cyclable
+// settings values.
+func wrapIndex(i, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	return ((i % n) + n) % n
 }

@@ -897,6 +897,7 @@ var helpSections = []helpSection{
 	}},
 	{"General", [][2]string{
 		{"?", "toggle this help"},
+		{"S", "settings"},
 		{"q / ctrl+C", "quit"},
 	}},
 }
@@ -1166,4 +1167,54 @@ func (m model) formatSpinnerRow(row workspace.Row, width int, verb string) strin
 		padCell("", colActivityW, lipgloss.Right),
 	}
 	return strings.Join(cells, strings.Repeat(" ", colGap))
+}
+
+// renderSettings builds the floating settings modal drawn over the sessions
+// pane while prompt == promptSettings. It mirrors renderHelp's box styling and
+// shows the persistent default harness and launch mode, with the highlighted
+// row reverse-video. fieldW is the sessions pane inner width.
+func (m model) renderSettings(fieldW int) string {
+	contentW := fieldW - 10
+	if contentW > 60 {
+		contentW = 60
+	}
+	if contentW < 16 {
+		contentW = max(1, fieldW-4)
+	}
+
+	harnessVal := m.settingsDefaultHarness
+	if harnessVal == "" {
+		harnessVal = "always ask"
+	}
+	rows := [][2]string{
+		{"default harness", harnessVal},
+		{"launch mode", string(normalizeSettingsLaunchMode(m.settingsLaunchMode))},
+	}
+	labelW := 0
+	for _, r := range rows {
+		if w := lipgloss.Width(r[0]); w > labelW {
+			labelW = w
+		}
+	}
+
+	var lines []string
+	lines = append(lines, padToWidth(" "+headerStyle.Render("Settings"), contentW))
+	lines = append(lines, padToWidth("", contentW))
+	for i, r := range rows {
+		label := padCell(r[0], labelW, lipgloss.Left)
+		line := ansi.Truncate(" "+label+"   < "+r[1]+" >", contentW, "…")
+		if i == m.settingsCursor {
+			line = wtCursorStyle.Render(padToWidth(line, contentW))
+		} else {
+			line = padToWidth(line, contentW)
+		}
+		lines = append(lines, line)
+	}
+	lines = append(lines, padToWidth("", contentW))
+	if m.settingsErr != "" {
+		lines = append(lines, padToWidth(" "+attnErrStyle.Render(ansi.Truncate(m.settingsErr, contentW-2, "…")), contentW))
+	}
+	lines = append(lines, padToWidth(" "+dimStyle.Render("↑↓ field · ←→ change · esc close"), contentW))
+
+	return paletteBoxStyle.Render(strings.Join(lines, "\n"))
 }

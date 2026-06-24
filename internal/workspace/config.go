@@ -291,3 +291,25 @@ func RemoveRepo(path string) (bool, error) {
 	}
 	return true, nil
 }
+
+// SetDefaultHarness sets the persisted default harness kind and saves. An empty
+// kind clears the default, restoring the per-launch "ask which harness" prompt.
+func SetDefaultHarness(kind string) error {
+	cfg, err := LoadConfig()
+	if err != nil {
+		return err
+	}
+	cfg.DefaultHarness = kind
+	return SaveConfig(cfg)
+}
+
+// SetLaunchMode sets the persisted launch mode and saves. The value is
+// normalized on write, so an unknown mode falls back to the session default.
+func SetLaunchMode(mode LaunchMode) error {
+	cfg, err := LoadConfig()
+	if err != nil {
+		return err
+	}
+	cfg.LaunchMode = mode
+	return SaveConfig(cfg)
+}
