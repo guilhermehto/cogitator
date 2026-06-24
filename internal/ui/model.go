@@ -178,8 +178,8 @@ type mergeStatusMsg struct {
 
 // worktreeDeletedMsg is returned by deleteWorktreeCmd after `git worktree
 // remove` completes. path is the canonical worktree dir; err is non-nil when
-// git refused (e.g. uncommitted changes) so the row is preserved and the error
-// surfaced.
+// git refused (e.g. a locked worktree, or a dirty worktree when force-delete is
+// disabled in config) so the row is preserved and the error surfaced.
 type worktreeDeletedMsg struct {
 	path string
 	err  error
@@ -251,7 +251,7 @@ func launchModeFor(m workspace.LaunchMode) tmuxctl.LaunchMode {
 type gitOps interface {
 	AddWorktree(repoPath, branch, dest string) (string, error)
 	FetchAndAddWorktree(repoPath, branch, dest string) (string, error)
-	RemoveWorktree(repoPath, worktreePath string) error
+	RemoveWorktree(repoPath, worktreePath string, force bool) error
 	BranchMergeStatus(repoPath, branch string) (git.MergeState, string)
 	Pull(worktreePath, branch string) (string, error)
 }
@@ -267,8 +267,8 @@ func (realGitOps) FetchAndAddWorktree(repoPath, branch, dest string) (string, er
 	return git.FetchAndAddWorktree(repoPath, branch, dest)
 }
 
-func (realGitOps) RemoveWorktree(repoPath, worktreePath string) error {
-	return git.RemoveWorktree(repoPath, worktreePath)
+func (realGitOps) RemoveWorktree(repoPath, worktreePath string, force bool) error {
+	return git.RemoveWorktree(repoPath, worktreePath, force)
 }
 
 func (realGitOps) BranchMergeStatus(repoPath, branch string) (git.MergeState, string) {
@@ -359,6 +359,11 @@ type model struct {
 	// delete confirmation prompts (e.g. "merged into main"). Empty until the
 	// async probe (mergeStatusCmd) returns; rendered as "checking…" meanwhile.
 	deleteMergeInfo string
+	// deleteForce records whether the in-progress delete will pass
+	// `git worktree remove --force` (resolved from config when 'D' opens the
+	// flow). It drives both the confirm prompt's data-loss warning and the
+	// eventual removal so the two never disagree.
+	deleteForce bool
 	// removeRepoTarget is the canonical repo path captured when the user
 	// presses 'R' to untrack the repo under the cursor. Empty when no removal
 	// is in progress; cleared on cancel and on dispatch of removeRepoCmd.
@@ -646,15 +651,15 @@ func mergeStatusCmd(gitOp gitOps, repo, branch, path string) tea.Cmd {
 // then best-effort closes its attached tmux window/session so no dead pane is
 // left pointing at a missing directory. The git removal is the only step that
 // can fail the operation; tmux cleanup is advisory and its error is ignored.
-func deleteWorktreeCmd(ops tmuxOps, gitOp gitOps, repo, path string, mode tmuxctl.LaunchMode) tea.Cmd {
+func deleteWorktreeCmd(ops tmuxOps, gitOp gitOps, repo, path string, mode tmuxctl.LaunchMode, force bool) tea.Cmd {
 	return func() tea.Msg {
-		var removeFn func(string, string) error
+		var removeFn func(string, string, bool) error
 		if gitOp != nil {
 			removeFn = gitOp.RemoveWorktree
 		} else {
 			removeFn = git.RemoveWorktree
 		}
-		if err := removeFn(repo, path); err != nil {
+		if err := removeFn(repo, path, force); err != nil {
 			return worktreeDeletedMsg{path: path, err: err}
 		}
 
@@ -747,6 +752,30 @@ func (m *model) removeWorktreeRow(target workspace.Row) {
 		m.sessionCursor = 0
 	} else if m.sessionCursor >= n {
 		m.sessionCursor = n - 1
+	}
+}
+
+// restoreWorktreeRow re-inserts a row that was optimistically removed for a
+// deletion that then failed. It is placed immediately after its repo's last
+// existing row (appended only when the repo has no other rows) so same-repo
+// rows stay contiguous in the flat list. This matters because renderWorkspaceRows
+// groups rows by repo while the session cursor indexes the flat slice: a row
+// appended out of group order renders inside its group but carries an
+// out-of-sequence index, making j/k navigation skip over it. The session cursor
+// is nudged so it keeps pointing at the same row. The next snapshot rebuild
+// reconciles exact intra-repo ordering.
+func (m *model) restoreWorktreeRow(saved workspace.Row) {
+	insertAt := len(m.workspaceRows)
+	for i, row := range m.workspaceRows {
+		if row.Repo == saved.Repo {
+			insertAt = i + 1
+		}
+	}
+	m.workspaceRows = append(m.workspaceRows, workspace.Row{})
+	copy(m.workspaceRows[insertAt+1:], m.workspaceRows[insertAt:])
+	m.workspaceRows[insertAt] = saved
+	if insertAt <= m.sessionCursor {
+		m.sessionCursor++
 	}
 }
 
@@ -1167,7 +1196,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// the keypress was ignored. removeWorktreeRow stashes the row
 					// in pendingDeletes so a failed deletion can restore it.
 					m.removeWorktreeRow(target)
-					return m, deleteWorktreeCmd(m.tmux, m.gitOp, target.Repo, target.Worktree, m.launchMode)
+					// deleteForce was resolved from config when the flow opened
+					// ('D'), so the action matches the warning shown at confirm.
+					return m, deleteWorktreeCmd(m.tmux, m.gitOp, target.Repo, target.Worktree, m.launchMode, m.deleteForce)
 				}
 				m.prompt = promptIdle
 				m.deleteTarget = workspace.Row{}
@@ -1442,6 +1473,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.deleteTarget = row
 				m.deleteMergeInfo = ""
+				// Resolve force-delete once, here, so the confirm prompt's
+				// data-loss warning and the eventual removal agree on the flag.
+				m.deleteForce = true
+				if wsCfg, err := workspace.LoadConfig(); err == nil {
+					m.deleteForce = wsCfg.ForceDeleteEnabled()
+				}
 				m.prompt = promptConfirmDeleteWorktree
 				return m, mergeStatusCmd(m.gitOp, row.Repo, row.Branch, row.Worktree)
 
@@ -1722,9 +1759,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tmuxHint = fmt.Sprintf("delete failed: %v", msg.err)
 			// The row was optimistically removed at confirm time; restore it so
 			// a failed deletion does not silently drop the worktree from view.
-			// The next snapshot rebuild reconciles ordering.
 			if saved, ok := m.pendingDeletes[msg.path]; ok {
-				m.workspaceRows = append(m.workspaceRows, saved)
+				m.restoreWorktreeRow(saved)
 				delete(m.pendingDeletes, msg.path)
 			}
 			return m, nil

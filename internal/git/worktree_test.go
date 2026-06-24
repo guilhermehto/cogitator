@@ -158,7 +158,7 @@ func TestRemoveWorktree_RemovesCleanWorktree(t *testing.T) {
 		t.Fatalf("AddWorktree: %v", err)
 	}
 
-	if err := git.RemoveWorktree(repo, gotPath); err != nil {
+	if err := git.RemoveWorktree(repo, gotPath, false); err != nil {
 		t.Fatalf("RemoveWorktree: %v", err)
 	}
 
@@ -194,13 +194,50 @@ func TestRemoveWorktree_RefusesDirtyWorktree(t *testing.T) {
 		t.Fatalf("write untracked file: %v", err)
 	}
 
-	if err := git.RemoveWorktree(repo, gotPath); err == nil {
+	if err := git.RemoveWorktree(repo, gotPath, false); err == nil {
 		t.Fatal("expected RemoveWorktree to refuse a dirty worktree, got nil error")
 	}
 
 	// The directory must still exist — nothing was deleted.
 	if _, statErr := os.Stat(gotPath); statErr != nil {
 		t.Errorf("dirty worktree %q was removed despite refusal: %v", gotPath, statErr)
+	}
+}
+
+// TestRemoveWorktree_ForceRemovesDirtyWorktree verifies that passing force=true
+// removes a dirty worktree (untracked changes) that a non-force remove refuses,
+// discarding the uncommitted changes. This is the force-by-default delete path.
+func TestRemoveWorktree_ForceRemovesDirtyWorktree(t *testing.T) {
+	repo := initRepo(t)
+
+	wtDir := filepath.Join(t.TempDir(), "dirty-force-wt")
+	gotPath, err := git.AddWorktree(repo, "feature", wtDir)
+	if err != nil {
+		t.Fatalf("AddWorktree: %v", err)
+	}
+
+	// An untracked file makes the worktree dirty — the case a non-force remove
+	// refuses; force must delete it anyway.
+	if err := os.WriteFile(filepath.Join(gotPath, "scratch.txt"), []byte("wip"), 0o644); err != nil {
+		t.Fatalf("write untracked file: %v", err)
+	}
+
+	if err := git.RemoveWorktree(repo, gotPath, true); err != nil {
+		t.Fatalf("force RemoveWorktree must remove a dirty worktree, got: %v", err)
+	}
+
+	// The directory must be gone.
+	if _, statErr := os.Stat(gotPath); !os.IsNotExist(statErr) {
+		t.Errorf("dirty worktree %q still exists after force remove (stat err = %v)", gotPath, statErr)
+	}
+
+	// Only the main worktree should remain.
+	wts, err := git.ListWorktrees(repo)
+	if err != nil {
+		t.Fatalf("ListWorktrees after force remove: %v", err)
+	}
+	if len(wts) != 1 {
+		t.Fatalf("expected 1 worktree after force remove, got %d: %v", len(wts), wts)
 	}
 }
 

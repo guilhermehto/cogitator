@@ -161,6 +161,7 @@ type addWorktreeCall struct {
 type removeWorktreeCall struct {
 	repoPath     string
 	worktreePath string
+	force        bool
 }
 
 type mergeStatusCall struct {
@@ -189,8 +190,8 @@ func (f *fakeGitOps) FetchAndAddWorktree(repoPath, branch, dest string) (string,
 	return dest, f.fetchAddErr
 }
 
-func (f *fakeGitOps) RemoveWorktree(repoPath, worktreePath string) error {
-	f.removeCalls = append(f.removeCalls, removeWorktreeCall{repoPath: repoPath, worktreePath: worktreePath})
+func (f *fakeGitOps) RemoveWorktree(repoPath, worktreePath string, force bool) error {
+	f.removeCalls = append(f.removeCalls, removeWorktreeCall{repoPath: repoPath, worktreePath: worktreePath, force: force})
 	return f.removeErr
 }
 
@@ -1309,7 +1310,7 @@ func TestDeleteWorktreeCmdRemovesAndKillsWindow(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: true, findWindowResult: "main:2"}
 	gitFake := &fakeGitOps{}
 
-	result, ok := runCmd(deleteWorktreeCmd(tmuxFake, gitFake, "/r", "/r/a", tmuxctl.ModeWindow)).(worktreeDeletedMsg)
+	result, ok := runCmd(deleteWorktreeCmd(tmuxFake, gitFake, "/r", "/r/a", tmuxctl.ModeWindow, true)).(worktreeDeletedMsg)
 	if !ok {
 		t.Fatalf("expected worktreeDeletedMsg")
 	}
@@ -1318,6 +1319,9 @@ func TestDeleteWorktreeCmdRemovesAndKillsWindow(t *testing.T) {
 	}
 	if len(gitFake.removeCalls) != 1 {
 		t.Fatalf("expected 1 RemoveWorktree call, got %d", len(gitFake.removeCalls))
+	}
+	if !gitFake.removeCalls[0].force {
+		t.Errorf("deleteWorktreeCmd must thread force through to RemoveWorktree")
 	}
 	if len(tmuxFake.killWindowCalls) != 1 || tmuxFake.killWindowCalls[0] != "main:2" {
 		t.Errorf("expected KillWindow(main:2), got %v", tmuxFake.killWindowCalls)
@@ -1331,7 +1335,7 @@ func TestDeleteWorktreeCmdRemovesAndKillsSessionInSessionMode(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: true, findWindowResult: "repo-feat:0"}
 	gitFake := &fakeGitOps{}
 
-	result, ok := runCmd(deleteWorktreeCmd(tmuxFake, gitFake, "/r", "/r/a", tmuxctl.ModeSession)).(worktreeDeletedMsg)
+	result, ok := runCmd(deleteWorktreeCmd(tmuxFake, gitFake, "/r", "/r/a", tmuxctl.ModeSession, true)).(worktreeDeletedMsg)
 	if !ok {
 		t.Fatalf("expected worktreeDeletedMsg")
 	}
@@ -1353,7 +1357,7 @@ func TestDeleteWorktreeCmdGitErrorSkipsWindowKill(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: true, findWindowResult: "main:2"}
 	gitFake := &fakeGitOps{removeErr: errors.New("worktree contains modified or untracked files")}
 
-	result, ok := runCmd(deleteWorktreeCmd(tmuxFake, gitFake, "/r", "/r/a", tmuxctl.ModeWindow)).(worktreeDeletedMsg)
+	result, ok := runCmd(deleteWorktreeCmd(tmuxFake, gitFake, "/r", "/r/a", tmuxctl.ModeWindow, true)).(worktreeDeletedMsg)
 	if !ok {
 		t.Fatalf("expected worktreeDeletedMsg")
 	}
@@ -1436,6 +1440,45 @@ func TestWorktreeDeletedMsgErrorRestoresPendingRow(t *testing.T) {
 	}
 	if !strings.Contains(m2.tmuxHint, "delete failed") {
 		t.Errorf("error must set a 'delete failed' hint, got %q", m2.tmuxHint)
+	}
+}
+
+// A failed deletion in a multi-repo table must re-insert the row adjacent to
+// its repo's other rows, not append it to the end. renderWorkspaceRows groups
+// rows by repo while the session cursor indexes the flat slice, so an
+// out-of-group append leaves the row rendered inside its group but with an
+// out-of-sequence index — making j/k navigation skip over it, so the user
+// cannot select the failed worktree to clean it up. Regression test for that
+// "jump over" bug.
+func TestWorktreeDeletedMsgErrorRestoresRowGroupedByRepo(t *testing.T) {
+	saved := makeRow("/r1", "/r1/b", "feat", "b", workspace.StateStopped, state.AttnInactive, fixedNow)
+	m := model{
+		width: 120,
+		// /r1/b was optimistically removed; /r2 sits between /r1's rows, so a
+		// naive append would land /r1/b after /r2/x and break grouping.
+		workspaceRows: []workspace.Row{
+			makeRow("/r1", "/r1/a", "main", "a", workspace.StateRunning, state.AttnActive, fixedNow),
+			makeRow("/r2", "/r2/x", "main", "x", workspace.StateStopped, state.AttnInactive, fixedNow),
+		},
+		sessionCursor:  1, // on /r2/x
+		pendingDeletes: map[string]workspace.Row{"/r1/b": saved},
+	}
+
+	updated, _ := m.Update(worktreeDeletedMsg{path: "/r1/b", err: errors.New("modified files")})
+	m2 := updated.(model)
+
+	want := []string{"/r1/a", "/r1/b", "/r2/x"}
+	if len(m2.workspaceRows) != len(want) {
+		t.Fatalf("row count = %d, want %d (%+v)", len(m2.workspaceRows), len(want), m2.workspaceRows)
+	}
+	for i, w := range want {
+		if m2.workspaceRows[i].Worktree != w {
+			t.Fatalf("flat row order must keep same-repo rows contiguous so navigation matches the view\n got index %d = %q, want %q", i, m2.workspaceRows[i].Worktree, w)
+		}
+	}
+	// The cursor must follow its row (/r2/x) past the inserted row.
+	if m2.sessionCursor != 2 || m2.workspaceRows[m2.sessionCursor].Worktree != "/r2/x" {
+		t.Errorf("cursor must stay on /r2/x at index 2; got index %d (%q)", m2.sessionCursor, m2.workspaceRows[m2.sessionCursor].Worktree)
 	}
 }
 
@@ -1522,6 +1565,24 @@ func TestRenderWorktreeDeletePromptShowsMergeAndPermanent(t *testing.T) {
 	got2 := m2.renderWorkspaceRows(200, []workspace.Row{base}, 0, fixedNow)
 	if !strings.Contains(got2, "PERMANENTLY") {
 		t.Fatalf("second confirm must warn 'PERMANENTLY', got %q", got2)
+	}
+}
+
+func TestRenderWorktreeDeletePromptForceWarnsDataLoss(t *testing.T) {
+	base := makeRow("/r", "/r/a", "feat/x", "", workspace.StateStopped, state.AttnInactive, fixedNow)
+
+	// Force on: the final confirm must warn that local changes are discarded.
+	force := model{width: 200, prompt: promptConfirmDeleteWorktree2, deleteTarget: base, deleteMergeInfo: "merged into main", deleteForce: true}
+	gotForce := force.renderWorkspaceRows(200, []workspace.Row{base}, 0, fixedNow)
+	if !strings.Contains(gotForce, "discards uncommitted changes") {
+		t.Fatalf("force delete confirm must warn about discarding uncommitted changes, got %q", gotForce)
+	}
+
+	// Force off (safe mode): no data-loss clause — git would refuse a dirty tree.
+	safe := model{width: 200, prompt: promptConfirmDeleteWorktree2, deleteTarget: base, deleteMergeInfo: "merged into main", deleteForce: false}
+	gotSafe := safe.renderWorkspaceRows(200, []workspace.Row{base}, 0, fixedNow)
+	if strings.Contains(gotSafe, "discards uncommitted changes") {
+		t.Fatalf("safe delete confirm must not claim data loss, got %q", gotSafe)
 	}
 }
 
