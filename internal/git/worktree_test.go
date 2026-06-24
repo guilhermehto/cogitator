@@ -216,8 +216,8 @@ func TestRemoveWorktree_ForceRemovesDirtyWorktree(t *testing.T) {
 		t.Fatalf("AddWorktree: %v", err)
 	}
 
-	// Both an untracked file and a tracked modification, so neither variant of
-	// "dirty" survives the force remove.
+	// An untracked file makes the worktree dirty — the case a non-force remove
+	// refuses; force must delete it anyway.
 	if err := os.WriteFile(filepath.Join(gotPath, "scratch.txt"), []byte("wip"), 0o644); err != nil {
 		t.Fatalf("write untracked file: %v", err)
 	}

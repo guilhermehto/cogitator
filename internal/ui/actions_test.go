@@ -1568,6 +1568,24 @@ func TestRenderWorktreeDeletePromptShowsMergeAndPermanent(t *testing.T) {
 	}
 }
 
+func TestRenderWorktreeDeletePromptForceWarnsDataLoss(t *testing.T) {
+	base := makeRow("/r", "/r/a", "feat/x", "", workspace.StateStopped, state.AttnInactive, fixedNow)
+
+	// Force on: the final confirm must warn that local changes are discarded.
+	force := model{width: 200, prompt: promptConfirmDeleteWorktree2, deleteTarget: base, deleteMergeInfo: "merged into main", deleteForce: true}
+	gotForce := force.renderWorkspaceRows(200, []workspace.Row{base}, 0, fixedNow)
+	if !strings.Contains(gotForce, "discards uncommitted changes") {
+		t.Fatalf("force delete confirm must warn about discarding uncommitted changes, got %q", gotForce)
+	}
+
+	// Force off (safe mode): no data-loss clause — git would refuse a dirty tree.
+	safe := model{width: 200, prompt: promptConfirmDeleteWorktree2, deleteTarget: base, deleteMergeInfo: "merged into main", deleteForce: false}
+	gotSafe := safe.renderWorkspaceRows(200, []workspace.Row{base}, 0, fixedNow)
+	if strings.Contains(gotSafe, "discards uncommitted changes") {
+		t.Fatalf("safe delete confirm must not claim data loss, got %q", gotSafe)
+	}
+}
+
 func TestRenderWorktreeDeletePromptShowsCheckingBeforeProbe(t *testing.T) {
 	base := makeRow("/r", "/r/a", "feat", "", workspace.StateStopped, state.AttnInactive, fixedNow)
 	m := model{width: 200, prompt: promptConfirmDeleteWorktree, deleteTarget: base}

@@ -994,13 +994,17 @@ func (m model) worktreeDeletePromptLine() string {
 	if info == "" {
 		info = "checking merge status…"
 	}
+	forceNote := ""
+	if m.deleteForce {
+		forceNote = " — discards uncommitted changes"
+	}
 	switch m.prompt {
 	case promptConfirmDeleteWorktree:
 		return wtHintStyle.Render(fmt.Sprintf(
 			"delete worktree [%s] — %s? press y to continue, any other key cancels", branch, info))
 	case promptConfirmDeleteWorktree2:
 		return attnErrStyle.Render(fmt.Sprintf(
-			"PERMANENTLY delete worktree [%s] (%s)? y to delete · any other key cancels (default: cancel)", branch, info))
+			"PERMANENTLY delete worktree [%s] (%s)%s? y to delete · any other key cancels (default: cancel)", branch, info, forceNote))
 	default:
 		return ""
 	}

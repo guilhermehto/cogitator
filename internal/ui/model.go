@@ -178,8 +178,8 @@ type mergeStatusMsg struct {
 
 // worktreeDeletedMsg is returned by deleteWorktreeCmd after `git worktree
 // remove` completes. path is the canonical worktree dir; err is non-nil when
-// git refused (e.g. uncommitted changes) so the row is preserved and the error
-// surfaced.
+// git refused (e.g. a locked worktree, or a dirty worktree when force-delete is
+// disabled in config) so the row is preserved and the error surfaced.
 type worktreeDeletedMsg struct {
 	path string
 	err  error
@@ -359,6 +359,11 @@ type model struct {
 	// delete confirmation prompts (e.g. "merged into main"). Empty until the
 	// async probe (mergeStatusCmd) returns; rendered as "checking…" meanwhile.
 	deleteMergeInfo string
+	// deleteForce records whether the in-progress delete will pass
+	// `git worktree remove --force` (resolved from config when 'D' opens the
+	// flow). It drives both the confirm prompt's data-loss warning and the
+	// eventual removal so the two never disagree.
+	deleteForce bool
 	// removeRepoTarget is the canonical repo path captured when the user
 	// presses 'R' to untrack the repo under the cursor. Empty when no removal
 	// is in progress; cleared on cancel and on dispatch of removeRepoCmd.
@@ -1191,12 +1196,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// the keypress was ignored. removeWorktreeRow stashes the row
 					// in pendingDeletes so a failed deletion can restore it.
 					m.removeWorktreeRow(target)
-					// Force is the default; honour an explicit opt-out in config.
-					force := true
-					if wsCfg, err := workspace.LoadConfig(); err == nil {
-						force = wsCfg.ForceDeleteEnabled()
-					}
-					return m, deleteWorktreeCmd(m.tmux, m.gitOp, target.Repo, target.Worktree, m.launchMode, force)
+					// deleteForce was resolved from config when the flow opened
+					// ('D'), so the action matches the warning shown at confirm.
+					return m, deleteWorktreeCmd(m.tmux, m.gitOp, target.Repo, target.Worktree, m.launchMode, m.deleteForce)
 				}
 				m.prompt = promptIdle
 				m.deleteTarget = workspace.Row{}
@@ -1471,6 +1473,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.deleteTarget = row
 				m.deleteMergeInfo = ""
+				// Resolve force-delete once, here, so the confirm prompt's
+				// data-loss warning and the eventual removal agree on the flag.
+				m.deleteForce = true
+				if wsCfg, err := workspace.LoadConfig(); err == nil {
+					m.deleteForce = wsCfg.ForceDeleteEnabled()
+				}
 				m.prompt = promptConfirmDeleteWorktree
 				return m, mergeStatusCmd(m.gitOp, row.Repo, row.Branch, row.Worktree)
 
