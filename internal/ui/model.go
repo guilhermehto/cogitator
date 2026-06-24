@@ -520,7 +520,13 @@ func launchArgv(row workspace.Row, harnOp harnessOps, defaultKind string) (argv 
 	}
 	if harnOp != nil {
 		if h, err := harnOp.Get(kind); err == nil {
-			argv = h.LaunchArgv(row.Worktree, row.SessionID)
+			// On an override the row's SessionID belongs to the previous
+			// harness and is invalid for the new one; start a fresh session.
+			token := row.SessionID
+			if overrideKind != "" {
+				token = ""
+			}
+			argv = h.LaunchArgv(row.Worktree, token)
 		}
 	}
 	if len(argv) == 0 {

@@ -190,3 +190,43 @@ func TestRenderSettings_ShowsValues(t *testing.T) {
 		}
 	}
 }
+
+// tokenRecordingHarness captures the resume token passed to LaunchArgv so the
+// test can assert it is blanked when the default overrides the harness.
+type tokenRecordingHarness struct{ gotToken harness.ResumeToken }
+
+func (h *tokenRecordingHarness) Kind() harness.Kind                 { return "rec" }
+func (h *tokenRecordingHarness) Capabilities() harness.Capabilities { return harness.Capabilities{} }
+func (h *tokenRecordingHarness) LaunchArgv(wt string, token harness.ResumeToken) []string {
+	h.gotToken = token
+	return []string{"rec", wt}
+}
+
+type recordingHarnessOps struct{ h *tokenRecordingHarness }
+
+func (o *recordingHarnessOps) Get(harness.Kind) (harness.Harness, error) { return o.h, nil }
+func (o *recordingHarnessOps) Kinds() []harness.Kind                     { return []harness.Kind{"rec"} }
+
+func TestLaunchArgv_OverrideBlanksStaleSessionToken(t *testing.T) {
+	rec := &tokenRecordingHarness{}
+	ops := &recordingHarnessOps{h: rec}
+	row := workspace.Row{Worktree: "/r/a", Harness: "codex", SessionID: "codex-123"}
+
+	// Override (default differs from the recorded harness): the stale token
+	// belongs to the old harness and must not flow to the new one.
+	if _, override := launchArgv(row, ops, "opencode"); override == "" {
+		t.Fatal("expected an override when default differs from recorded harness")
+	}
+	if rec.gotToken != "" {
+		t.Errorf("override must blank the stale session token, got %q", rec.gotToken)
+	}
+
+	// No override: the recorded token passes through for a normal resume.
+	rec.gotToken = "sentinel"
+	if _, override := launchArgv(row, ops, ""); override != "" {
+		t.Errorf("empty default must not override, got %q", override)
+	}
+	if rec.gotToken != "codex-123" {
+		t.Errorf("without an override the recorded token must be used, got %q", rec.gotToken)
+	}
+}
