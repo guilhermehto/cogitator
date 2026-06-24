@@ -56,6 +56,10 @@ type Row struct {
 	// Harness is the harness kind string (e.g. "opencode"). Sourced from the
 	// roster when available; empty for disk-only worktrees with no roster entry.
 	Harness string
+	// Provider is the live session provider kind. It can differ from Harness
+	// when old roster metadata is stale, but the live store still needs the
+	// provider key for attention clears.
+	Provider string
 	// Title is the last-known session title. Non-empty for running and stopped
 	// rows; empty for empty/missing/unknown rows with no roster entry.
 	Title string
@@ -254,6 +258,7 @@ func buildRow(
 		// Live session wins: override roster fields with live data.
 		row.Title = cand.view.Title
 		row.SessionID = cand.view.SessionID
+		row.Provider = string(cand.view.Provider)
 		row.Attention = cand.view.Attention
 		row.LastActivity = cand.view.LastActivity
 		if row.Harness == "" {

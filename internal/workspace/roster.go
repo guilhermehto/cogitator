@@ -26,6 +26,9 @@ type RosterEntry struct {
 	Dir string `json:"dir"`
 	// Harness is the tool that manages the session (e.g. "opencode").
 	Harness string `json:"harness"`
+	// Provider is the live session provider key used to restore sticky
+	// attention. Older roster files omit it; callers fall back to Harness.
+	Provider string `json:"provider,omitempty"`
 	// SessionID is the last-known session identifier. Optional — present when
 	// the session was observed live; absent for entries loaded from a previous
 	// run where the session id was not recorded. Used for --session resume when
@@ -261,9 +264,14 @@ func (r *Recorder) applySnapshot(m map[string]RosterEntry, snap state.Snapshot) 
 		if cur, ok := m[canonical]; ok && cur.Harness != "" {
 			harnessKind = cur.Harness
 		}
+		providerKind := string(sv.Provider)
+		if providerKind == "" {
+			providerKind = "opencode"
+		}
 		entry := RosterEntry{
 			Dir:          canonical,
 			Harness:      harnessKind,
+			Provider:     providerKind,
 			SessionID:    sv.SessionID,
 			Title:        sv.Title,
 			LastActivity: sv.LastActivity,
@@ -280,19 +288,19 @@ func (r *Recorder) applySnapshot(m map[string]RosterEntry, snap state.Snapshot) 
 // LastActivity timestamp. Returns true if the map was modified.
 //
 // Special case: when the incoming entry is for the same session (same Dir and
-// SessionID) as the current entry and only the Attention label differs, the
-// update is applied even if LastActivity has not advanced. This ensures that
-// attention-only transitions (e.g. a view-driven revert to "inactive" or a
-// late "errored" flip) are persisted without requiring a new activity
-// timestamp. A different session with a newer LastActivity still wins per the
-// normal rule.
+// SessionID) as the current entry and only the Attention or Provider differs,
+// the update is applied even if LastActivity has not advanced. This ensures
+// that attention-only transitions (e.g. a view-driven revert to "inactive" or
+// a late "errored" flip) and provider-key repairs are persisted without
+// requiring a new activity timestamp. A different session with a newer
+// LastActivity still wins per the normal rule.
 func upsert(m map[string]RosterEntry, entry RosterEntry) bool {
 	cur, ok := m[entry.Dir]
 	if ok && !entry.LastActivity.After(cur.LastActivity) {
-		// Allow an attention-only update for the same session even when
+		// Allow attention/provider-only updates for the same session even when
 		// LastActivity has not advanced.
 		sameSession := entry.SessionID != "" && entry.SessionID == cur.SessionID
-		if !sameSession || entry.Attention == cur.Attention {
+		if !sameSession || (entry.Attention == cur.Attention && entry.Provider == cur.Provider) {
 			return false
 		}
 	}

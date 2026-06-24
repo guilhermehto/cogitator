@@ -269,14 +269,14 @@ func TestRecorder_TwoSnapshotsSameDirLatestWins(t *testing.T) {
 // TestRoster_AttentionPersistsAndReverts verifies three attention-related
 // behaviours:
 //
-//  (a) A snapshot whose session has Attention "finished" is persisted with
-//      that label in the roster entry.
-//  (b) A subsequent snapshot for the SAME dir+session with equal LastActivity
-//      but a different Attention (e.g. a view-driven revert to "inactive")
-//      still forces a write — the most-recent-activity guard is bypassed for
-//      attention-only changes on the same session.
-//  (c) Loading a roster.json that was written by an older build (no
-//      "attention" field) yields entries with empty Attention and no error.
+//	(a) A snapshot whose session has Attention "finished" is persisted with
+//	    that label in the roster entry.
+//	(b) A subsequent snapshot for the SAME dir+session with equal LastActivity
+//	    but a different Attention (e.g. a view-driven revert to "inactive")
+//	    still forces a write — the most-recent-activity guard is bypassed for
+//	    attention-only changes on the same session.
+//	(c) Loading a roster.json that was written by an older build (no
+//	    "attention" field) yields entries with empty Attention and no error.
 func TestRoster_AttentionPersistsAndReverts(t *testing.T) {
 	tmp := t.TempDir()
 	withStateEnv(t, tmp)
@@ -363,6 +363,59 @@ func TestRoster_AttentionPersistsAndReverts(t *testing.T) {
 	}
 	if legacyEntry.Attention != "" {
 		t.Errorf("(c) legacy entry Attention: got %q, want empty string", legacyEntry.Attention)
+	}
+}
+
+func TestRoster_ProviderPersistsWithStaleHarness(t *testing.T) {
+	tmp := t.TempDir()
+	withStateEnv(t, tmp)
+
+	worktree := filepath.Join(tmp, "proj")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	canonicalWorktree, err := pathnorm.Canonical(worktree)
+	if err != nil {
+		t.Fatalf("Canonical(%q): %v", worktree, err)
+	}
+
+	ts := time.Now().Truncate(time.Millisecond)
+	seed := map[string]workspace.RosterEntry{
+		canonicalWorktree: {
+			Dir:          canonicalWorktree,
+			Harness:      "opencode",
+			SessionID:    "sess-x",
+			LastActivity: ts,
+			Attention:    string(state.AttnFinished),
+		},
+	}
+	if err := workspace.Save(seed); err != nil {
+		t.Fatalf("Save seed: %v", err)
+	}
+
+	snapCh := make(chan state.Snapshot, 1)
+	snapCh <- state.Snapshot{Sessions: []state.SessionView{{
+		SessionID:    "sess-x",
+		Directory:    worktree,
+		Provider:     "codex",
+		LastActivity: ts,
+		Attention:    state.AttnFinished,
+	}}}
+	close(snapCh)
+
+	rec := workspace.NewRecorder()
+	rec.RunSync(snapCh)
+
+	loaded, err := workspace.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := loaded[canonicalWorktree]
+	if got.Harness != "opencode" {
+		t.Fatalf("Harness = %q, want opencode", got.Harness)
+	}
+	if got.Provider != "codex" {
+		t.Fatalf("Provider = %q, want codex", got.Provider)
 	}
 }
 
