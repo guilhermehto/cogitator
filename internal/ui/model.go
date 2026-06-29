@@ -1405,6 +1405,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if n := len(m.workspaceRows); n > 0 {
 					m.sessionCursor = n - 1
 				}
+			case "ctrl+d":
+				m.sessionCursor = m.repoBoundary(1)
+			case "ctrl+u":
+				m.sessionCursor = m.repoBoundary(-1)
 
 			case "enter":
 				// Jump to a running agent or resume a stopped one.
@@ -2251,6 +2255,42 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 		lastMutationOp:   "",
 		mutationInFlight: false,
 	}
+}
+
+// repoBoundary returns the session cursor index one repo group away from the
+// current position: dir > 0 jumps to the first row of the next repo group,
+// dir < 0 to the first row of the previous group (or the current group's first
+// row when the cursor sits mid-group, matching vim's section motion). Rows are
+// contiguous by Repo (workspace.Merge groups them), so a group begins wherever
+// Repo differs from the previous row. Returns the cursor unchanged when there
+// is no group in that direction.
+func (m model) repoBoundary(dir int) int {
+	rows := m.workspaceRows
+	if len(rows) == 0 {
+		return 0
+	}
+	starts := []int{0}
+	for i := 1; i < len(rows); i++ {
+		if rows[i].Repo != rows[i-1].Repo {
+			starts = append(starts, i)
+		}
+	}
+	if dir > 0 {
+		for _, s := range starts {
+			if s > m.sessionCursor {
+				return s
+			}
+		}
+		return m.sessionCursor
+	}
+	prev := 0
+	for _, s := range starts {
+		if s >= m.sessionCursor {
+			break
+		}
+		prev = s
+	}
+	return prev
 }
 
 // buildWorkspaceRowsCmd returns a tea.Cmd that runs buildWorkspaceRows in the
