@@ -327,6 +327,9 @@ type model struct {
 	// sessionCursor is the index into the visible worktree rows list that
 	// currently holds keyboard focus. Zero value (0) is safe.
 	sessionCursor int
+	// pendingG is true after the first `g` of a `gg` (jump-to-top) sequence,
+	// awaiting the second `g`. Reset on any other key in the sessions pane.
+	pendingG bool
 	// tickNow is the reference time used by the sessions pane for relative
 	// timestamps. Updated on each tickMsg. Zero value causes View() to fall
 	// back to time.Now().
@@ -1374,6 +1377,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Clear any transient tmux hint on any key press.
 			m.tmuxHint = ""
 
+			// `gg` jumps to the top: the first `g` arms pendingG, the second
+			// fires. Any other key clears it.
+			wasPendingG := m.pendingG
+			m.pendingG = false
+
 			switch msg.String() {
 			case "a":
 				m.recentCollapsed = !m.recentCollapsed
@@ -1384,6 +1392,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "k", "up":
 				if n := len(m.workspaceRows); n > 0 {
 					m.sessionCursor = max(m.sessionCursor-1, 0)
+				}
+			case "g":
+				if wasPendingG {
+					m.sessionCursor = 0
+				} else {
+					m.pendingG = true
+				}
+			case "<":
+				m.sessionCursor = 0
+			case "G", ">":
+				if n := len(m.workspaceRows); n > 0 {
+					m.sessionCursor = n - 1
 				}
 
 			case "enter":

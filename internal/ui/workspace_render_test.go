@@ -416,6 +416,58 @@ func TestSessionCursorClampsAtTop(t *testing.T) {
 	}
 }
 
+func threeRowModel(cursor int) model {
+	return model{
+		width: 120,
+		workspaceRows: []workspace.Row{
+			makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnActive, fixedNow),
+			makeRow("/r", "/r/b", "feat", "row-b", workspace.StateStopped, state.AttnInactive, fixedNow.Add(-1*time.Minute)),
+			makeRow("/r", "/r/c", "fix", "row-c", workspace.StateStopped, state.AttnInactive, fixedNow.Add(-2*time.Minute)),
+		},
+		sessionCursor: cursor,
+	}
+}
+
+func TestSessionCursorJumpsToBottomWithG(t *testing.T) {
+	for _, key := range []string{"G", ">"} {
+		m := threeRowModel(0)
+		updated, _ := m.Update(keyMsg(key))
+		if got := updated.(model).sessionCursor; got != 2 {
+			t.Fatalf("cursor after %q = %d, want 2", key, got)
+		}
+	}
+}
+
+func TestSessionCursorJumpsToTopWithGG(t *testing.T) {
+	m := threeRowModel(2)
+	updated, _ := m.Update(keyMsg("g"))
+	if got := updated.(model).sessionCursor; got != 2 {
+		t.Fatalf("first g should not move cursor, got %d", got)
+	}
+	updated, _ = updated.(model).Update(keyMsg("g"))
+	if got := updated.(model).sessionCursor; got != 0 {
+		t.Fatalf("cursor after gg = %d, want 0", got)
+	}
+}
+
+func TestSessionCursorJumpsToTopWithLessThan(t *testing.T) {
+	m := threeRowModel(2)
+	updated, _ := m.Update(keyMsg("<"))
+	if got := updated.(model).sessionCursor; got != 0 {
+		t.Fatalf("cursor after < = %d, want 0", got)
+	}
+}
+
+func TestSessionSingleGDoesNotJump(t *testing.T) {
+	// A lone g followed by a non-g key must not trigger jump-to-top.
+	m := threeRowModel(1)
+	updated, _ := m.Update(keyMsg("g"))
+	updated, _ = updated.(model).Update(keyMsg("j"))
+	if got := updated.(model).sessionCursor; got != 2 {
+		t.Fatalf("g then j: cursor = %d, want 2", got)
+	}
+}
+
 func TestSessionCursorDownArrowEquivalentToJ(t *testing.T) {
 	m := model{
 		width: 120,
