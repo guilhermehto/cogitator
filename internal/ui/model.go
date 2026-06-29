@@ -327,6 +327,9 @@ type model struct {
 	// sessionCursor is the index into the visible worktree rows list that
 	// currently holds keyboard focus. Zero value (0) is safe.
 	sessionCursor int
+	// pendingG is true after the first `g` of a `gg` (jump-to-top) sequence,
+	// awaiting the second `g`. Reset on any other key in the sessions pane.
+	pendingG bool
 	// tickNow is the reference time used by the sessions pane for relative
 	// timestamps. Updated on each tickMsg. Zero value causes View() to fall
 	// back to time.Now().
@@ -1374,6 +1377,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Clear any transient tmux hint on any key press.
 			m.tmuxHint = ""
 
+			// `gg` jumps to the top: the first `g` arms pendingG, the second
+			// fires. Any other key clears it.
+			wasPendingG := m.pendingG
+			m.pendingG = false
+
 			switch msg.String() {
 			case "a":
 				m.recentCollapsed = !m.recentCollapsed
@@ -1385,6 +1393,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if n := len(m.workspaceRows); n > 0 {
 					m.sessionCursor = max(m.sessionCursor-1, 0)
 				}
+			case "g":
+				if wasPendingG {
+					m.sessionCursor = 0
+				} else {
+					m.pendingG = true
+				}
+			case "<":
+				m.sessionCursor = 0
+			case "G", ">":
+				if n := len(m.workspaceRows); n > 0 {
+					m.sessionCursor = n - 1
+				}
+			case "ctrl+d":
+				m.sessionCursor = m.repoBoundary(1)
+			case "ctrl+u":
+				m.sessionCursor = m.repoBoundary(-1)
 
 			case "enter":
 				// Jump to a running agent or resume a stopped one.
@@ -2233,6 +2257,42 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 	}
 }
 
+// repoBoundary returns the session cursor index one repo group away from the
+// current position: dir > 0 jumps to the first row of the next repo group,
+// dir < 0 to the first row of the previous group (or the current group's first
+// row when the cursor sits mid-group, matching vim's section motion). Rows are
+// contiguous by Repo (workspace.Merge groups them), so a group begins wherever
+// Repo differs from the previous row. Returns the cursor unchanged when there
+// is no group in that direction.
+func (m model) repoBoundary(dir int) int {
+	rows := m.workspaceRows
+	if len(rows) == 0 {
+		return 0
+	}
+	starts := []int{0}
+	for i := 1; i < len(rows); i++ {
+		if rows[i].Repo != rows[i-1].Repo {
+			starts = append(starts, i)
+		}
+	}
+	if dir > 0 {
+		for _, s := range starts {
+			if s > m.sessionCursor {
+				return s
+			}
+		}
+		return m.sessionCursor
+	}
+	prev := 0
+	for _, s := range starts {
+		if s >= m.sessionCursor {
+			break
+		}
+		prev = s
+	}
+	return prev
+}
+
 // buildWorkspaceRowsCmd returns a tea.Cmd that runs buildWorkspaceRows in the
 // background and delivers the result as a workspaceRowsMsg. snap and cfg are
 // captured by value at dispatch time so the closure is not affected by later
@@ -2268,6 +2328,13 @@ func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) ([]workspace.Ro
 		// No repos configured — live-only path.
 		return nil, mode
 	}
+
+	// Display repos alphabetically by name. Sort the in-memory copy only;
+	// config.json keeps its insertion order on disk.
+	sort.SliceStable(wsCfg.Repos, func(i, j int) bool {
+		return strings.ToLower(filepath.Base(wsCfg.Repos[i].Path)) <
+			strings.ToLower(filepath.Base(wsCfg.Repos[j].Path))
+	})
 
 	// Build worktrees-by-repo map. Errors from individual repos are non-fatal:
 	// a repo that can't be listed (e.g. missing git) yields an empty slice,

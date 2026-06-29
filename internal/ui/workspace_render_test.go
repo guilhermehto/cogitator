@@ -416,6 +416,106 @@ func TestSessionCursorClampsAtTop(t *testing.T) {
 	}
 }
 
+func threeRowModel(cursor int) model {
+	return model{
+		width: 120,
+		workspaceRows: []workspace.Row{
+			makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnActive, fixedNow),
+			makeRow("/r", "/r/b", "feat", "row-b", workspace.StateStopped, state.AttnInactive, fixedNow.Add(-1*time.Minute)),
+			makeRow("/r", "/r/c", "fix", "row-c", workspace.StateStopped, state.AttnInactive, fixedNow.Add(-2*time.Minute)),
+		},
+		sessionCursor: cursor,
+	}
+}
+
+func TestSessionCursorJumpsToBottomWithG(t *testing.T) {
+	for _, key := range []string{"G", ">"} {
+		m := threeRowModel(0)
+		updated, _ := m.Update(keyMsg(key))
+		if got := updated.(model).sessionCursor; got != 2 {
+			t.Fatalf("cursor after %q = %d, want 2", key, got)
+		}
+	}
+}
+
+func TestSessionCursorJumpsToTopWithGG(t *testing.T) {
+	m := threeRowModel(2)
+	updated, _ := m.Update(keyMsg("g"))
+	if got := updated.(model).sessionCursor; got != 2 {
+		t.Fatalf("first g should not move cursor, got %d", got)
+	}
+	updated, _ = updated.(model).Update(keyMsg("g"))
+	if got := updated.(model).sessionCursor; got != 0 {
+		t.Fatalf("cursor after gg = %d, want 0", got)
+	}
+}
+
+func TestSessionCursorJumpsToTopWithLessThan(t *testing.T) {
+	m := threeRowModel(2)
+	updated, _ := m.Update(keyMsg("<"))
+	if got := updated.(model).sessionCursor; got != 0 {
+		t.Fatalf("cursor after < = %d, want 0", got)
+	}
+}
+
+func TestSessionSingleGDoesNotJump(t *testing.T) {
+	// A lone g followed by a non-g key must not trigger jump-to-top.
+	m := threeRowModel(1)
+	updated, _ := m.Update(keyMsg("g"))
+	updated, _ = updated.(model).Update(keyMsg("j"))
+	if got := updated.(model).sessionCursor; got != 2 {
+		t.Fatalf("g then j: cursor = %d, want 2", got)
+	}
+}
+
+func multiRepoModel(cursor int) model {
+	// Three repo groups, contiguous by repo as Merge produces them:
+	// idx 0,1 -> /a ; idx 2 -> /b ; idx 3,4 -> /c
+	return model{
+		width: 120,
+		workspaceRows: []workspace.Row{
+			makeRow("/a", "/a", "main", "a-root", workspace.StateRunning, state.AttnActive, fixedNow),
+			makeRow("/a", "/a/feat", "feat", "a-feat", workspace.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/b", "/b", "main", "b-root", workspace.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/c", "/c", "main", "c-root", workspace.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/c", "/c/x", "x", "c-x", workspace.StateStopped, state.AttnInactive, fixedNow),
+		},
+		sessionCursor: cursor,
+	}
+}
+
+func TestCtrlDJumpsToNextRepo(t *testing.T) {
+	cases := []struct{ from, want int }{
+		{0, 2}, // mid/first of /a -> start of /b
+		{1, 2}, // second row of /a -> start of /b
+		{2, 3}, // /b -> start of /c
+		{4, 4}, // last repo -> stays put
+	}
+	for _, c := range cases {
+		m := multiRepoModel(c.from)
+		updated, _ := m.Update(keyMsg("ctrl+d"))
+		if got := updated.(model).sessionCursor; got != c.want {
+			t.Fatalf("ctrl+d from %d = %d, want %d", c.from, got, c.want)
+		}
+	}
+}
+
+func TestCtrlUJumpsToPrevRepo(t *testing.T) {
+	cases := []struct{ from, want int }{
+		{1, 0}, // mid /a -> current group start
+		{0, 0}, // first repo, at start -> stays
+		{3, 2}, // start of /c -> start of /b
+		{4, 3}, // mid /c -> current group start
+	}
+	for _, c := range cases {
+		m := multiRepoModel(c.from)
+		updated, _ := m.Update(keyMsg("ctrl+u"))
+		if got := updated.(model).sessionCursor; got != c.want {
+			t.Fatalf("ctrl+u from %d = %d, want %d", c.from, got, c.want)
+		}
+	}
+}
+
 func TestSessionCursorDownArrowEquivalentToJ(t *testing.T) {
 	m := model{
 		width: 120,

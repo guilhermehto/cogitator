@@ -873,6 +873,8 @@ type helpSection struct {
 var helpSections = []helpSection{
 	{"Sessions", [][2]string{
 		{"j / k · ↑ / ↓", "move cursor"},
+		{"gg / < · G / >", "jump to top / bottom"},
+		{"ctrl+u / ctrl+d", "prev / next repo"},
 		{"enter", "jump to / resume session"},
 		{"ctrl+P", "switch session (fuzzy find)"},
 		{"a", "show / hide recent sessions"},
