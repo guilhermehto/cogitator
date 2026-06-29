@@ -2269,6 +2269,13 @@ func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) ([]workspace.Ro
 		return nil, mode
 	}
 
+	// Display repos alphabetically by name. Sort the in-memory copy only;
+	// config.json keeps its insertion order on disk.
+	sort.SliceStable(wsCfg.Repos, func(i, j int) bool {
+		return strings.ToLower(filepath.Base(wsCfg.Repos[i].Path)) <
+			strings.ToLower(filepath.Base(wsCfg.Repos[j].Path))
+	})
+
 	// Build worktrees-by-repo map. Errors from individual repos are non-fatal:
 	// a repo that can't be listed (e.g. missing git) yields an empty slice,
 	// which Merge renders as a header-only row.
