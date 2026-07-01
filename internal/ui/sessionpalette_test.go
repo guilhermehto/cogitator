@@ -179,6 +179,85 @@ func TestSessionPalette_EnterMissingRowSetsHint(t *testing.T) {
 	}
 }
 
+// jumpTo opens the palette, filters to a single row via a distinguishing
+// character, and presses enter — recording a session switch. It returns the
+// resulting model.
+func jumpTo(t *testing.T, m model, filter string) model {
+	t.Helper()
+	m = openPalette(t, m)
+	updated, _ := m.Update(keyMsg(filter))
+	m = updated.(model)
+	updated, _ = m.Update(keyMsg("enter"))
+	return updated.(model)
+}
+
+func TestSessionPalette_OrdersByMostRecentlySwitched(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{available: true}
+	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []workspace.Row{
+		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", workspace.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/home/me/gamma", "/home/me/gamma", "wip", "g", workspace.StateStopped, state.AttnInactive, fixedNow),
+	})
+
+	// Jump to beta, then gamma — gamma is now the current session, beta the previous.
+	m = jumpTo(t, m, "b")
+	m = jumpTo(t, m, "g")
+
+	m = openPalette(t, m)
+
+	want := []string{"gamma wip", "beta dev", "alpha main"}
+	for i, w := range want {
+		if m.sessionPaletteLabels[i] != w {
+			t.Errorf("row %d = %q, want %q (most-recently-switched first, then alphabetical)", i, m.sessionPaletteLabels[i], w)
+		}
+	}
+	// Cursor starts on the previous session (beta) so ctrl+P then enter returns to it.
+	if m.sessionPaletteCursor != 1 {
+		t.Errorf("cursor = %d, want 1 (previous session)", m.sessionPaletteCursor)
+	}
+}
+
+func TestSessionPalette_CursorStartsAtTopWithoutHistory(t *testing.T) {
+	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []workspace.Row{
+		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", workspace.StateStopped, state.AttnInactive, fixedNow),
+	})
+
+	m = openPalette(t, m)
+
+	// No switches recorded yet: no genuine "previous", so the cursor stays on top.
+	if m.sessionPaletteCursor != 0 {
+		t.Errorf("cursor = %d, want 0 with no switch history", m.sessionPaletteCursor)
+	}
+}
+
+func TestSessionPalette_FixedHeightWhileFiltering(t *testing.T) {
+	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []workspace.Row{
+		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", workspace.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/home/me/gamma", "/home/me/gamma", "wip", "g", workspace.StateStopped, state.AttnInactive, fixedNow),
+	})
+	m = openPalette(t, m)
+
+	// A pane tall enough to hold the full fixed row count.
+	const fieldW, fieldH = 80, 24
+	lineCount := func(s string) int { return len(strings.Split(s, "\n")) }
+
+	full := lineCount(m.renderSessionPalette(fieldW, fieldH))
+
+	// Narrow to a single match; the box must not shrink.
+	updated, _ := m.Update(keyMsg("b")) // 'b' matches only "beta dev"
+	m = updated.(model)
+	if len(m.sessionPaletteMatches) != 1 {
+		t.Fatalf("setup: expected 1 match after filtering, got %d", len(m.sessionPaletteMatches))
+	}
+	narrowed := lineCount(m.renderSessionPalette(fieldW, fieldH))
+
+	if full != narrowed {
+		t.Errorf("palette height changed while filtering: %d lines full, %d narrowed", full, narrowed)
+	}
+}
+
 func TestSessionPalette_EscCloses(t *testing.T) {
 	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []workspace.Row{
 		makeRow("/r", "/r/a", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
