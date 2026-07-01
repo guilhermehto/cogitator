@@ -675,6 +675,11 @@ func (m model) renderRepoFinder(width, height int) string {
 	return b.String()
 }
 
+// sessionPaletteRowsVisible is the fixed number of result rows the ctrl+P
+// switcher shows, clamped down only when the pane is too short. Holding it
+// constant keeps the box from shrinking as the filter narrows matches.
+const sessionPaletteRowsVisible = 10
+
 // renderSessionPalette builds the floating ctrl+P switcher box. It is rendered
 // independently of the session list and then composited (centred) over it by
 // the View via overlayBox, so the surrounding sessions stay visible around the
@@ -700,17 +705,23 @@ func (m model) renderSessionPalette(fieldW, fieldH int) string {
 		"",
 	}
 
+	// Fixed-height list: always emit listH rows so the box keeps a constant
+	// height while the filter narrows results, instead of shrinking to fit. The
+	// box reserves the title, query, and a blank line above and a blank + footer
+	// below; the rest is list rows. Target sessionPaletteRowsVisible rows, clamped
+	// down only when the pane is too short to hold them.
+	maxRows := fieldH - 7
+	if maxRows < 1 {
+		maxRows = 1
+	}
+	listH := min(sessionPaletteRowsVisible, maxRows)
+
+	rendered := 0
 	if len(m.sessionPaletteMatches) == 0 {
 		lines = append(lines, padToWidth(" "+dimStyle.Render("no match"), contentW))
+		rendered++
 	} else {
-		// Window the result list around the cursor. The box reserves the title,
-		// query, and a blank line above and a blank + footer below; the rest is
-		// list rows, capped so the bordered box still fits the pane height.
-		maxRows := fieldH - 7
-		if maxRows < 1 {
-			maxRows = 1
-		}
-		listH := min(len(m.sessionPaletteMatches), maxRows)
+		// Window the result list around the cursor.
 		cursor := clampIndex(m.sessionPaletteCursor, len(m.sessionPaletteMatches))
 		start := 0
 		if cursor >= listH {
@@ -726,7 +737,12 @@ func (m model) renderSessionPalette(fieldW, fieldH int) string {
 				line = highlightSelectedRow(line)
 			}
 			lines = append(lines, line)
+			rendered++
 		}
+	}
+	// Pad any remaining rows with blanks so the box height stays constant.
+	for ; rendered < listH; rendered++ {
+		lines = append(lines, padToWidth("", contentW))
 	}
 
 	footer := fmt.Sprintf("%d sessions · ↑↓ move · enter go · esc cancel", len(m.sessionPaletteMatches))

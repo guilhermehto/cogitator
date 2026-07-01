@@ -459,6 +459,15 @@ type model struct {
 	sessionPaletteMatches []int
 	sessionPaletteCursor  int
 
+	// switchOrder records the monotonically increasing sequence in which
+	// worktrees were last jumped to or resumed, keyed by worktree path; switchSeq
+	// is the next sequence to hand out. It seeds the ctrl+P palette's
+	// most-recently-used ordering so pressing ctrl+P then enter returns to the
+	// previous session. In-memory only — it resets on restart, falling back to
+	// the alphabetical row order.
+	switchOrder map[string]int
+	switchSeq   int
+
 	// Injectable seams for tmux, git, and harness operations. Nil values are
 	// replaced with the real implementations in newModel. Tests inject fakes.
 	// Zero-value model{} literals in tests are safe: action Cmds guard on nil
@@ -1275,6 +1284,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							break
 						}
 					}
+					m.recordSessionSwitch(row)
 					return m, launchCmd(m.tmux, row, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
 				case "up", "ctrl+p":
 					m.sessionPaletteCursor = clampIndex(m.sessionPaletteCursor-1, len(m.sessionPaletteMatches))
@@ -1315,13 +1325,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.tmuxHint = "no sessions to switch to"
 				return m, nil
 			}
-			m.sessionPaletteRows = append([]workspace.Row(nil), m.workspaceRows...)
+			rows, startOnPrevious := m.orderedSessionRows()
+			m.sessionPaletteRows = rows
 			m.sessionPaletteLabels = make([]string, len(m.sessionPaletteRows))
 			for i, row := range m.sessionPaletteRows {
 				m.sessionPaletteLabels[i] = sessionPaletteLabel(row)
 			}
 			m.sessionPaletteMatches = fuzzyMatchIndices("", m.sessionPaletteLabels)
+			// Seed the cursor on the previous session (row 1) so ctrl+P then enter
+			// jumps straight back to it; only when a genuine previous exists.
 			m.sessionPaletteCursor = 0
+			if startOnPrevious {
+				m.sessionPaletteCursor = 1
+			}
 			m.prompt = promptSwitchSession
 			m.input.Placeholder = "go to session"
 			m.input.SetValue("")
@@ -1435,6 +1451,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 
+				m.recordSessionSwitch(row)
 				return m, launchCmd(m.tmux, row, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
 
 			case "n":
@@ -1994,6 +2011,50 @@ func (m *model) closeSessionPalette() {
 	m.sessionPaletteLabels = nil
 	m.sessionPaletteMatches = nil
 	m.sessionPaletteCursor = 0
+}
+
+// recordSessionSwitch marks a worktree as the most recently jumped to or
+// resumed, so the ctrl+P switcher can order rows most-recently-used first.
+// Rows with no worktree path (nothing to key on) are ignored.
+func (m *model) recordSessionSwitch(row workspace.Row) {
+	if row.Worktree == "" {
+		return
+	}
+	if m.switchOrder == nil {
+		m.switchOrder = make(map[string]int)
+	}
+	m.switchSeq++
+	m.switchOrder[row.Worktree] = m.switchSeq
+}
+
+// orderedSessionRows returns a copy of workspaceRows ordered most-recently
+// switched-to first (per switchOrder), preserving the existing alphabetical
+// order for worktrees never jumped to this run. startOnPrevious is true when
+// both of the top two rows have a recorded switch — i.e. a genuine "previous"
+// session exists — so the palette cursor should start on row 1.
+func (m model) orderedSessionRows() (rows []workspace.Row, startOnPrevious bool) {
+	rows = append([]workspace.Row(nil), m.workspaceRows...)
+	sort.SliceStable(rows, func(i, j int) bool {
+		si, oi := m.switchOrder[rows[i].Worktree]
+		sj, oj := m.switchOrder[rows[j].Worktree]
+		if oi != oj {
+			return oi // switched rows sort ahead of never-switched ones
+		}
+		if oi && oj {
+			return si > sj // more recently switched first
+		}
+		return false // both unswitched: stable sort keeps alphabetical order
+	})
+	startOnPrevious = len(rows) >= 2 &&
+		m.hasSwitchRecord(rows[0]) && m.hasSwitchRecord(rows[1])
+	return rows, startOnPrevious
+}
+
+// hasSwitchRecord reports whether the row's worktree has been jumped to or
+// resumed this run.
+func (m model) hasSwitchRecord(row workspace.Row) bool {
+	_, ok := m.switchOrder[row.Worktree]
+	return ok
 }
 
 // sessionPaletteLabel builds the fuzzy-match text for a worktree row in the
