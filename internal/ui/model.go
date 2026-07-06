@@ -1293,10 +1293,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.sessionPaletteCursor = clampIndex(m.sessionPaletteCursor+1, len(m.sessionPaletteMatches))
 					return m, nil
 				default:
+					prev := m.input.Value()
 					var cmd tea.Cmd
 					m.input, cmd = m.input.Update(msg)
 					m.sessionPaletteMatches = fuzzyMatchIndices(m.input.Value(), m.sessionPaletteLabels)
-					m.sessionPaletteCursor = clampIndex(m.sessionPaletteCursor, len(m.sessionPaletteMatches))
+					// Searching resets selection to the first match; only clamp
+					// when the query is unchanged so the previous-session seed
+					// (row 1) survives non-editing keys.
+					if m.input.Value() != prev {
+						m.sessionPaletteCursor = 0
+					} else {
+						m.sessionPaletteCursor = clampIndex(m.sessionPaletteCursor, len(m.sessionPaletteMatches))
+					}
 					return m, cmd
 				}
 
