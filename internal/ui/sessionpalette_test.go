@@ -217,6 +217,27 @@ func TestSessionPalette_OrdersByMostRecentlySwitched(t *testing.T) {
 	}
 }
 
+func TestSessionPalette_TypingResetsCursorToTop(t *testing.T) {
+	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []workspace.Row{
+		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", workspace.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/home/me/gamma", "/home/me/gamma", "wip", "g", workspace.StateStopped, state.AttnInactive, fixedNow),
+	})
+
+	// Seed a previous session so the palette opens on row 1, then search.
+	m = jumpTo(t, m, "b")
+	m = jumpTo(t, m, "g")
+	m = openPalette(t, m)
+	if m.sessionPaletteCursor != 1 {
+		t.Fatalf("precondition: cursor = %d, want 1 (previous session)", m.sessionPaletteCursor)
+	}
+
+	updated, _ := m.Update(keyMsg("a"))
+	if c := updated.(model).sessionPaletteCursor; c != 0 {
+		t.Errorf("cursor = %d after typing, want 0 (first match)", c)
+	}
+}
+
 func TestSessionPalette_CursorStartsAtTopWithoutHistory(t *testing.T) {
 	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []workspace.Row{
 		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
