@@ -4,7 +4,7 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   title: 'cogitator',
   description:
-    'One dashboard for every coding agent — opencode, Claude Code, Codex, omp — in the tmux you already use.',
+    'One dashboard for every coding agent: opencode, Claude Code, Codex, and omp, in the tmux you already use.',
   base: '/cogitator/',
   lang: 'en-US',
   cleanUrls: true,
@@ -20,7 +20,7 @@ export default defineConfig({
       {
         property: 'og:description',
         content:
-          'One dashboard for every coding agent: live attention signals, git worktrees, tmux navigation. No new terminal — it drives the one you already use.',
+          'One dashboard for every coding agent: live attention signals, git worktrees, tmux navigation. No new terminal, it drives the one you already use.',
       },
     ],
   ],

@@ -1,5 +1,5 @@
 /**
- * cogitator docs theme — terminal-first.
+ * cogitator docs theme: terminal-first.
  * Palette lifted from the TUI (internal/ui/render.go, xterm-256 codes):
  *   63 #5f5fff purple (title / focused pane) · 141 #af87ff lilac (agents)
  *   51 #00e5ff cyan (finished) · 82 #5fff00 green (active)
@@ -183,9 +183,9 @@ kbd {
 
 .cog-eyebrow {
   font-family: var(--vp-font-family-mono);
-  font-size: 13px;
+  font-size: 14px;
   letter-spacing: 0.06em;
-  color: var(--vp-c-text-2);
+  color: var(--vp-c-text-1);
   margin: 0 0 18px;
 }
 
@@ -386,9 +386,9 @@ kbd {
 
 .cog-sec-eyebrow {
   font-family: var(--vp-font-family-mono);
-  font-size: 12px;
+  font-size: 14px;
   letter-spacing: 0.12em;
-  color: var(--vp-c-text-3);
+  color: var(--vp-c-text-1);
   margin: 0 0 12px;
 }
 
@@ -450,46 +450,45 @@ kbd {
   color: var(--vp-c-text-2);
 }
 
-/* ---- landing: feature grid --------------------------------------------------- */
+/* ---- landing: pillars ----------------------------------------------------------- */
 
-.cog-grid {
+.cog-pillars {
+  margin-top: 40px;
+  border-top: 1px solid var(--vp-c-divider);
+}
+
+.cog-pillar {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 14px;
-  margin-top: 36px;
+  grid-template-columns: 280px 1fr;
+  gap: 40px;
+  padding: 30px 0;
+  border-bottom: 1px solid var(--vp-c-divider);
 }
 
-.cog-card {
-  border: 1px solid var(--vp-c-divider);
-  border-radius: 8px;
-  background: var(--vp-c-bg-alt);
-  padding: 22px 22px 20px;
-  transition: border-color 0.25s;
-}
-
-.cog-card:hover {
-  border-color: var(--vp-c-brand-1);
+.cog-pillar-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
 }
 
 .cog-card-icon {
   font-family: var(--vp-font-family-mono);
   font-size: 15px;
-  display: inline-block;
-  margin-bottom: 14px;
 }
 
-.VPHome .vp-doc .cog-card h3 {
+.VPHome .vp-doc .cog-pillar h3 {
   font-family: var(--vp-font-family-mono);
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   letter-spacing: -0.01em;
-  margin: 0 0 8px;
+  margin: 0;
 }
 
-.cog-card p {
+.cog-pillar p {
   margin: 0;
-  font-size: 13.5px;
-  line-height: 1.65;
+  max-width: 640px;
+  font-size: 14.5px;
+  line-height: 1.75;
   color: var(--vp-c-text-2);
 }
 
@@ -599,8 +598,9 @@ kbd {
 /* ---- responsive ----------------------------------------------------------------- */
 
 @media (max-width: 960px) {
-  .cog-grid {
-    grid-template-columns: repeat(2, 1fr);
+  .cog-pillar {
+    grid-template-columns: 1fr;
+    gap: 12px;
   }
   .cog-keys {
     grid-template-columns: 1fr;
@@ -612,9 +612,6 @@ kbd {
 }
 
 @media (max-width: 640px) {
-  .cog-grid {
-    grid-template-columns: 1fr;
-  }
   .VPHome .vp-doc a.cog-harness {
     grid-template-columns: 1fr;
     gap: 6px;
