@@ -2,7 +2,7 @@
 
 # cogitator
 
-[Install](#1-install)
+[Docs](https://guilhermehto.github.io/cogitator/) · [Install](#1-install)
 
 </div>
 
@@ -12,6 +12,10 @@
 
 <p align="center">
   <img src="tui.png" alt="cogitator TUI" />
+</p>
+
+<p align="center">
+  <a href="https://guilhermehto.github.io/cogitator/">▶&#xFE0E; Watch the demo</a>
 </p>
 
 cogitator is a TUI dashboard for your harnesses. It gives you a live view of sessions and allows you to manage your worktrees:

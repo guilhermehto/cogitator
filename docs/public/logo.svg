@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <g fill="#5f5fff">
+    <rect x="55" y="1" width="18" height="22" rx="1"/>
+    <rect x="55" y="11" width="18" height="12" rx="1" transform="rotate(30 64 64)"/>
+    <rect x="55" y="1" width="18" height="22" rx="1" transform="rotate(60 64 64)"/>
+    <rect x="55" y="11" width="18" height="12" rx="1" transform="rotate(90 64 64)"/>
+    <rect x="55" y="1" width="18" height="22" rx="1" transform="rotate(120 64 64)"/>
+    <rect x="55" y="11" width="18" height="12" rx="1" transform="rotate(150 64 64)"/>
+    <rect x="55" y="1" width="18" height="22" rx="1" transform="rotate(180 64 64)"/>
+    <rect x="55" y="11" width="18" height="12" rx="1" transform="rotate(210 64 64)"/>
+    <rect x="55" y="1" width="18" height="22" rx="1" transform="rotate(240 64 64)"/>
+    <rect x="55" y="11" width="18" height="12" rx="1" transform="rotate(270 64 64)"/>
+    <rect x="55" y="1" width="18" height="22" rx="1" transform="rotate(300 64 64)"/>
+    <rect x="55" y="11" width="18" height="12" rx="1" transform="rotate(330 64 64)"/>
+  </g>
+  <circle cx="64" cy="64" r="45" fill="#0e0e13" stroke="#5f5fff" stroke-width="9"/>
+  <path d="M40 48 L60 64 L40 80" fill="none" stroke="#af87ff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="67" y="73" width="23" height="10" rx="3" fill="#00e5ff"/>
+</svg>

@@ -9,17 +9,17 @@ package harness
 // The caller must set the process working directory to the worktree before
 // exec-ing the returned argv.
 //
-//   - Empty token: argv = ["omp", "--continue"] — resume the most-recent
-//     session for the launch directory (omp keys its session store per
-//     directory, like opencode, so jumping back into a worktree picks up
-//     where you left off).
+//   - Empty token: argv = ["omp"] — fresh launch. An empty token means no
+//     session is known for the worktree (e.g. a just-created one), so nothing
+//     is assumed resumable and no --continue is passed (matching the
+//     claude-code and codex harnesses' fresh-launch convention).
 //   - Resume a specific session (non-empty token = session id from roster):
 //     argv = ["omp", "--resume", "<token>"]
 //
 // `omp --resume <id>` matches the session id (case-insensitive prefix) within
 // the current directory scope, falling back to a global search. The roster
-// supplies an explicit id when a specific prior session should be resumed;
-// when it has none, --continue resumes the directory's most-recent session.
+// records the session id whenever cogitator observes the session live, so
+// resuming a previously observed session still targets it precisely.
 //
 // # Live-status capability
 //
@@ -51,11 +51,10 @@ func (ompHarness) Capabilities() Capabilities {
 // directory positional argument.
 //
 // When token is non-empty it is treated as a session id and passed via
-// --resume <token>. When token is empty, --continue resumes the most-recent
-// session for the worktree directory.
+// --resume <token>. When token is empty, omp starts a fresh session.
 func (ompHarness) LaunchArgv(_ string, token ResumeToken) []string {
 	if token != "" {
 		return []string{"omp", "--resume", token}
 	}
-	return []string{"omp", "--continue"}
+	return []string{"omp"}
 }

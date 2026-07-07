@@ -38,9 +38,9 @@ func TestOmp_LaunchArgv(t *testing.T) {
 		token harness.ResumeToken
 		want  []string
 	}{
-		{name: "empty token continues most-recent session", wt: "/some/worktree", token: "", want: []string{"omp", "--continue"}},
+		{name: "empty token launches fresh", wt: "/some/worktree", token: "", want: []string{"omp"}},
 		{name: "resume with session id", wt: "/some/worktree", token: "1f9d2a6b", want: []string{"omp", "--resume", "1f9d2a6b"}},
-		{name: "worktree path is ignored in argv", wt: "/different/path", token: "", want: []string{"omp", "--continue"}},
+		{name: "worktree path is ignored in argv", wt: "/different/path", token: "", want: []string{"omp"}},
 	}
 
 	for _, tc := range tests {
