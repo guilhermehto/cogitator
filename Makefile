@@ -18,6 +18,7 @@ run:
 
 demo: build
 	vhs demo.tape
+	cp -f tui.png docs/public/tui.png
 
 vet:
 	go vet ./...

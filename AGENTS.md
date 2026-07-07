@@ -9,6 +9,7 @@
 - `internal/state/`, `discovery/`, `supervisor/`, `oc/` — mDNS discovery, SSE event ingest, opencode API (`oc/generated.go` is generated — see CONTRIBUTING).
 - `internal/workspace/`, `git/`, `harness/`, `tmuxctl/`, `pathnorm/` — worktree launcher seam (config, roster, merge, git, harness registry, tmux control, canonical paths).
 - `internal/config/`, `logging/`, `taskwarrior/` — config, logging, Taskwarrior client.
+- `docs/` — VitePress site (self-contained npm package; `npm run dev|build` inside `docs/`), deployed to GitHub Pages by `.github/workflows/docs.yml`. `make demo` copies `tui.png` into `docs/public/`.
 
 ## Commands
 
@@ -16,7 +17,7 @@
 - `make test` — `go test -race -count=1 ./...`.
 - `make build` / `make run` — build/run the binary.
 - `make generate` — regenerate opencode API models (requires schema; see CONTRIBUTING).
-- `make demo` — rebuild `tui.png` from `demo.tape` (the `--demo` worktree roster).
+- `make demo` — rebuild `tui.png` from `demo.tape` (the `--demo` worktree roster) and sync it to `docs/public/`.
 
 ## Demo / README screenshot
 

@@ -2,7 +2,7 @@
 
 # cogitator
 
-[Install](#1-install)
+[Docs](https://guilhermehto.github.io/cogitator/) · [Install](#1-install)
 
 </div>
 

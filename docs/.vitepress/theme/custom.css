@@ -1,0 +1,196 @@
+/**
+ * cogitator docs theme.
+ * Palette lifted from the TUI (internal/ui/render.go, xterm-256 codes):
+ *   63 #5f5fff purple (title / focused pane) · 141 #af87ff lilac (agents)
+ *   51 #00e5ff cyan (finished) · 82 #5fff00 green (active)
+ *   214 #ffaf00 orange (permission) · 226 #f5e642 yellow (question) · 196 #ff4545 red (error)
+ */
+
+:root {
+  --cog-purple: #5f5fff;
+  --cog-lilac: #af87ff;
+  --cog-cyan: #00e5ff;
+  --cog-green: #5fff00;
+  --cog-orange: #ffaf00;
+  --cog-yellow: #f5e642;
+  --cog-red: #ff4545;
+
+  --vp-c-brand-1: #5a5af0;
+  --vp-c-brand-2: #4c4cd8;
+  --vp-c-brand-3: #4343c4;
+  --vp-c-brand-soft: rgba(95, 95, 255, 0.14);
+}
+
+.dark {
+  --vp-c-brand-1: #9d9dff;
+  --vp-c-brand-2: #7c7cff;
+  --vp-c-brand-3: #5f5fff;
+  --vp-c-brand-soft: rgba(95, 95, 255, 0.16);
+
+  /* deep terminal background */
+  --vp-c-bg: #0e0e13;
+  --vp-c-bg-alt: #0a0a0f;
+  --vp-c-bg-elv: #16161d;
+  --vp-c-bg-soft: #16161d;
+  --vp-c-divider: #26262f;
+  --vp-c-gutter: #0a0a0f;
+  --vp-code-block-bg: #0a0a0f;
+  --vp-sidebar-bg-color: #0a0a0f;
+  --vp-nav-bg-color: rgba(14, 14, 19, 0.85);
+}
+
+/* ---- hero ------------------------------------------------------------- */
+
+:root {
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(115deg, #5f5fff 20%, #af87ff 55%, #00e5ff);
+  --vp-home-hero-image-background-image: radial-gradient(
+    closest-side,
+    rgba(95, 95, 255, 0.55),
+    rgba(175, 135, 255, 0.25) 60%,
+    transparent
+  );
+  --vp-home-hero-image-filter: blur(56px);
+}
+
+.VPHero .name {
+  font-family: var(--vp-font-family-mono);
+  letter-spacing: -0.02em;
+}
+
+.VPHero .name::before {
+  content: '❯ ';
+  -webkit-text-fill-color: var(--cog-green);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .VPHero .text::after {
+    content: '▋';
+    margin-left: 2px;
+    color: var(--cog-lilac);
+    animation: cog-blink 1.2s steps(1) infinite;
+  }
+  @keyframes cog-blink {
+    50% {
+      opacity: 0;
+    }
+  }
+}
+
+/* ---- feature cards ---------------------------------------------------- */
+
+.VPFeatures .VPFeature {
+  border: 1px solid var(--vp-c-divider);
+  transition: border-color 0.25s, transform 0.25s, box-shadow 0.25s;
+}
+
+.VPFeatures .VPFeature:hover {
+  border-color: var(--vp-c-brand-1);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 30px rgba(95, 95, 255, 0.12);
+}
+
+.VPFeatures .VPFeature .icon {
+  font-family: var(--vp-font-family-mono);
+  color: var(--cog-lilac);
+  background: var(--vp-c-brand-soft);
+}
+
+/* ---- terminal frame (landing screenshot) ------------------------------ */
+
+.terminal-frame {
+  margin: 48px auto 0;
+  max-width: 1000px;
+  border: 1px solid #2a2a38;
+  border-radius: 12px;
+  background: #0a0a0f;
+  overflow: hidden;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55), 0 0 70px rgba(95, 95, 255, 0.14);
+}
+
+.terminal-frame .bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 14px;
+  background: #14141b;
+  border-bottom: 1px solid #26262f;
+}
+
+.terminal-frame .bar i {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+}
+
+.terminal-frame .bar i:nth-child(1) {
+  background: #ff5f57;
+}
+.terminal-frame .bar i:nth-child(2) {
+  background: #febc2e;
+}
+.terminal-frame .bar i:nth-child(3) {
+  background: #28c840;
+}
+
+.terminal-frame .bar em {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--vp-font-family-mono);
+  font-style: normal;
+  font-size: 12px;
+  color: #6b6b7a;
+}
+
+.terminal-frame p {
+  margin: 0;
+}
+
+.terminal-frame img {
+  display: block;
+  width: 100%;
+}
+
+/* ---- attention legend (landing) --------------------------------------- */
+
+.attn-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px 26px;
+  margin: 20px auto 0;
+  font-family: var(--vp-font-family-mono);
+  font-size: 13px;
+  color: var(--vp-c-text-2);
+}
+
+.attn-legend span::before {
+  content: '●';
+  margin-right: 7px;
+}
+
+.attn-legend .perm::before {
+  color: var(--cog-orange);
+}
+.attn-legend .question::before {
+  color: var(--cog-yellow);
+}
+.attn-legend .error::before {
+  color: var(--cog-red);
+}
+.attn-legend .active::before {
+  color: var(--cog-green);
+}
+.attn-legend .finished::before {
+  color: var(--cog-cyan);
+}
+
+/* ---- landing markdown section ----------------------------------------- */
+
+.VPHome .vp-doc h2 {
+  margin-top: 64px;
+  border-top: none;
+  text-align: center;
+}
