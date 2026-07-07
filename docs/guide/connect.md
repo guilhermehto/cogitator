@@ -3,15 +3,15 @@
 cogitator watches four harnesses. Each needs a one-time setup on the machine where the agent
 runs; after that, sessions appear in the dashboard automatically.
 
-Every harness has an **automated** path — paste a prompt into the agent itself and let it do
-the setup — and a **manual** path.
+Every harness has an **automated** path (paste a prompt into the agent itself and let it do
+the setup) and a **manual** path.
 
 ## opencode
 
 opencode advertises itself over mDNS and cogitator discovers it automatically. The only setup
 is launching opencode with the `--mdns` flag, which could be added to your `opencode` alias.
 
-**Automated** — paste this to your agent:
+**Automated.** Paste this to your agent:
 
 ```text
 Add a shell alias named `ocm` to my shell startup file (~/.zshrc, ~/.bashrc, or whichever
@@ -38,9 +38,9 @@ You can launch as many as you like; cogitator discovers them automatically.
 
 cogitator displays live attention signals for [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 sessions using Claude Code's lifecycle hooks. Monitoring **auto-enables** when
-`~/.claude/projects` exists — no environment variable needed.
+`~/.claude/projects` exists. No environment variable needed.
 
-**Automated** — paste this to Claude Code:
+**Automated.** Paste this to Claude Code:
 
 ```text
 Set up cogitator live-attention monitoring for Claude Code on this machine.
@@ -71,7 +71,7 @@ Set up cogitator live-attention monitoring for Claude Code on this machine.
 **Manual:**
 
 1. Confirm `~/.claude/projects` exists (it does once you've run Claude Code at least once).
-2. Wire the hooks in `~/.claude/settings.json` — cogitator does **not** write this file, so
+2. Wire the hooks in `~/.claude/settings.json`. cogitator does **not** write this file, so
    paste the block yourself:
 
    ```json
@@ -92,7 +92,7 @@ Set up cogitator live-attention monitoring for Claude Code on this machine.
 
 ::: warning PATH note
 The hook runner may not inherit your interactive shell PATH. If `cogitator` is not found,
-replace `"cogitator claude-hook"` with its absolute path — e.g.
+replace `"cogitator claude-hook"` with its absolute path, e.g.
 `"/Users/you/go/bin/cogitator claude-hook"` (use `which cogitator` to find it).
 :::
 
@@ -101,10 +101,10 @@ See [Live attention → Claude Code](/reference/live-attention#claude-code) for 
 ## Codex
 
 cogitator displays live attention signals for [Codex](https://openai.com/codex) sessions using
-Codex's lifecycle hooks. Monitoring **auto-enables** when `~/.codex` exists — no environment
+Codex's lifecycle hooks. Monitoring **auto-enables** when `~/.codex` exists. No environment
 variable needed.
 
-**Automated** — paste this to Codex:
+**Automated.** Paste this to Codex:
 
 ```text
 Set up cogitator live-attention monitoring for Codex on this machine.
@@ -159,7 +159,7 @@ hook variant, and `CODEX_HOME` override), and
 
 cogitator displays live attention signals for [Oh My Pi (omp)](https://oh-my-pi.dev) sessions.
 Monitoring **auto-enables** when the omp agent directory (`~/.omp/agent`, or
-`$PI_CODING_AGENT_DIR` / `$PI_CONFIG_DIR/agent`) exists — no environment variable needed. omp
+`$PI_CODING_AGENT_DIR` / `$PI_CONFIG_DIR/agent`) exists. No environment variable needed. omp
 sessions then appear in the Sessions pane from a filesystem poll alone.
 
 omp has **no external command-hook** like Codex/Claude (its hooks are in-process TypeScript
@@ -174,7 +174,7 @@ This writes `~/.omp/agent/extensions/cogitator.ts` with the absolute cogitator b
 baked in, so it works even when `cogitator` is not on the omp process PATH. Restart omp
 afterward.
 
-**Automated** — paste this to omp:
+**Automated.** Paste this to omp:
 
 ```text
 Set up cogitator live-attention monitoring for omp on this machine.

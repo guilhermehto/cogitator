@@ -3,13 +3,13 @@
 cogitator is a terminal (TUI) dashboard for your coding agents. It gives you a live view of
 sessions and lets you manage git worktrees:
 
-- **See status at a glance** — discovers running instances, flagging which sessions need you
+- **See status at a glance**: discovers running instances, flagging which sessions need you
   (permission requests, pending questions, errors).
-- **Create git worktrees** — spin up a new worktree for a branch, or fetch, pull, and delete
+- **Create git worktrees**: spin up a new worktree for a branch, or fetch, pull, and delete
   existing ones, straight from the roster.
-- **Navigate into them** — jump to a running agent or resume a stopped one in a tmux session
+- **Navigate into them**: jump to a running agent or resume a stopped one in a tmux session
   (or window) with a single keystroke.
-- **Works across harnesses** — opencode, Claude Code, Codex, and omp, with an optional
+- **Works across harnesses**: opencode, Claude Code, Codex, and omp, with an optional
   [Taskwarrior](https://taskwarrior.org) pane for your task list.
 
 ## Requirements
@@ -58,12 +58,12 @@ go run ./cmd/cogitator
 
 ## 3. Connect your coding agent
 
-Pick the harness you use — setup is a one-time step per machine:
+Pick the harness you use; setup is a one-time step per machine:
 
-- [opencode](/guide/connect#opencode) — launch with `--mdns`; discovered automatically.
-- [Claude Code](/guide/connect#claude-code) — wire lifecycle hooks in `~/.claude/settings.json`.
-- [Codex](/guide/connect#codex) — wire lifecycle hooks in `~/.codex/hooks.json`.
-- [omp](/guide/connect#omp) — one command: `cogitator omp-hook install`.
+- [opencode](/guide/connect#opencode): launch with `--mdns`; discovered automatically.
+- [Claude Code](/guide/connect#claude-code): wire lifecycle hooks in `~/.claude/settings.json`.
+- [Codex](/guide/connect#codex): wire lifecycle hooks in `~/.codex/hooks.json`.
+- [omp](/guide/connect#omp): a single command, `cogitator omp-hook install`.
 
 Each harness offers an **automated** path (paste a prompt into the agent itself and let it do
 the setup) and a **manual** path (do it yourself, step by step).

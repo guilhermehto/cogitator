@@ -4,7 +4,7 @@ layout: home
 hero:
   name: cogitator
   text: Every agent session, one screen.
-  tagline: A terminal dashboard that monitors your coding agents, spins up git worktrees, and jumps you between them — opencode, Claude Code, Codex, and omp.
+  tagline: A terminal dashboard that monitors your coding agents, spins up git worktrees, and jumps you between them. Works with opencode, Claude Code, Codex, and omp.
   image:
     src: /logo.svg
     alt: cogitator
@@ -22,19 +22,19 @@ hero:
 features:
   - icon: "●"
     title: Attention at a glance
-    details: Sessions that need you are flagged live — permission requests, pending questions, errors, finished turns.
+    details: Sessions that need you are flagged live, from permission requests and pending questions to errors and finished turns.
   - icon: "❯"
     title: Live discovery
     details: opencode instances appear automatically over mDNS; Claude Code, Codex, and omp report in through lightweight lifecycle hooks.
   - icon: "⎇"
     title: Worktree launcher
-    details: Spin up a worktree for a new branch, or fetch, pull, and delete existing ones — straight from the roster.
+    details: Spin up a worktree for a new branch, or fetch, pull, and delete existing ones, straight from the roster.
   - icon: "⊞"
     title: tmux native
     details: Jump to a running agent or resume a stopped one in a tmux session or window with a single keystroke.
   - icon: "✓"
     title: Taskwarrior pane
-    details: An optional task list lives beside your sessions — add, edit, start, and complete tasks without leaving the dashboard.
+    details: An optional task list lives beside your sessions. Add, edit, start, and complete tasks without leaving the dashboard.
   - icon: "◇"
     title: Zero config
     details: Harnesses are auto-detected. Durable settings live in one JSON file you can edit by hand.
@@ -69,4 +69,4 @@ go install github.com/guilhermehto/cogitator/cmd/cogitator@latest
 
 :::
 
-Then run `cogitator` and [connect your coding agent](/guide/connect) — you only do it once.
+Then run `cogitator` and [connect your coding agent](/guide/connect). You only do it once.

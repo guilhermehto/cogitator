@@ -3,7 +3,7 @@
 | Key       | Context                     | Action                                                                                                                                                        |
 | --------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `T`       | anywhere (outside a prompt) | show or hide the Tasks pane                                                                                                                                    |
-| `ctrl+P`  | anywhere (outside a prompt) | open the session switcher: fuzzy-find a repo/branch and jump to it (`cmd+P` is not supported — terminals don't forward it to TUI apps)                         |
+| `ctrl+P`  | anywhere (outside a prompt) | open the session switcher: fuzzy-find a repo/branch and jump to it (`cmd+P` is not supported; terminals don't forward it to TUI apps)                          |
 | `Tab`     | anywhere (outside a prompt) | swap focus between Sessions and Tasks panes when Tasks is shown                                                                                                |
 | `j` / `k` | Tasks pane focused          | move cursor down / up                                                                                                                                          |
 | `a`       | Tasks pane focused          | open inline prompt to add a new task                                                                                                                           |

@@ -8,7 +8,7 @@ live attention behaves once it's wired up.
 cogitator subscribes to Claude Code's lifecycle hooks to track each session's attention state.
 Monitoring is auto-enabled when `~/.claude/projects` exists.
 
-If cogitator is not running when a hook fires, `cogitator claude-hook` exits 0 silently —
+If cogitator is not running when a hook fires, `cogitator claude-hook` exits 0 silently;
 Claude Code shows no failure and never blocks your tool calls.
 
 ## Codex
@@ -26,7 +26,7 @@ cogitator subscribes to Codex's lifecycle hooks. Each event maps to an attention
 Hooks are enabled by default in Codex (`codex features list | grep hooks`). `PreToolUse` and
 `PostToolUse` fire on every tool call; for less process churn, wire only `SessionStart`,
 `PermissionRequest`, and `Stop` (see the minimal variant in the [Codex deep dive](/codex)).
-If cogitator is not running when a hook fires, `cogitator codex-hook` exits 0 silently — Codex
+If cogitator is not running when a hook fires, `cogitator codex-hook` exits 0 silently; Codex
 shows no failure and never blocks your tool calls.
 
 ## omp
@@ -44,6 +44,6 @@ recency-derived liveness label without any setup. The shipped extension
 | `turn_end` / `agent_end` / `session_shutdown`    | idle / awaiting  |
 
 omp does not expose a permission-request hook event, so there is no distinct
-permission-pending state for omp — the `ask` tool surfaces as question-pending. If cogitator
-is not running, the extension's spawn fails silently and `cogitator omp-hook` exits 0 — omp
+permission-pending state for omp; the `ask` tool surfaces as question-pending. If cogitator
+is not running, the extension's spawn fails silently and `cogitator omp-hook` exits 0; omp
 shows no failure and never blocks your turns.

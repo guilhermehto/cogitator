@@ -4,7 +4,7 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   title: 'cogitator',
   description:
-    'Monitor coding agents, spin up git worktrees, jump between them — all from one place.',
+    'Monitor coding agents, spin up git worktrees, jump between them, all from one place.',
   base: '/cogitator/',
   lang: 'en-US',
   cleanUrls: true,

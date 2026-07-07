@@ -23,12 +23,12 @@ line. It exits when either:
 
 These are wired up during [agent setup](/guide/connect) and are not meant to be run by hand:
 
-- `cogitator claude-hook` — receives Claude Code lifecycle events on stdin.
-- `cogitator codex-hook` — receives Codex lifecycle events on stdin.
-- `cogitator omp-hook` — receives omp lifecycle events; `cogitator omp-hook install` writes
+- `cogitator claude-hook`: receives Claude Code lifecycle events on stdin.
+- `cogitator codex-hook`: receives Codex lifecycle events on stdin.
+- `cogitator omp-hook`: receives omp lifecycle events; `cogitator omp-hook install` writes
   the omp extension to `~/.omp/agent/extensions/cogitator.ts`.
 
-All hook subcommands exit 0 silently when cogitator is not running — a closed monitor is the
+All hook subcommands exit 0 silently when cogitator is not running. A closed monitor is the
 expected case, not a failure, so your agent is never blocked.
 
 ## Logging
