@@ -148,7 +148,8 @@
   margin: 0;
 }
 
-.terminal-frame img {
+.terminal-frame img,
+.terminal-frame video {
   display: block;
   width: 100%;
 }

@@ -43,7 +43,7 @@ features:
 <div class="terminal-frame">
   <div class="bar"><i></i><i></i><i></i><em>cogitator</em></div>
 
-![cogitator TUI](/tui.png)
+<video src="/demo.mp4" poster="/tui.png" autoplay muted loop playsinline></video>
 
 </div>
 
