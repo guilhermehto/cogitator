@@ -1,7 +1,8 @@
 # Connect your agent
 
-cogitator watches four harnesses. Each needs a one-time setup on the machine where the agent
-runs; after that, sessions appear in the dashboard automatically.
+cogitator watches five harnesses. Each needs a one-time setup on the machine where the agent
+runs; after that, sessions appear in the dashboard automatically. (Rovo Dev is the exception —
+it needs no setup at all.)
 
 Every harness has an **automated** path (paste a prompt into the agent itself and let it do
 the setup) and a **manual** path.
@@ -194,3 +195,18 @@ baking in the absolute path.
 
 See the [omp deep dive](/omp) for the full setup guide and the event→attention mapping, and
 [Live attention → omp](/reference/live-attention#omp) for how it behaves.
+
+## Rovo Dev
+
+cogitator monitors [Atlassian Rovo Dev CLI](https://www.atlassian.com/software/rovo) sessions
+with **no setup at all**. Monitoring **auto-enables** when `~/.rovodev/sessions` exists (set
+`ROVODEV_HOME` to point cogitator at a different location). Rovo Dev sessions then appear in the
+Sessions pane from a filesystem poll alone — each `~/.rovodev/sessions/<id>/` directory supplies
+the session's title, workspace, and a recency-derived liveness label.
+
+Rovo Dev exposes no external command-hook that cogitator can wire (unlike Codex/Claude), so
+there is no real-time permission/question/error attention for Rovo Dev yet: a recently active
+session shows as active and fades to idle once its session files stop changing. Pressing
+`enter` on a stopped Rovo Dev row resumes it with `acli rovodev run --restore <id>`.
+
+See [Live attention → Rovo Dev](/reference/live-attention#rovo-dev) for how it behaves.

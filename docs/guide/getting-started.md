@@ -9,7 +9,7 @@ sessions and lets you manage git worktrees:
   existing ones, straight from the roster.
 - **Navigate into them**: jump to a running agent or resume a stopped one in a tmux session
   (or window) with a single keystroke.
-- **Works across harnesses**: opencode, Claude Code, Codex, and omp, with an optional
+- **Works across harnesses**: opencode, Claude Code, Codex, omp, and Rovo Dev, with an optional
   [Taskwarrior](https://taskwarrior.org) pane for your task list.
 
 ## Requirements

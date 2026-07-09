@@ -7,8 +7,8 @@ title: cogitator
   <p class="cog-eyebrow"><i>●</i> one dashboard · every agent · your tmux</p>
   <h1 class="cog-title">every agent session.<br>one screen<span class="cog-cursor"></span></h1>
   <p class="cog-lede">
-    cogitator monitors <strong>opencode</strong>, <strong>Claude Code</strong>, <strong>Codex</strong>, and
-    <strong>omp</strong>. Every session flags live:
+    cogitator monitors <strong>opencode</strong>, <strong>Claude Code</strong>, <strong>Codex</strong>,
+    <strong>omp</strong>, and <strong>Rovo Dev</strong>. Every session flags live:
     <span class="st-perm">permission</span>, <span class="st-question">question</span>,
     <span class="st-error">error</span>, <span class="st-active">active</span>,
     <span class="st-finished">finished</span>. One keystroke jumps you in over tmux.
@@ -96,7 +96,7 @@ go install github.com/guilhermehto/cogitator/cmd/cogitator@latest
     </div>
     <div class="cog-tool t-finished">
       <h3>your agents</h3>
-      <p>opencode, Claude Code, Codex, and omp run unmodified, right where they already run. No wrapper, no re-hosted chat view.</p>
+      <p>opencode, Claude Code, Codex, omp, and Rovo Dev run unmodified, right where they already run. No wrapper, no re-hosted chat view.</p>
     </div>
   </div>
 </section>
@@ -123,6 +123,11 @@ go install github.com/guilhermehto/cogitator/cmd/cogitator@latest
     <a class="cog-harness" href="./guide/connect#omp">
       <span class="name">omp</span>
       <span class="desc">one command: <code>cogitator omp-hook install</code></span>
+      <span class="go">setup →</span>
+    </a>
+    <a class="cog-harness" href="./guide/connect#rovo-dev">
+      <span class="name">rovo dev</span>
+      <span class="desc">auto-detected from <code>~/.rovodev</code>: zero setup</span>
       <span class="go">setup →</span>
     </a>
   </div>

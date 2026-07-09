@@ -11,6 +11,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/omp"
 	"github.com/guilhermehto/cogitator/internal/provider"
+	"github.com/guilhermehto/cogitator/internal/rovodev"
 	"github.com/guilhermehto/cogitator/internal/singleinstance"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/supervisor"
@@ -70,6 +71,10 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 	if cfg.OmpEnabled {
 		ompProvider := omp.NewProvider(cfg.OmpHome, cfg.OmpPollInterval, cfg.OmpRecencyWindow, logger)
 		mgr.Register(ompProvider)
+	}
+	if cfg.RovodevEnabled {
+		rovodevProvider := rovodev.NewProvider(cfg.RovodevHome, cfg.RovodevPollInterval, cfg.RovodevRecencyWindow, logger)
+		mgr.Register(rovodevProvider)
 	}
 	mgr.Start(ctx, store)
 

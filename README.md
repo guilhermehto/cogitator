@@ -23,7 +23,7 @@ cogitator is a TUI dashboard for your harnesses. It gives you a live view of ses
 - **See status at a glance**: discovers running instances, flagging which sessions need you (permission requests, pending questions, errors).
 - **Create git worktrees**: spin up a new worktree for a branch, or fetch, pull, and delete existing ones, straight from the roster.
 - **Navigate into them**: jump to a running agent or resume a stopped one in a tmux session (or window) with a single keystroke.
-- **Works across harnesses**: opencode, Claude Code, Codex, and omp, with an optional [Taskwarrior](https://taskwarrior.org) pane for your task list.
+- **Works across harnesses**: opencode, Claude Code, Codex, omp, and Rovo Dev, with an optional [Taskwarrior](https://taskwarrior.org) pane for your task list.
 
 ## Table of contents
 
@@ -35,6 +35,7 @@ cogitator is a TUI dashboard for your harnesses. It gives you a live view of ses
     - [Claude Code](#claude-code)
     - [Codex](#codex)
     - [omp](#omp)
+    - [Rovo Dev](#rovo-dev)
 - [Key bindings](#key-bindings)
 - [Configuration](#configuration)
 - [Taskwarrior integration](#taskwarrior-integration)
@@ -42,6 +43,7 @@ cogitator is a TUI dashboard for your harnesses. It gives you a live view of ses
   - [Claude Code](#claude-code-reference)
   - [Codex](#codex-reference)
   - [omp](#omp-reference)
+  - [Rovo Dev](#rovo-dev-reference)
 - [CLI reference](#cli-reference)
 - [Logging](#logging)
 - [Architecture overview](#architecture-overview)
@@ -278,6 +280,21 @@ baking in the absolute path.
 See [docs/omp.md](docs/omp.md) for the full setup guide and the event→attention mapping,
 and [Live attention reference → omp](#omp-reference) for how it behaves.
 
+#### Rovo Dev
+
+cogitator monitors [Atlassian Rovo Dev CLI](https://www.atlassian.com/software/rovo) sessions
+with **no setup at all**. Monitoring **auto-enables** when `~/.rovodev/sessions` exists — set
+`ROVODEV_HOME` to point cogitator at a different location. Rovo Dev sessions then appear in the
+Sessions pane from a filesystem poll alone: each `~/.rovodev/sessions/<id>/` directory supplies
+the session's title, workspace, and a recency-derived liveness label.
+
+Rovo Dev exposes no external command-hook cogitator can wire (unlike Codex/Claude), so there
+is no real-time permission/question/error attention for Rovo Dev yet — a recently active
+session shows as active and fades to idle once its session files stop changing. Press `enter`
+on a stopped Rovo Dev row to resume it with `acli rovodev run --restore <id>`.
+
+See [Live attention reference → Rovo Dev](#rovo-dev-reference) for how it behaves.
+
 ## Key bindings
 
 | Key | Context | Action |
@@ -322,7 +339,7 @@ no in-app setter, so editing this file is the only way to change them.
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `repos` | string array | `[]` | Absolute paths to the git repositories cogitator tracks for worktree launching. Normally managed from the UI — press `A` in the Sessions pane to fuzzy-find and add a repo — so entries usually appear here without hand-editing. Paths are canonicalized; a configured repo missing from disk is still listed but its worktree actions are disabled. |
-| `defaultHarness` | string | `opencode` | Harness pre-selected when you create a new worktree (`n`). One of `opencode`, `claude-code`, `codex`, `omp`. Empty falls back to `opencode`. |
+| `defaultHarness` | string | `opencode` | Harness pre-selected when you create a new worktree (`n`). One of `opencode`, `claude-code`, `codex`, `omp`, `rovodev`. Empty falls back to `opencode`. |
 | `launchMode` | string | `session` | How a worktree opens in tmux: `window` or `session`. Empty or any unrecognized value falls back to `session`. |
 
 ### tmux window vs session
@@ -434,6 +451,17 @@ omp does not expose a permission-request hook event, so there is no distinct
 permission-pending state for omp — the `ask` tool surfaces as question-pending. If
 cogitator is not running, the extension's spawn fails silently and `cogitator omp-hook`
 exits 0 — omp shows no failure and never blocks your turns.
+
+<a id="rovo-dev-reference"></a>
+
+### Rovo Dev
+
+cogitator polls `~/.rovodev/sessions/<id>/` (override the root with `ROVODEV_HOME`) so Rovo
+Dev sessions appear with a recency-derived liveness label without any setup: a session whose
+files changed within the recency window shows as active and fades to idle/hidden once they
+stop. Rovo Dev has **no external command-hook** cogitator can subscribe to yet, so there are
+no permission-, question-, or error-pending states for Rovo Dev this pass — liveness is
+poll-derived only. Jump and resume use `acli rovodev run --restore <id>`.
 
 ## CLI reference
 

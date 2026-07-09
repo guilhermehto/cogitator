@@ -47,3 +47,15 @@ omp does not expose a permission-request hook event, so there is no distinct
 permission-pending state for omp; the `ask` tool surfaces as question-pending. If cogitator
 is not running, the extension's spawn fails silently and `cogitator omp-hook` exits 0; omp
 shows no failure and never blocks your turns.
+
+## Rovo Dev
+
+cogitator polls `~/.rovodev/sessions/<id>/` (override the root with `ROVODEV_HOME`) so Rovo
+Dev sessions appear with a recency-derived liveness label without any setup. A session whose
+files changed within the recency window is reported active; once they stop changing it fades
+to idle and is eventually hidden.
+
+Rovo Dev exposes no external command-hook cogitator can subscribe to, so — unlike Codex,
+Claude Code, and omp — there are no permission-, question-, or error-pending states for Rovo
+Dev this pass; liveness is poll-derived only. Jump and resume use `acli rovodev run --restore
+<id>`.

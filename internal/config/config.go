@@ -83,6 +83,25 @@ type Config struct {
 	// is considered "live" (SourceLive). Sessions older than this window are
 	// labelled SourceRecent.
 	OmpRecencyWindow time.Duration
+
+	// RovodevEnabled enables the polled Atlassian Rovo Dev CLI session monitor.
+	// When false, no Rovo Dev provider is started and cogitator behaves exactly
+	// as before Rovo Dev support was added.
+	RovodevEnabled bool
+
+	// RovodevHome is the Rovo Dev home directory (the parent of sessions/). When
+	// empty the reader defaults to ~/.rovodev. Populated from the ROVODEV_HOME
+	// environment variable in Default() as a cogitator-side override for the
+	// poll path.
+	RovodevHome string
+
+	// RovodevPollInterval is how often the Rovo Dev provider polls RovodevHome.
+	RovodevPollInterval time.Duration
+
+	// RovodevRecencyWindow is the duration within which a session's last
+	// activity is considered "live" (SourceLive). Sessions older than this
+	// window are labelled SourceRecent.
+	RovodevRecencyWindow time.Duration
 }
 
 // codexHomeDirExists reports whether the resolved Codex home directory exists
@@ -140,6 +159,24 @@ func ompAgentDirExists() bool {
 	return err == nil && info.IsDir()
 }
 
+// rovodevSessionsDirExists reports whether the resolved Rovo Dev sessions
+// directory exists and is a directory. It mirrors the resolution logic used by
+// the Rovo Dev provider: $ROVODEV_HOME when set, otherwise ~/.rovodev. Detection
+// checks the sessions subdirectory to avoid false positives from an empty
+// ~/.rovodev directory (e.g. one holding only config.yml).
+func rovodevSessionsDirExists() bool {
+	dir := os.Getenv("ROVODEV_HOME")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false
+		}
+		dir = filepath.Join(home, ".rovodev")
+	}
+	info, err := os.Stat(filepath.Join(dir, "sessions"))
+	return err == nil && info.IsDir()
+}
+
 func Default() *Config {
 	return &Config{
 		RecentWindow:            30 * time.Minute,
@@ -172,5 +209,10 @@ func Default() *Config {
 		OmpHome:          os.Getenv("PI_CODING_AGENT_DIR"),
 		OmpPollInterval:  5 * time.Second,
 		OmpRecencyWindow: 30 * time.Minute,
+
+		RovodevEnabled:       rovodevSessionsDirExists(),
+		RovodevHome:          os.Getenv("ROVODEV_HOME"),
+		RovodevPollInterval:  5 * time.Second,
+		RovodevRecencyWindow: 30 * time.Minute,
 	}
 }
