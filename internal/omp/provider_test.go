@@ -79,8 +79,8 @@ func TestPollOnce_MapsFieldsAndRecency(t *testing.T) {
 	if by["live1"].Source != "live" {
 		t.Errorf("live1 Source = %q, want live", by["live1"].Source)
 	}
-	if by["live1"].StatusType != "busy" {
-		t.Errorf("live1 StatusType = %q, want busy (recent → busy)", by["live1"].StatusType)
+	if by["live1"].StatusType != "" {
+		t.Errorf("live1 StatusType = %q, want empty (recency is not a busy proxy; hooks only)", by["live1"].StatusType)
 	}
 	if by["live1"].Title != "Live one" {
 		t.Errorf("live1 Title = %q, want Live one", by["live1"].Title)
@@ -136,6 +136,32 @@ func TestHandleHookFrame_StatusTransitions(t *testing.T) {
 	}
 	if u.HasQuestion {
 		t.Error("after turn_end HasQuestion = true, want false")
+	}
+}
+
+// TestHandleHookFrame_SessionStartIsIdle is the regression test for the
+// "fresh session always green" bug: session_start means the session is parked
+// at the prompt, not generating, and no turn_end follows a session that never
+// starts a turn — so session_start must map to idle, not busy.
+func TestHandleHookFrame_SessionStartIsIdle(t *testing.T) {
+	p := omp.NewProvider("", 5*time.Second, 30*time.Minute, nil)
+	sink := &fakeSink{}
+
+	p.HandleHookFrameForTest([]byte(`{"hook_event_name":"session_start","session_id":"s2","cwd":"/tmp/wt"}`), sink)
+	u, ok := sink.lastUpdate()
+	if !ok || u.SessionID != "s2" {
+		t.Fatalf("session_start did not emit an update for s2: %+v", u)
+	}
+	if u.StatusType != "idle" {
+		t.Errorf("after session_start StatusType = %q, want idle", u.StatusType)
+	}
+
+	// session_start after a busy turn (resume mid-flight rosters) also resets.
+	p.HandleHookFrameForTest([]byte(`{"hook_event_name":"turn_start","session_id":"s2"}`), sink)
+	p.HandleHookFrameForTest([]byte(`{"hook_event_name":"session_start","session_id":"s2"}`), sink)
+	u, _ = sink.lastUpdate()
+	if u.StatusType != "idle" {
+		t.Errorf("session_start after turn_start StatusType = %q, want idle", u.StatusType)
 	}
 }
 
