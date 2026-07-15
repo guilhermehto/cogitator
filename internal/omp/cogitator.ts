@@ -27,8 +27,8 @@ type HookAPI = {
 };
 
 export default function cogitator(pi: HookAPI): void {
-  // session_start / turn_start / agent_start -> working
-  // turn_end / agent_end / session_shutdown -> awaiting input
+  // turn_start / agent_start -> working
+  // session_start / turn_end / agent_end / session_shutdown -> awaiting input
   // tool_call(ask) -> question pending; tool_result(ask) -> question cleared
   // tool_result(isError) -> error
   pi.on("session_start", (_e, ctx) => send("session_start", ctx));

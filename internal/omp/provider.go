@@ -205,7 +205,7 @@ func (p *Provider) handleHookFrame(raw []byte, sink provider.Sink) {
 	ov.lastActivity = now
 
 	switch ev.EventName {
-	case "session_start", "turn_start", "agent_start":
+	case "turn_start", "agent_start":
 		ov.statusType = "busy"
 		ov.hasQuestion = false
 
@@ -222,7 +222,12 @@ func (p *Provider) handleHookFrame(raw []byte, sink provider.Sink) {
 			ov.hasQuestion = false
 		}
 
-	case "turn_end", "agent_end", "session_shutdown":
+	case "session_start", "turn_end", "agent_end", "session_shutdown":
+		// session_start: a session opening or resuming is parked at the prompt,
+		// NOT generating — and a session that never starts a turn emits no
+		// turn_end, so mapping it to busy pinned fresh sessions green forever.
+		// Treat it as idle and let turn_start/agent_start flip it to busy
+		// (mirrors the claudecode provider's SessionStart → idle fix).
 		ov.statusType = "idle"
 		ov.hasQuestion = false
 	}
@@ -270,10 +275,14 @@ func (p *Provider) mergeToUpdate(s Session, ov hookOverlay, now time.Time) provi
 		src = "live"
 	}
 
-	statusType := ov.statusType // hook overlay wins
-	if statusType == "" && src == "live" {
-		// No hook override — a recently-active session is shown as busy.
-		statusType = "busy"
+	// Status comes from the hook overlay only — omp attention requires the
+	// shipped extension, so recency is never a proxy for "generating". A
+	// session with no overlay (e.g. started before cogitator) is inactive.
+	statusType := ov.statusType
+	// Decay a stale "busy" whose clearing turn_end/agent_end hook was lost
+	// (fire-and-forget spawn; mirrors the claudecode provider's decay).
+	if statusType == "busy" && src != "live" {
+		statusType = ""
 	}
 
 	lastActivity := s.LastActivity
