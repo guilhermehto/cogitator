@@ -261,7 +261,7 @@ func launchModeFor(m workspace.LaunchMode) tmuxctl.LaunchMode {
 type gitOps interface {
 	AddWorktree(repoPath, branch, dest string) (string, error)
 	FetchAndAddWorktree(repoPath, branch, dest string) (string, error)
-	RemoveWorktree(repoPath, worktreePath string, force bool) error
+	RemoveWorktree(repoPath, worktreePath, branch string, force bool) error
 	BranchMergeStatus(repoPath, branch string) (git.MergeState, string)
 	Pull(worktreePath, branch string) (string, error)
 }
@@ -277,8 +277,8 @@ func (realGitOps) FetchAndAddWorktree(repoPath, branch, dest string) (string, er
 	return git.FetchAndAddWorktree(repoPath, branch, dest)
 }
 
-func (realGitOps) RemoveWorktree(repoPath, worktreePath string, force bool) error {
-	return git.RemoveWorktree(repoPath, worktreePath, force)
+func (realGitOps) RemoveWorktree(repoPath, worktreePath, branch string, force bool) error {
+	return git.RemoveWorktree(repoPath, worktreePath, branch, force)
 }
 
 func (realGitOps) BranchMergeStatus(repoPath, branch string) (git.MergeState, string) {
@@ -699,19 +699,20 @@ func mergeStatusCmd(gitOp gitOps, repo, branch, path string) tea.Cmd {
 	}
 }
 
-// deleteWorktreeCmd removes the worktree at path (belonging to repo) via git,
-// then best-effort closes its attached tmux window/session so no dead pane is
-// left pointing at a missing directory. The git removal is the only step that
-// can fail the operation; tmux cleanup is advisory and its error is ignored.
-func deleteWorktreeCmd(ops tmuxOps, gitOp gitOps, repo, path string, mode tmuxctl.LaunchMode, force bool) tea.Cmd {
+// deleteWorktreeCmd removes the worktree at path (belonging to repo) and its
+// branch via git, then best-effort closes its attached tmux window/session so
+// no dead pane is left pointing at a missing directory. The git removal is the
+// only step that can fail the operation; branch deletion (inside RemoveWorktree)
+// and tmux cleanup are advisory and their errors are ignored.
+func deleteWorktreeCmd(ops tmuxOps, gitOp gitOps, repo, path, branch string, mode tmuxctl.LaunchMode, force bool) tea.Cmd {
 	return func() tea.Msg {
-		var removeFn func(string, string, bool) error
+		var removeFn func(string, string, string, bool) error
 		if gitOp != nil {
 			removeFn = gitOp.RemoveWorktree
 		} else {
 			removeFn = git.RemoveWorktree
 		}
-		if err := removeFn(repo, path, force); err != nil {
+		if err := removeFn(repo, path, branch, force); err != nil {
 			return worktreeDeletedMsg{path: path, err: err}
 		}
 
@@ -1226,7 +1227,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.removeWorktreeRow(target)
 					// deleteForce was resolved from config when the flow opened
 					// ('D'), so the action matches the warning shown at confirm.
-					return m, deleteWorktreeCmd(m.tmux, m.gitOp, target.Repo, target.Worktree, m.launchMode, m.deleteForce)
+					return m, deleteWorktreeCmd(m.tmux, m.gitOp, target.Repo, target.Worktree, target.Branch, m.launchMode, m.deleteForce)
 				}
 				m.prompt = promptIdle
 				m.deleteTarget = workspace.Row{}
