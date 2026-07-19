@@ -127,19 +127,26 @@ func firstNonEmptyLine(s string) string {
 }
 
 // RemoveWorktree removes the worktree at worktreePath belonging to the
-// repository rooted at repoPath. It runs `git worktree remove [--force]
-// <worktreePath>` from repoPath.
+// repository rooted at repoPath, then deletes the branch it had checked out.
+// It runs `git worktree remove [--force] <worktreePath>` followed by
+// `git branch (-d|-D) <branch>`, both from repoPath.
 //
 // When force is false, git refuses (returning a non-nil error) if the worktree
-// has uncommitted or untracked changes, protecting unsaved work. When force is
-// true, `--force` is passed so a dirty worktree is removed and its uncommitted
-// changes are discarded. A single --force does not override a *locked* worktree
-// (git requires `-f -f` for that); such a removal still returns an error.
+// has uncommitted or untracked changes, protecting unsaved work, and the branch
+// is deleted with `-d`, which only succeeds when the branch is merged. When
+// force is true, `--force` removes a dirty worktree (discarding its uncommitted
+// changes) and `-D` deletes the branch regardless of merge state. A single
+// --force does not override a *locked* worktree (git requires `-f -f` for
+// that); such a removal still returns an error.
 //
-// Only the worktree directory and its administrative files are removed; the
-// branch it had checked out is left intact, so committed work is never lost by
-// this call.
-func RemoveWorktree(repoPath, worktreePath string, force bool) error {
+// Deleting the branch is what lets a worktree be recreated under the same name:
+// creation runs `git worktree add -b <branch>`, which fails while a branch of
+// that name still exists. Branch deletion is best-effort — a detached HEAD has
+// no branch (branch == ""), and a branch that is unmerged (force=false) or
+// still checked out by another worktree cannot be deleted; none of these fail
+// the removal that already succeeded. Only the worktree removal itself can
+// return an error.
+func RemoveWorktree(repoPath, worktreePath, branch string, force bool) error {
 	args := []string{"worktree", "remove"}
 	if force {
 		args = append(args, "--force")
@@ -147,6 +154,16 @@ func RemoveWorktree(repoPath, worktreePath string, force bool) error {
 	args = append(args, worktreePath)
 	if _, err := runGit(repoPath, args...); err != nil {
 		return fmt.Errorf("git worktree remove: %w", err)
+	}
+
+	// Delete the now-unused branch so its name is free to reuse. Must run
+	// after removal: git refuses to delete a branch a live worktree checks out.
+	if branch != "" {
+		flag := "-d"
+		if force {
+			flag = "-D"
+		}
+		_, _ = runGit(repoPath, "branch", flag, branch)
 	}
 	return nil
 }

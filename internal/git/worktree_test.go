@@ -158,7 +158,7 @@ func TestRemoveWorktree_RemovesCleanWorktree(t *testing.T) {
 		t.Fatalf("AddWorktree: %v", err)
 	}
 
-	if err := git.RemoveWorktree(repo, gotPath, false); err != nil {
+	if err := git.RemoveWorktree(repo, gotPath, "feature", false); err != nil {
 		t.Fatalf("RemoveWorktree: %v", err)
 	}
 
@@ -174,6 +174,35 @@ func TestRemoveWorktree_RemovesCleanWorktree(t *testing.T) {
 	}
 	if len(wts) != 1 {
 		t.Fatalf("expected 1 worktree after remove, got %d: %v", len(wts), wts)
+	}
+}
+
+// TestRemoveWorktree_DeletesBranchAllowingRecreate reproduces the reported bug:
+// removing a worktree must also delete its branch, so a new worktree can be
+// created under the same name afterwards. Before the fix `git worktree remove`
+// left the branch behind and the recreate failed with "branch already exists".
+func TestRemoveWorktree_DeletesBranchAllowingRecreate(t *testing.T) {
+	repo := initRepo(t)
+
+	wtDir := filepath.Join(t.TempDir(), "feature-wt")
+	gotPath, err := git.AddWorktree(repo, "feature", wtDir)
+	if err != nil {
+		t.Fatalf("AddWorktree: %v", err)
+	}
+
+	if err := git.RemoveWorktree(repo, gotPath, "feature", true); err != nil {
+		t.Fatalf("RemoveWorktree: %v", err)
+	}
+
+	// The branch must be gone.
+	if err := exec.Command("git", "-C", repo, "rev-parse", "--verify", "--quiet", "refs/heads/feature").Run(); err == nil {
+		t.Error("branch \"feature\" still exists after RemoveWorktree")
+	}
+
+	// Recreating under the same name must now succeed.
+	recreated := filepath.Join(t.TempDir(), "feature-wt-again")
+	if _, err := git.AddWorktree(repo, "feature", recreated); err != nil {
+		t.Fatalf("recreate on same branch name after removal: %v", err)
 	}
 }
 
@@ -194,7 +223,7 @@ func TestRemoveWorktree_RefusesDirtyWorktree(t *testing.T) {
 		t.Fatalf("write untracked file: %v", err)
 	}
 
-	if err := git.RemoveWorktree(repo, gotPath, false); err == nil {
+	if err := git.RemoveWorktree(repo, gotPath, "feature", false); err == nil {
 		t.Fatal("expected RemoveWorktree to refuse a dirty worktree, got nil error")
 	}
 
@@ -222,7 +251,7 @@ func TestRemoveWorktree_ForceRemovesDirtyWorktree(t *testing.T) {
 		t.Fatalf("write untracked file: %v", err)
 	}
 
-	if err := git.RemoveWorktree(repo, gotPath, true); err != nil {
+	if err := git.RemoveWorktree(repo, gotPath, "feature", true); err != nil {
 		t.Fatalf("force RemoveWorktree must remove a dirty worktree, got: %v", err)
 	}
 
