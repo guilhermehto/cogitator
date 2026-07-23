@@ -327,6 +327,11 @@ type model struct {
 	// sessionCursor is the index into the visible worktree rows list that
 	// currently holds keyboard focus. Zero value (0) is safe.
 	sessionCursor int
+	// sessionScroll is the first rendered repo-header/worktree line in the
+	// sessions viewport. Unlike sessionCursor, it indexes the grouped display
+	// lines (which include repo headers). Cursor movement keeps it in sync so
+	// long workspace lists scroll while the selected worktree stays visible.
+	sessionScroll int
 	// pendingG is true after the first `g` of a `gg` (jump-to-top) sequence,
 	// awaiting the second `g`. Reset on any other key in the sessions pane.
 	pendingG bool
@@ -1023,6 +1028,49 @@ func paneInnerWidth(w int) int {
 	return inner
 }
 
+// paneHeights returns the total and inner heights for the sessions and tasks
+// panes under the model's current terminal and footer state. Keeping this
+// calculation shared between Update and View lets cursor movement adjust the
+// sessions viewport using exactly the height View will render.
+func (m model) paneHeights() (sessionsOuterH, tasksOuterH, sessionsInnerH, tasksInnerH int) {
+	extraFooterRows := 0
+	if m.debug && unreachableFooter(m.snap.UnreachableInstances) != "" {
+		extraFooterRows++
+	}
+	if taskwarriorErrorFooter(m.lastMutationOp, m.lastMutationErr) != "" {
+		extraFooterRows++
+	}
+
+	tasksActive := m.twAvail && m.tasksActive
+	if tasksActive {
+		tasksOuterH = max(8, m.height/3)
+	}
+	// The application header and legend always reserve one row each.
+	sessionsOuterH = max(6, m.height-tasksOuterH-2-extraFooterRows)
+	sessionsInnerH = max(1, sessionsOuterH-2)
+	if tasksActive {
+		tasksInnerH = max(1, tasksOuterH-2)
+	}
+	return sessionsOuterH, tasksOuterH, sessionsInnerH, tasksInnerH
+}
+
+// syncSessionScroll moves the grouped sessions viewport just enough to keep
+// the selected worktree visible. The scroll offset indexes display lines, so
+// repo headers are naturally accounted for when the cursor crosses a group.
+func (m *model) syncSessionScroll() {
+	lines := workspaceDisplayLines(m.workspaceRows)
+	listHeight := m.sessionsListHeight()
+	start, _ := workspaceWindow(lines, m.sessionCursor, m.sessionScroll, listHeight)
+	m.sessionScroll = start
+}
+
+// sessionsListHeight is the number of grouped repo/worktree lines available
+// inside the sessions pane after its title and pinned hint/prompt lines.
+func (m model) sessionsListHeight() int {
+	_, _, innerH, _ := m.paneHeights()
+	return max(0, innerH-1-m.workspaceFooterLineCount())
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -1413,27 +1461,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "j", "down":
 				if n := len(m.workspaceRows); n > 0 {
 					m.sessionCursor = min(m.sessionCursor+1, n-1)
+					m.syncSessionScroll()
 				}
 			case "k", "up":
 				if n := len(m.workspaceRows); n > 0 {
 					m.sessionCursor = max(m.sessionCursor-1, 0)
+					m.syncSessionScroll()
 				}
 			case "g":
 				if wasPendingG {
 					m.sessionCursor = 0
+					m.syncSessionScroll()
 				} else {
 					m.pendingG = true
 				}
 			case "<":
 				m.sessionCursor = 0
+				m.syncSessionScroll()
 			case "G", ">":
 				if n := len(m.workspaceRows); n > 0 {
 					m.sessionCursor = n - 1
+					m.syncSessionScroll()
 				}
 			case "ctrl+d":
 				m.sessionCursor = m.repoBoundary(1)
+				m.syncSessionScroll()
 			case "ctrl+u":
 				m.sessionCursor = m.repoBoundary(-1)
+				m.syncSessionScroll()
 
 			case "enter":
 				// Jump to a running agent or resume a stopped one.
@@ -1672,6 +1727,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// space so the cursor never overflows the pane boundary.
 		const editPromptLen = len("edit #999: ")
 		m.input.Width = max(0, paneInnerWidth(m.width)-editPromptLen)
+		m.syncSessionScroll()
 	case tasksLoadedMsg:
 		// Sort once at load time so m.tasks[m.taskCursor] is always the
 		// highlighted row. Sorting in the render path instead would
@@ -2160,25 +2216,7 @@ func (m model) View() string {
 	}
 	mutationFooter := taskwarriorErrorFooter(m.lastMutationOp, m.lastMutationErr)
 
-	// Compute reserved rows for height splitting.
-	// Each section separator newline is accounted for in the join below.
-	headerRows := 1
-	legendRows := 1
-	unreachableRows := 0
-	if footer != "" {
-		unreachableRows = 1
-	}
-	mutationFooterRows := 0
-	if mutationFooter != "" {
-		mutationFooterRows = 1
-	}
-	reserved := headerRows + legendRows + unreachableRows + mutationFooterRows
-
-	tasksOuterH := 0
-	if tasksActive {
-		tasksOuterH = max(8, m.height/3)
-	}
-	sessionsOuterH := max(6, m.height-tasksOuterH-reserved)
+	_, tasksOuterH, sessionsInnerH, tasksInnerH := m.paneHeights()
 
 	// Choose border style based on which pane is focused.
 	sessionsStyle := paneStyle
@@ -2187,17 +2225,6 @@ func (m model) View() string {
 		sessionsStyle = paneFocusedStyle
 	} else {
 		tasksStyle = paneFocusedStyle
-	}
-
-	// lipgloss .Height(h) sets the CONTENT height; the rounded border adds
-	// 2 more rows (top + bottom) to the rendered output. Subtract 2 so each
-	// pane's total rendered height matches the split reservation. Without
-	// this, the View() output is 4 rows taller than the terminal and the
-	// alt-screen crops the top (header, Sessions title, column header).
-	sessionsInnerH := max(1, sessionsOuterH-2)
-	tasksInnerH := 0
-	if tasksActive {
-		tasksInnerH = max(1, tasksOuterH-2)
 	}
 
 	// When repos are configured, render the merged worktree view. Otherwise
@@ -2214,7 +2241,7 @@ func (m model) View() string {
 		if now.IsZero() {
 			now = time.Now()
 		}
-		backdrop := m.renderWorkspaceRows(paneW, m.workspaceRows, m.sessionCursor, now)
+		backdrop := m.renderWorkspaceRowsViewport(paneW, sessionsInnerH, m.workspaceRows, m.sessionCursor, now)
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderSessionPalette(paneW, sessionsInnerH))
 	case m.prompt == promptHelp:
 		// Render the normal session list as the backdrop, then composite the
@@ -2225,7 +2252,7 @@ func (m model) View() string {
 		}
 		var backdrop string
 		if len(m.workspaceRows) > 0 {
-			backdrop = m.renderWorkspaceRows(paneW, m.workspaceRows, m.sessionCursor, now)
+			backdrop = m.renderWorkspaceRowsViewport(paneW, sessionsInnerH, m.workspaceRows, m.sessionCursor, now)
 		} else {
 			backdrop = m.renderAllSessions(paneW, rows, recentByInstance)
 		}
@@ -2239,7 +2266,7 @@ func (m model) View() string {
 		}
 		var backdrop string
 		if len(m.workspaceRows) > 0 {
-			backdrop = m.renderWorkspaceRows(paneW, m.workspaceRows, m.sessionCursor, now)
+			backdrop = m.renderWorkspaceRowsViewport(paneW, sessionsInnerH, m.workspaceRows, m.sessionCursor, now)
 		} else {
 			backdrop = m.renderAllSessions(paneW, rows, recentByInstance)
 		}
@@ -2251,7 +2278,7 @@ func (m model) View() string {
 		if now.IsZero() {
 			now = time.Now()
 		}
-		sessionContent = m.renderWorkspaceRows(paneW, m.workspaceRows, m.sessionCursor, now)
+		sessionContent = m.renderWorkspaceRowsViewport(paneW, sessionsInnerH, m.workspaceRows, m.sessionCursor, now)
 	default:
 		sessionContent = m.renderAllSessions(paneW, rows, recentByInstance)
 	}

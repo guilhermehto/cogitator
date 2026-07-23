@@ -347,6 +347,129 @@ func TestUnselectedWorkspaceRowKeepsColour(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Sessions viewport scrolling
+// ---------------------------------------------------------------------------
+
+func TestRenderWorkspaceRowsViewportKeepsCursorVisible(t *testing.T) {
+	rows := []workspace.Row{
+		makeRow("/a", "/a/1", "a-1", "row-a-1", workspace.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/a", "/a/2", "a-2", "row-a-2", workspace.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/a", "/a/3", "a-3", "row-a-3", workspace.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/b", "/b/1", "b-1", "row-b-1", workspace.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/b", "/b/2", "b-2", "row-b-2", workspace.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/b", "/b/3", "b-3", "row-b-3", workspace.StateStopped, state.AttnInactive, fixedNow),
+	}
+	m := model{width: 120}
+
+	// Five pane rows leave four for grouped content after the Sessions title.
+	got := wsStripANSI(m.renderWorkspaceRowsViewport(120, 5, rows, 5, fixedNow))
+	if !strings.Contains(got, "row-b-3") {
+		t.Fatalf("viewport must include the selected bottom row, got %q", got)
+	}
+	if strings.Contains(got, "row-a-1") {
+		t.Fatalf("viewport must scroll earlier rows out of view, got %q", got)
+	}
+	if !strings.Contains(got, "  b  /b") {
+		t.Fatalf("viewport must retain the selected repo header, got %q", got)
+	}
+}
+
+func TestSessionCursorMovementScrollsOnlyAtViewportEdge(t *testing.T) {
+	m := model{
+		width:  120,
+		height: 9, // sessions inner height 5: title + four grouped list lines
+		workspaceRows: []workspace.Row{
+			makeRow("/r", "/r/1", "one", "row-1", workspace.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/r", "/r/2", "two", "row-2", workspace.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/r", "/r/3", "three", "row-3", workspace.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/r", "/r/4", "four", "row-4", workspace.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/r", "/r/5", "five", "row-5", workspace.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/r", "/r/6", "six", "row-6", workspace.StateStopped, state.AttnInactive, fixedNow),
+		},
+	}
+
+	for range 4 {
+		updated, _ := m.Update(keyMsg("j"))
+		m = updated.(model)
+	}
+	if m.sessionCursor != 4 || m.sessionScroll != 2 {
+		t.Fatalf("after moving below viewport: cursor=%d scroll=%d, want cursor=4 scroll=2",
+			m.sessionCursor, m.sessionScroll)
+	}
+
+	updated, _ := m.Update(keyMsg("k"))
+	m = updated.(model)
+	if m.sessionCursor != 3 || m.sessionScroll != 2 {
+		t.Fatalf("moving within viewport must preserve scroll: cursor=%d scroll=%d, want cursor=3 scroll=2",
+			m.sessionCursor, m.sessionScroll)
+	}
+
+	updated, _ = m.Update(keyMsg("<"))
+	m = updated.(model)
+	if m.sessionCursor != 0 || m.sessionScroll != 0 {
+		t.Fatalf("jumping to top must restore first repo header: cursor=%d scroll=%d",
+			m.sessionCursor, m.sessionScroll)
+	}
+}
+
+func TestRenderWorkspaceRowsViewportPinsPromptBelowScrollableRows(t *testing.T) {
+	rows := []workspace.Row{
+		makeRow("/r", "/r/1", "one", "row-1", workspace.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/r", "/r/2", "two", "row-2", workspace.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/r", "/r/3", "three", "row-3", workspace.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/r", "/r/4", "four", "row-4", workspace.StateStopped, state.AttnInactive, fixedNow),
+	}
+	input := textinput.New()
+	input.SetValue("feature")
+	m := model{
+		width:           120,
+		prompt:          promptNewWorktree,
+		newWorktreeRepo: "/r",
+		input:           input,
+	}
+
+	got := wsStripANSI(m.renderWorkspaceRowsViewport(120, 5, rows, 3, fixedNow))
+	if !strings.Contains(got, "new worktree branch:") || !strings.Contains(got, "feature") {
+		t.Fatalf("prompt must stay visible below the scrollable list, got %q", got)
+	}
+	if !strings.Contains(got, "row-4") {
+		t.Fatalf("selected row must remain visible when prompt reserves space, got %q", got)
+	}
+	if strings.Count(got, "\n") > 5 {
+		t.Fatalf("viewport rendered beyond its five-row budget: %q", got)
+	}
+}
+
+func TestViewFitsLongWorkspaceListToTerminalHeight(t *testing.T) {
+	m := model{
+		width:         120,
+		height:        9,
+		sessionCursor: 5,
+		tickNow:       fixedNow,
+		workspaceRows: []workspace.Row{
+			makeRow("/r", "/r/1", "one", "row-1", workspace.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/r", "/r/2", "two", "row-2", workspace.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/r", "/r/3", "three", "row-3", workspace.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/r", "/r/4", "four", "row-4", workspace.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/r", "/r/5", "five", "row-5", workspace.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/r", "/r/6", "six", "row-6", workspace.StateStopped, state.AttnInactive, fixedNow),
+		},
+	}
+
+	got := m.View()
+	if h := lipgloss.Height(got); h != m.height {
+		t.Fatalf("long workspace view height = %d, want terminal height %d", h, m.height)
+	}
+	plain := wsStripANSI(got)
+	if !strings.Contains(plain, "row-6") {
+		t.Fatalf("view must show selected row after scrolling, got %q", plain)
+	}
+	if strings.Contains(plain, "row-1") {
+		t.Fatalf("view must clip rows above the viewport, got %q", plain)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Cursor movement via j/k keys
 // ---------------------------------------------------------------------------
 
