@@ -453,11 +453,110 @@ func shortenDirectory(path string) string {
 	return path
 }
 
-// renderWorkspaceRows renders the merged worktree list grouped by repo.
-// cursor is the index into rows of the currently selected row.
-// now is the reference time for relative timestamps on stopped rows.
-// hint is a transient one-line message shown below the rows (e.g. tmux hint).
+// workspaceDisplayLine is one scrollable line in the grouped sessions list.
+// Header lines have rowIndex == -1; worktree lines point back into
+// model.workspaceRows so keyboard selection and action routing remain based on
+// the flat worktree slice.
+type workspaceDisplayLine struct {
+	repo     string
+	rowIndex int
+}
+
+// workspaceDisplayLines expands the flat worktree slice into the visual order
+// used by the sessions pane, inserting one header before each repo group.
+func workspaceDisplayLines(rows []workspace.Row) []workspaceDisplayLine {
+	type repoGroup struct {
+		repo string
+		rows []int
+	}
+	var groups []repoGroup
+	repoIndex := map[string]int{}
+	for i, row := range rows {
+		gi, ok := repoIndex[row.Repo]
+		if !ok {
+			gi = len(groups)
+			repoIndex[row.Repo] = gi
+			groups = append(groups, repoGroup{repo: row.Repo})
+		}
+		groups[gi].rows = append(groups[gi].rows, i)
+	}
+
+	lines := make([]workspaceDisplayLine, 0, len(rows)+len(groups))
+	for _, group := range groups {
+		lines = append(lines, workspaceDisplayLine{repo: group.repo, rowIndex: -1})
+		for _, rowIndex := range group.rows {
+			lines = append(lines, workspaceDisplayLine{repo: group.repo, rowIndex: rowIndex})
+		}
+	}
+	return lines
+}
+
+// workspaceWindow returns the visible half-open range in lines. scroll is
+// preserved while the cursor remains inside the viewport and adjusted only
+// when selection crosses an edge, giving j/k navigation conventional scrolling
+// behaviour. A negative height means unbounded rendering (used by focused
+// render-unit tests and callers that do not need a viewport); zero renders no
+// list lines because the pane is fully consumed by pinned content.
+func workspaceWindow(lines []workspaceDisplayLine, cursor, scroll, height int) (start, end int) {
+	if height < 0 || len(lines) <= height {
+		return 0, len(lines)
+	}
+	if height == 0 {
+		return 0, 0
+	}
+
+	cursorLine := 0
+	for i, line := range lines {
+		if line.rowIndex == cursor {
+			cursorLine = i
+			break
+		}
+	}
+	// When the selected row is the first worktree in a repo, keep its header
+	// attached while scrolling upward so the row never loses its repo context.
+	cursorTop := cursorLine
+	if height >= 2 && cursorLine > 0 && lines[cursorLine-1].rowIndex < 0 {
+		cursorTop--
+	}
+
+	maxStart := len(lines) - height
+	start = min(max(scroll, 0), maxStart)
+	switch {
+	case cursorTop < start:
+		start = cursorTop
+	case cursorLine >= start+height:
+		start = cursorLine - height + 1
+	}
+	start = min(max(start, 0), maxStart)
+	return start, min(start+height, len(lines))
+}
+
+// workspaceFooterLineCount reports the number of non-scrolling status/prompt
+// lines pinned beneath the sessions list.
+func (m model) workspaceFooterLineCount() int {
+	count := 0
+	if m.tmuxHint != "" {
+		count++
+	}
+	switch m.prompt {
+	case promptNewWorktree, promptFetchBranch,
+		promptConfirmDeleteWorktree, promptConfirmDeleteWorktree2,
+		promptConfirmRemoveRepo:
+		count++
+	}
+	return count
+}
+
+// renderWorkspaceRows renders the complete merged worktree list grouped by
+// repo. It remains the unbounded helper used by focused rendering tests.
 func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, now time.Time) string {
+	return m.renderWorkspaceRowsViewport(width, 0, rows, cursor, now)
+}
+
+// renderWorkspaceRowsViewport renders the merged worktree list within height
+// rows. The Sessions title and active hint/prompt lines are pinned; only the
+// grouped repo/worktree lines scroll.
+func (m model) renderWorkspaceRowsViewport(width, height int, rows []workspace.Row, cursor int, now time.Time) string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Sessions") + "\n")
 	if len(rows) == 0 {
@@ -477,54 +576,42 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 		return b.String()
 	}
 
-	// Group rows by repo so we can emit a repo header before each group.
-	// We preserve the order from rows (Merge already orders by repo then worktree).
-	type repoGroup struct {
-		repo string
-		rows []int // indices into rows
+	lines := workspaceDisplayLines(rows)
+	listHeight := -1
+	if height > 0 {
+		listHeight = max(0, height-1-m.workspaceFooterLineCount())
 	}
-	var groups []repoGroup
-	repoIndex := map[string]int{} // repo path → index in groups
-	for i, row := range rows {
-		repo := row.Repo
-		gi, ok := repoIndex[repo]
-		if !ok {
-			gi = len(groups)
-			repoIndex[repo] = gi
-			groups = append(groups, repoGroup{repo: repo})
-		}
-		groups[gi].rows = append(groups[gi].rows, i)
-	}
+	start, end := workspaceWindow(lines, cursor, m.sessionScroll, listHeight)
 
-	for _, g := range groups {
-		// Repo header: bold base name, with the full (home-shortened) repo
-		// path in faded italic next to it.
-		header := wtRepoStyle.Render("  "+filepath.Base(g.repo)) +
-			"  " + wtPathStyle.Render(shortenDirectory(g.repo))
-		b.WriteString(header + "\n")
-
-		for _, i := range g.rows {
-			row := rows[i]
-			var line string
-			switch {
-			case row.State == workspace.StateCreating:
-				line = m.formatCreatingRow(row, width-2)
-			case m.pulling[row.Worktree]:
-				line = m.formatSpinnerRow(row, width-2, "pulling")
-			default:
-				line = formatWorktreeRow(now, row, width-2)
-			}
-			if i == cursor {
-				// Highlight the cursor row with a background band that keeps
-				// the row's per-cell foreground colours (see
-				// highlightSelectedRow). Reverse video would instead force a
-				// strip of all colour first, because lipgloss emits an SGR
-				// reset after every coloured cell that also clears the reverse
-				// attribute.
-				line = highlightSelectedRow(line)
-			}
-			b.WriteString(line + "\n")
+	for _, displayLine := range lines[start:end] {
+		if displayLine.rowIndex < 0 {
+			header := wtRepoStyle.Render("  "+filepath.Base(displayLine.repo)) +
+				"  " + wtPathStyle.Render(shortenDirectory(displayLine.repo))
+			b.WriteString(header + "\n")
+			continue
 		}
+
+		i := displayLine.rowIndex
+		row := rows[i]
+		var line string
+		switch {
+		case row.State == workspace.StateCreating:
+			line = m.formatCreatingRow(row, width-2)
+		case m.pulling[row.Worktree]:
+			line = m.formatSpinnerRow(row, width-2, "pulling")
+		default:
+			line = formatWorktreeRow(now, row, width-2)
+		}
+		if i == cursor {
+			// Highlight the cursor row with a background band that keeps
+			// the row's per-cell foreground colours (see
+			// highlightSelectedRow). Reverse video would instead force a
+			// strip of all colour first, because lipgloss emits an SGR
+			// reset after every coloured cell that also clears the reverse
+			// attribute.
+			line = highlightSelectedRow(line)
+		}
+		b.WriteString(line + "\n")
 	}
 
 	// Render transient hint (e.g. tmux unavailable, launch error).
@@ -552,7 +639,9 @@ func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, 
 		b.WriteString(m.repoRemovePromptLine() + "\n")
 	}
 
-	return b.String()
+	// A trailing newline is an additional rendered row to lipgloss. Trim it so
+	// the viewport consumes exactly the height budget calculated above.
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // highlightSelectedRow paints wtSelectedBg across an already-rendered worktree
