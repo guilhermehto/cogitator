@@ -89,7 +89,7 @@ func TestMerge_Running(t *testing.T) {
 	}
 	liveTopLevel[0].Attention = state.AttnActive
 
-	rows := settings.Merge(repos, worktreesByRepo, roster, liveTopLevel, nil)
+	rows := settings.Merge(repos, worktreesByRepo, roster, liveTopLevel, nil, "")
 
 	row := findRow(rows, wtDir)
 	if row == nil {
@@ -125,7 +125,7 @@ func TestMerge_Stopped(t *testing.T) {
 		wtDir: makeRosterEntry(wtDir, "opencode", "sess-old", "Old Session", past),
 	}
 
-	rows := settings.Merge(repos, worktreesByRepo, roster, nil, nil)
+	rows := settings.Merge(repos, worktreesByRepo, roster, nil, nil, "")
 
 	row := findRow(rows, wtDir)
 	if row == nil {
@@ -154,7 +154,7 @@ func TestMerge_Empty(t *testing.T) {
 		repoDir: {{Path: wtDir, Branch: "new-branch"}},
 	}
 
-	rows := settings.Merge(repos, worktreesByRepo, nil, nil, nil)
+	rows := settings.Merge(repos, worktreesByRepo, nil, nil, nil, "")
 
 	row := findRow(rows, wtDir)
 	if row == nil {
@@ -186,7 +186,7 @@ func TestMerge_Unknown(t *testing.T) {
 	// Tmux window exists for this dir.
 	tmuxDirs := map[string]bool{wtDir: true}
 
-	rows := settings.Merge(repos, worktreesByRepo, roster, nil, tmuxDirs)
+	rows := settings.Merge(repos, worktreesByRepo, roster, nil, tmuxDirs, "")
 
 	row := findRow(rows, wtDir)
 	if row == nil {
@@ -220,7 +220,7 @@ func TestMerge_MultipleSessionsPerDir(t *testing.T) {
 
 	liveTopLevel := []state.SessionView{sess1, sess2}
 
-	rows := settings.Merge(repos, worktreesByRepo, nil, liveTopLevel, nil)
+	rows := settings.Merge(repos, worktreesByRepo, nil, liveTopLevel, nil, "")
 
 	// Count rows for this dir.
 	count := 0
@@ -265,7 +265,7 @@ func TestMerge_MultipleSessionsPerDir_NewestWins(t *testing.T) {
 	sess1 := makeSession(wtDir, "sess-old", "Old Live", state.SourceLive, t1)
 	sess2 := makeSession(wtDir, "sess-new", "New Live", state.SourceLive, t2)
 
-	rows := settings.Merge(repos, worktreesByRepo, nil, []state.SessionView{sess1, sess2}, nil)
+	rows := settings.Merge(repos, worktreesByRepo, nil, []state.SessionView{sess1, sess2}, nil, "")
 
 	count := 0
 	var matched *settings.Row
@@ -307,7 +307,7 @@ func TestMerge_SubagentExcluded(t *testing.T) {
 	// the caller (internal/ui) has already filtered it out via shouldHideSubagent.
 	liveTopLevel := []state.SessionView{topLevel}
 
-	rows := settings.Merge(repos, worktreesByRepo, nil, liveTopLevel, nil)
+	rows := settings.Merge(repos, worktreesByRepo, nil, liveTopLevel, nil, "")
 
 	count := 0
 	for _, r := range rows {
@@ -335,7 +335,7 @@ func TestMerge_EmptyRepo(t *testing.T) {
 		repoDir: nil, // no worktrees
 	}
 
-	rows := settings.Merge(repos, worktreesByRepo, nil, nil, nil)
+	rows := settings.Merge(repos, worktreesByRepo, nil, nil, nil, "")
 
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 row for empty repo, got %d", len(rows))
@@ -369,7 +369,7 @@ func TestMerge_AllDirsCanonical(t *testing.T) {
 		repoDir: {{Path: wtDirSlash, Branch: "main"}},
 	}
 
-	rows := settings.Merge(repos, worktreesByRepo, nil, nil, nil)
+	rows := settings.Merge(repos, worktreesByRepo, nil, nil, nil, "")
 
 	for _, r := range rows {
 		if r.Worktree == "" {
@@ -378,6 +378,111 @@ func TestMerge_AllDirsCanonical(t *testing.T) {
 		if len(r.Worktree) > 1 && r.Worktree[len(r.Worktree)-1] == '/' {
 			t.Errorf("Row.Worktree %q has trailing slash (not canonical)", r.Worktree)
 		}
+	}
+}
+
+// TestMerge_ExcludesWorkspaceOwnedWorktree verifies that a worktree under
+// workspaceRoot is dropped from the merged rows while an ordinary worktree
+// of the same repo is kept — a workspace session's per-repo checkout must
+// not surface as an independent Sessions row.
+func TestMerge_ExcludesWorkspaceOwnedWorktree(t *testing.T) {
+	tmp := t.TempDir()
+	repoDir := mustDir(t, tmp, "repo")
+	ordinaryWt := mustDir(t, tmp, "wt-ordinary")
+	workspaceRoot := mustDir(t, tmp, "workspaces")
+	memberWt := mustDir(t, tmp, filepath.Join("workspaces", "session-1", "repo"))
+
+	repos := []settings.RepoConfig{{Path: repoDir}}
+	worktreesByRepo := map[string][]git.Worktree{
+		repoDir: {
+			{Path: ordinaryWt, Branch: "main"},
+			{Path: memberWt, Branch: "session-branch"},
+		},
+	}
+
+	rows := settings.Merge(repos, worktreesByRepo, nil, nil, nil, workspaceRoot)
+
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row (workspace-owned worktree excluded), got %d: %+v", len(rows), rows)
+	}
+	if rows[0].Worktree != ordinaryWt {
+		t.Errorf("Worktree: got %q, want ordinary worktree %q", rows[0].Worktree, ordinaryWt)
+	}
+}
+
+// TestMerge_WorkspaceOwnedOnlyStillYieldsHeaderRow verifies that a configured
+// repo whose only worktree is workspace-owned still gets a navigable
+// repo-header row, so 'n' remains reachable from it.
+func TestMerge_WorkspaceOwnedOnlyStillYieldsHeaderRow(t *testing.T) {
+	tmp := t.TempDir()
+	repoDir := mustDir(t, tmp, "repo")
+	workspaceRoot := mustDir(t, tmp, "workspaces")
+	memberWt := mustDir(t, tmp, filepath.Join("workspaces", "session-1", "repo"))
+
+	repos := []settings.RepoConfig{{Path: repoDir}}
+	worktreesByRepo := map[string][]git.Worktree{
+		repoDir: {{Path: memberWt, Branch: "session-branch"}},
+	}
+
+	rows := settings.Merge(repos, worktreesByRepo, nil, nil, nil, workspaceRoot)
+
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 header row, got %d: %+v", len(rows), rows)
+	}
+	if rows[0].Repo != repoDir || rows[0].Worktree != repoDir {
+		t.Errorf("expected header row for repo %q, got %+v", repoDir, rows[0])
+	}
+	if !rows[0].IsRoot {
+		t.Errorf("expected header row IsRoot=true, got %+v", rows[0])
+	}
+}
+
+// TestMerge_EmptyWorkspaceRootKeepsAllWorktrees verifies that an empty
+// workspaceRoot disables the exclusion entirely: every worktree is listed
+// exactly as it was before workspace support existed.
+func TestMerge_EmptyWorkspaceRootKeepsAllWorktrees(t *testing.T) {
+	tmp := t.TempDir()
+	repoDir := mustDir(t, tmp, "repo")
+	ordinaryWt := mustDir(t, tmp, "wt-ordinary")
+	memberWt := mustDir(t, tmp, filepath.Join("workspaces", "session-1", "repo"))
+
+	repos := []settings.RepoConfig{{Path: repoDir}}
+	worktreesByRepo := map[string][]git.Worktree{
+		repoDir: {
+			{Path: ordinaryWt, Branch: "main"},
+			{Path: memberWt, Branch: "session-branch"},
+		},
+	}
+
+	rows := settings.Merge(repos, worktreesByRepo, nil, nil, nil, "")
+
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows with empty workspaceRoot, got %d: %+v", len(rows), rows)
+	}
+}
+
+// TestMerge_WorkspaceRootSiblingNotSwallowed verifies that a workspace root
+// of ".../workspaces" does not exclude an unrelated worktree that merely
+// shares the string prefix, e.g. ".../workspaces-backup/x" — the comparison
+// must respect path-segment boundaries, not raw string prefix matching.
+func TestMerge_WorkspaceRootSiblingNotSwallowed(t *testing.T) {
+	tmp := t.TempDir()
+	repoDir := mustDir(t, tmp, "repo")
+	workspaceRoot := mustDir(t, tmp, "workspaces")
+	siblingWt := mustDir(t, tmp, filepath.Join("workspaces-backup", "x"))
+
+	repos := []settings.RepoConfig{{Path: repoDir}}
+	worktreesByRepo := map[string][]git.Worktree{
+		repoDir: {{Path: siblingWt, Branch: "main"}},
+	}
+
+	rows := settings.Merge(repos, worktreesByRepo, nil, nil, nil, workspaceRoot)
+
+	if len(rows) != 1 {
+		t.Fatalf("expected sibling worktree to remain listed, got %d rows: %+v", len(rows), rows)
+	}
+	if rows[0].Worktree != siblingWt {
+		t.Errorf("Worktree: got %q, want sibling worktree %q", rows[0].Worktree, siblingWt)
 	}
 }
 
@@ -399,7 +504,7 @@ func TestMerge_ProviderCodexWithRosterEntry(t *testing.T) {
 	}
 	sess := makeSessionWithProvider(wtDir, "sess-codex-live", "Codex Live", state.SourceLive, now, harness.Kind("codex"))
 
-	rows := settings.Merge(repos, worktreesByRepo, roster, []state.SessionView{sess}, nil)
+	rows := settings.Merge(repos, worktreesByRepo, roster, []state.SessionView{sess}, nil, "")
 
 	row := findRow(rows, wtDir)
 	if row == nil {

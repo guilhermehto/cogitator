@@ -7,6 +7,8 @@
 package settings
 
 import (
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/guilhermehto/cogitator/internal/git"
@@ -98,6 +100,12 @@ type liveCandidate struct {
 //     re-implement that filter.
 //   - tmuxDirs: set of canonical dirs that have a tmux window tagged with
 //     @cog_dir (from tmuxctl). Keys must be canonical paths.
+//   - workspaceRoot: the resolved workspace root (settings.ResolveWorkspaceRoot).
+//     Any worktree under this root is a per-repo checkout owned by a workspace
+//     session, not an independent unit of work, so it is dropped from
+//     worktreesByRepo before rows are built — the workspace session's own row
+//     already represents that work. An empty workspaceRoot disables this
+//     filter entirely (every worktree is kept, matching pre-workspace behaviour).
 //
 // Merge applies its own per-directory collapse over liveTopLevel: when
 // multiple top-level sessions share a canonical directory, the one with
@@ -121,7 +129,13 @@ func Merge(
 	roster map[string]RosterEntry,
 	liveTopLevel []state.SessionView,
 	tmuxDirs map[string]bool,
+	workspaceRoot string,
 ) []Row {
+	// Drop workspace-owned worktrees before the per-repo loop below, so a
+	// repo whose only worktrees are workspace-owned still falls through to
+	// the len(wts) == 0 case and gets its navigable repo-header row.
+	worktreesByRepo = filterWorkspaceOwnedWorktrees(worktreesByRepo, workspaceRoot)
+
 	// Build a per-directory index of the best live session.
 	// All keys are canonical paths.
 	liveByDir := buildLiveByDir(liveTopLevel)
@@ -170,6 +184,64 @@ func Merge(
 	}
 
 	return rows
+}
+
+// filterWorkspaceOwnedWorktrees removes any worktree whose path lies at or
+// below workspaceRoot from worktreesByRepo. A workspace-owned worktree is a
+// genuine git worktree of the configured repo, so without this filter each
+// member repo's checkout would surface as its own Sessions row in addition to
+// the workspace session's row — the same unit of work would appear twice.
+//
+// An empty workspaceRoot disables the filter and returns worktreesByRepo
+// unchanged, so callers that cannot resolve a root (or don't need workspace
+// support, e.g. --demo) see every worktree exactly as before this filter
+// existed.
+func filterWorkspaceOwnedWorktrees(worktreesByRepo map[string][]git.Worktree, workspaceRoot string) map[string][]git.Worktree {
+	if workspaceRoot == "" || len(worktreesByRepo) == 0 {
+		return worktreesByRepo
+	}
+	root, err := pathnorm.Canonical(workspaceRoot)
+	if err != nil {
+		root = workspaceRoot
+	}
+
+	filtered := make(map[string][]git.Worktree, len(worktreesByRepo))
+	for repo, wts := range worktreesByRepo {
+		var kept []git.Worktree
+		for _, wt := range wts {
+			dir, err := pathnorm.Canonical(wt.Path)
+			if err != nil {
+				dir = wt.Path
+			}
+			if PathUnderRoot(root, dir) {
+				continue
+			}
+			kept = append(kept, wt)
+		}
+		filtered[repo] = kept
+	}
+	return filtered
+}
+
+// PathUnderRoot reports whether path is root itself or a descendant of root,
+// compared at path-segment boundaries so a root like ".../workspaces" does
+// not match a sibling directory like ".../workspaces-backup" (a raw
+// strings.HasPrefix would). Callers should pass canonical (pathnorm.Canonical)
+// forms of both arguments. An empty root always returns false, so a caller
+// with no resolved root gets a strict no-op rather than a filter that
+// matches everything.
+func PathUnderRoot(root, path string) bool {
+	if root == "" {
+		return false
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // canonicalizeBoolMap returns a new map with all keys passed through
