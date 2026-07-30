@@ -17,9 +17,9 @@ import (
 
 	"github.com/guilhermehto/cogitator/internal/git"
 	"github.com/guilhermehto/cogitator/internal/harness"
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
-	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 // TestLaunchModeForDefaultsToSession locks the default launch mode: an unset
@@ -27,12 +27,12 @@ import (
 // only an explicit "window" resolves to a tmux window.
 func TestLaunchModeForDefaultsToSession(t *testing.T) {
 	cases := []struct {
-		in   workspace.LaunchMode
+		in   settings.LaunchMode
 		want tmuxctl.LaunchMode
 	}{
 		{"", tmuxctl.ModeSession},
-		{workspace.LaunchSession, tmuxctl.ModeSession},
-		{workspace.LaunchWindow, tmuxctl.ModeWindow},
+		{settings.LaunchSession, tmuxctl.ModeSession},
+		{settings.LaunchWindow, tmuxctl.ModeWindow},
 		{"bogus", tmuxctl.ModeSession},
 	}
 	for _, c := range cases {
@@ -274,7 +274,7 @@ func worktreeCreatedFrom(t *testing.T, cmd tea.Cmd) worktreeCreatedMsg {
 
 // makeTestModel builds a model with injected fakes and the given rows.
 // The textinput is initialized so Focus() calls don't panic.
-func makeTestModel(tmux *fakeTmuxOps, gitOp *fakeGitOps, harnOp *fakeHarnessOps, rows []workspace.Row) model {
+func makeTestModel(tmux *fakeTmuxOps, gitOp *fakeGitOps, harnOp *fakeHarnessOps, rows []settings.Row) model {
 	ti := newTestInput()
 	return model{
 		width:         120,
@@ -301,8 +301,8 @@ func newTestInput() textinput.Model {
 
 func TestEnterShowsHintWhenTmuxUnavailable(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: false}
-	m := makeTestModel(tmuxFake, nil, nil, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "row-a", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(tmuxFake, nil, nil, []settings.Row{
+		makeRow("/r", "/r/a", "main", "row-a", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 
 	updated, cmd := m.Update(keyMsg("enter"))
@@ -321,8 +321,8 @@ func TestEnterShowsHintWhenTmuxUnavailable(t *testing.T) {
 
 func TestNShowsHintWhenTmuxUnavailable(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: false}
-	m := makeTestModel(tmuxFake, nil, nil, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "row-a", workspace.StateStopped, state.AttnInactive, time.Time{}),
+	m := makeTestModel(tmuxFake, nil, nil, []settings.Row{
+		makeRow("/r", "/r/a", "main", "row-a", settings.StateStopped, state.AttnInactive, time.Time{}),
 	})
 
 	updated, cmd := m.Update(keyMsg("n"))
@@ -348,8 +348,8 @@ func TestEnterOnRunningRowCallsSelect(t *testing.T) {
 		processAlive:     true,
 		selectErr:        nil,
 	}
-	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnActive, fixedNow),
+	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/r", "/r/a", "main", "row-a", settings.StateRunning, state.AttnActive, fixedNow),
 	})
 
 	_, cmd := m.Update(keyMsg("enter"))
@@ -386,11 +386,11 @@ func TestEnterOnRunningRowMarksLiveProvider(t *testing.T) {
 		findWindowResult: "main:1",
 		processAlive:     true,
 	}
-	row := makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnFinished, fixedNow)
+	row := makeRow("/r", "/r/a", "main", "row-a", settings.StateRunning, state.AttnFinished, fixedNow)
 	row.Harness = "opencode"
 	row.Provider = "codex"
 	row.SessionID = "C1"
-	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []workspace.Row{row})
+	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []settings.Row{row})
 
 	_, cmd := m.Update(keyMsg("enter"))
 	result, ok := runCmd(cmd).(launchResultMsg)
@@ -411,8 +411,8 @@ func TestEnterOnRunningRowSessionModeCallsSelectSession(t *testing.T) {
 		findWindowResult: "repo-a:1",
 		processAlive:     true,
 	}
-	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnActive, fixedNow),
+	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/r", "/r/a", "main", "row-a", settings.StateRunning, state.AttnActive, fixedNow),
 	})
 	m.launchMode = tmuxctl.ModeSession
 
@@ -436,8 +436,8 @@ func TestEnterOnRunningRowDeadWindowCallsRelaunchThenSelect(t *testing.T) {
 		processAlive:     false,
 		selectErr:        nil,
 	}
-	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{argv: []string{"fake", "/r/a"}}, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnActive, fixedNow),
+	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{argv: []string{"fake", "/r/a"}}, []settings.Row{
+		makeRow("/r", "/r/a", "main", "row-a", settings.StateRunning, state.AttnActive, fixedNow),
 	})
 
 	_, cmd := m.Update(keyMsg("enter"))
@@ -474,8 +474,8 @@ func TestEnterOnRunningRowNoWindowSessionModeCreatesSessionThenSelectsSession(t 
 		ensureWindowResult: "repo-a:0",
 		selectErr:          nil,
 	}
-	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{argv: []string{"fake", "/r/a"}}, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnActive, fixedNow),
+	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{argv: []string{"fake", "/r/a"}}, []settings.Row{
+		makeRow("/r", "/r/a", "main", "row-a", settings.StateRunning, state.AttnActive, fixedNow),
 	})
 	m.launchMode = tmuxctl.ModeSession
 
@@ -522,8 +522,8 @@ func TestEnterOnStoppedRowWindowAliveCallsSelect(t *testing.T) {
 		processAlive:     true,
 		selectErr:        nil,
 	}
-	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "row-a", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/r", "/r/a", "main", "row-a", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 
 	_, cmd := m.Update(keyMsg("enter"))
@@ -557,8 +557,8 @@ func TestEnterOnStoppedRowWindowDeadCallsRelaunchThenSelect(t *testing.T) {
 		relaunchErr:      nil,
 		selectErr:        nil,
 	}
-	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{argv: []string{"fake", "/r/a"}}, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "row-a", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{argv: []string{"fake", "/r/a"}}, []settings.Row{
+		makeRow("/r", "/r/a", "main", "row-a", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 
 	_, cmd := m.Update(keyMsg("enter"))
@@ -594,8 +594,8 @@ func TestEnterOnStoppedRowNoWindowCallsEnsureWindowThenSelect(t *testing.T) {
 		ensureWindowErr:    nil,
 		selectErr:          nil,
 	}
-	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{argv: []string{"fake", "/r/a"}}, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "row-a", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{argv: []string{"fake", "/r/a"}}, []settings.Row{
+		makeRow("/r", "/r/a", "main", "row-a", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 
 	_, cmd := m.Update(keyMsg("enter"))
@@ -637,8 +637,8 @@ func TestLaunchResultMsgErrorSetsHint(t *testing.T) {
 
 func TestEnterOnMissingRowShowsHint(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: true}
-	m := makeTestModel(tmuxFake, nil, nil, []workspace.Row{
-		makeRow("/r", "/r/gone", "main", "old title", workspace.StateMissing, state.AttnInactive, fixedNow),
+	m := makeTestModel(tmuxFake, nil, nil, []settings.Row{
+		makeRow("/r", "/r/gone", "main", "old title", settings.StateMissing, state.AttnInactive, fixedNow),
 	})
 
 	updated, cmd := m.Update(keyMsg("enter"))
@@ -661,8 +661,8 @@ func TestEnterOnMissingRowShowsHint(t *testing.T) {
 
 func TestNKeyOpensNewWorktreePrompt(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: true}
-	m := makeTestModel(tmuxFake, nil, nil, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "row-a", workspace.StateStopped, state.AttnInactive, time.Time{}),
+	m := makeTestModel(tmuxFake, nil, nil, []settings.Row{
+		makeRow("/r", "/r/a", "main", "row-a", settings.StateStopped, state.AttnInactive, time.Time{}),
 	})
 
 	updated, _ := m.Update(keyMsg("n"))
@@ -678,8 +678,8 @@ func TestNKeyOpensNewWorktreePrompt(t *testing.T) {
 
 func TestNKeyEscCancelsPrompt(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: true}
-	m := makeTestModel(tmuxFake, nil, nil, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "row-a", workspace.StateStopped, state.AttnInactive, time.Time{}),
+	m := makeTestModel(tmuxFake, nil, nil, []settings.Row{
+		makeRow("/r", "/r/a", "main", "row-a", settings.StateStopped, state.AttnInactive, time.Time{}),
 	})
 
 	// Open the prompt.
@@ -850,8 +850,8 @@ func TestNewWorktreeCmdFromRemoteFetches(t *testing.T) {
 // captured.
 func TestFKeyOpensFetchBranchPrompt(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: true}
-	m := makeTestModel(tmuxFake, &fakeGitOps{}, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/r", "/r", "main", "row-a", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(tmuxFake, &fakeGitOps{}, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/r", "/r", "main", "row-a", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 
 	updated, cmd := m.Update(keyMsg("F"))
@@ -875,8 +875,8 @@ func TestFKeyOpensFetchBranchPrompt(t *testing.T) {
 // tmux: no prompt, no cmd, a tmux hint.
 func TestFKeyShowsHintWhenTmuxUnavailable(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: false}
-	m := makeTestModel(tmuxFake, nil, nil, []workspace.Row{
-		makeRow("/r", "/r", "main", "row-a", workspace.StateStopped, state.AttnInactive, time.Time{}),
+	m := makeTestModel(tmuxFake, nil, nil, []settings.Row{
+		makeRow("/r", "/r", "main", "row-a", settings.StateStopped, state.AttnInactive, time.Time{}),
 	})
 
 	updated, cmd := m.Update(keyMsg("F"))
@@ -897,8 +897,8 @@ func TestFKeyShowsHintWhenTmuxUnavailable(t *testing.T) {
 // stale worktreeFromRemote set by a prior interrupted fetch flow.
 func TestNKeyClearsFromRemoteFlag(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: true}
-	m := makeTestModel(tmuxFake, &fakeGitOps{}, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/r", "/r", "main", "row-a", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(tmuxFake, &fakeGitOps{}, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/r", "/r", "main", "row-a", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 	m.worktreeFromRemote = true // stale flag from a cancelled 'F'
 
@@ -918,8 +918,8 @@ func TestNKeyClearsFromRemoteFlag(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestInjectPendingCreatesAddsPlaceholderRow(t *testing.T) {
-	rows := []workspace.Row{
-		makeRow("/r", "/r", "main", "", workspace.StateStopped, state.AttnInactive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/r", "/r", "main", "", settings.StateStopped, state.AttnInactive, fixedNow),
 	}
 	pending := map[string]pendingCreate{
 		createKey("/r", "feat"): {repo: "/r", dest: "/r-feat", branch: "feat", fromRemote: true},
@@ -929,7 +929,7 @@ func TestInjectPendingCreatesAddsPlaceholderRow(t *testing.T) {
 		t.Fatalf("expected 2 rows, got %d", len(got))
 	}
 	last := got[len(got)-1]
-	if last.State != workspace.StateCreating || last.Branch != "feat" || last.Repo != "/r" {
+	if last.State != settings.StateCreating || last.Branch != "feat" || last.Repo != "/r" {
 		t.Errorf("placeholder row = %+v, want creating /r feat", last)
 	}
 }
@@ -937,8 +937,8 @@ func TestInjectPendingCreatesAddsPlaceholderRow(t *testing.T) {
 // TestInjectPendingCreatesSkipsExistingRow verifies no duplicate placeholder is
 // added once a real row for the same repo+branch has appeared.
 func TestInjectPendingCreatesSkipsExistingRow(t *testing.T) {
-	rows := []workspace.Row{
-		makeRow("/r", "/r-feat", "feat", "sess", workspace.StateRunning, state.AttnActive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/r", "/r-feat", "feat", "sess", settings.StateRunning, state.AttnActive, fixedNow),
 	}
 	pending := map[string]pendingCreate{
 		createKey("/r", "feat"): {repo: "/r", dest: "/r-feat", branch: "feat"},
@@ -950,8 +950,8 @@ func TestInjectPendingCreatesSkipsExistingRow(t *testing.T) {
 }
 
 func TestClearPendingCreateRemovesRowAndEntry(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, &fakeGitOps{}, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/r", "/r", "main", "", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(&fakeTmuxOps{available: true}, &fakeGitOps{}, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/r", "/r", "main", "", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 	m.addPendingCreate("/r", "/r-feat", "feat", false)
 	m.workspaceRows = injectPendingCreates(m.workspaceRows, m.pendingCreates)
@@ -964,7 +964,7 @@ func TestClearPendingCreateRemovesRowAndEntry(t *testing.T) {
 		t.Error("clearPendingCreate must drop the map entry")
 	}
 	for _, r := range m.workspaceRows {
-		if r.State == workspace.StateCreating {
+		if r.State == settings.StateCreating {
 			t.Fatal("clearPendingCreate must drop the placeholder row")
 		}
 	}
@@ -1001,8 +1001,8 @@ func TestSpinnerTickAdvancesAndStops(t *testing.T) {
 }
 
 func TestWorktreeCreatedMsgClearsPendingCreate(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, &fakeGitOps{}, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/r", "/r", "main", "", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(&fakeTmuxOps{available: true}, &fakeGitOps{}, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/r", "/r", "main", "", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 	m.addPendingCreate("/r", "/r-feat", "feat", true)
 	m.workspaceRows = injectPendingCreates(m.workspaceRows, m.pendingCreates)
@@ -1014,7 +1014,7 @@ func TestWorktreeCreatedMsgClearsPendingCreate(t *testing.T) {
 		t.Error("worktreeCreatedMsg must clear the pending create")
 	}
 	for _, r := range m2.workspaceRows {
-		if r.State == workspace.StateCreating {
+		if r.State == settings.StateCreating {
 			t.Fatal("worktreeCreatedMsg must drop the spinner row")
 		}
 	}
@@ -1027,8 +1027,8 @@ func TestWorktreeCreatedMsgClearsPendingCreate(t *testing.T) {
 // enterable: enter surfaces a hint and never touches tmux.
 func TestEnterOnCreatingRowDoesNotLaunch(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: true}
-	m := makeTestModel(tmuxFake, &fakeGitOps{}, &fakeHarnessOps{}, []workspace.Row{
-		{Repo: "/r", Worktree: "/r-feat", Branch: "feat", State: workspace.StateCreating},
+	m := makeTestModel(tmuxFake, &fakeGitOps{}, &fakeHarnessOps{}, []settings.Row{
+		{Repo: "/r", Worktree: "/r-feat", Branch: "feat", State: settings.StateCreating},
 	})
 
 	updated, cmd := m.Update(keyMsg("enter"))
@@ -1046,8 +1046,8 @@ func TestEnterOnCreatingRowDoesNotLaunch(t *testing.T) {
 }
 
 func TestCanDeleteWorktreeRejectsCreatingRow(t *testing.T) {
-	ok, reason := canDeleteWorktree(workspace.Row{
-		Repo: "/r", Worktree: "/r-feat", Branch: "feat", State: workspace.StateCreating,
+	ok, reason := canDeleteWorktree(settings.Row{
+		Repo: "/r", Worktree: "/r-feat", Branch: "feat", State: settings.StateCreating,
 	})
 	if ok {
 		t.Error("a creating row must not be deletable")
@@ -1078,8 +1078,8 @@ func TestWorktreeCreatedMsgErrorSetsHint(t *testing.T) {
 
 func TestRenderWorkspaceRowsStoppedRowShowsTitle(t *testing.T) {
 	m := model{width: 200}
-	rows := []workspace.Row{
-		makeRow("/r", "/r/a", "main", "stopped session", workspace.StateStopped, state.AttnInactive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/r", "/r/a", "main", "stopped session", settings.StateStopped, state.AttnInactive, fixedNow),
 	}
 	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
 	if !strings.Contains(got, "stopped session") {
@@ -1096,8 +1096,8 @@ func TestRenderWorkspaceRowsShowsTmuxHint(t *testing.T) {
 		width:    200,
 		tmuxHint: "tmux not available — start cogitator inside a tmux session",
 	}
-	rows := []workspace.Row{
-		makeRow("/r", "/r/a", "main", "row-a", workspace.StateStopped, state.AttnInactive, time.Time{}),
+	rows := []settings.Row{
+		makeRow("/r", "/r/a", "main", "row-a", settings.StateStopped, state.AttnInactive, time.Time{}),
 	}
 	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
 	if !strings.Contains(got, "tmux not available") {
@@ -1112,8 +1112,8 @@ func TestRenderWorkspaceRowsShowsTmuxHint(t *testing.T) {
 func TestDKeyOpensDeleteConfirmAndProbesMerge(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: true}
 	gitFake := &fakeGitOps{mergeState: git.MergeMerged, mergeBase: "main"}
-	m := makeTestModel(tmuxFake, gitFake, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/r", "/r/a", "feat", "title", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(tmuxFake, gitFake, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/r", "/r/a", "feat", "title", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 
 	updated, cmd := m.Update(keyMsg("D"))
@@ -1141,9 +1141,9 @@ func TestDKeyOpensDeleteConfirmAndProbesMerge(t *testing.T) {
 
 func TestDKeyOnMainWorktreeShowsHint(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: true}
-	m := makeTestModel(tmuxFake, &fakeGitOps{}, &fakeHarnessOps{}, []workspace.Row{
+	m := makeTestModel(tmuxFake, &fakeGitOps{}, &fakeHarnessOps{}, []settings.Row{
 		// Worktree == Repo → the repository's primary worktree.
-		makeRow("/r", "/r", "main", "title", workspace.StateRunning, state.AttnActive, fixedNow),
+		makeRow("/r", "/r", "main", "title", settings.StateRunning, state.AttnActive, fixedNow),
 	})
 
 	updated, cmd := m.Update(keyMsg("D"))
@@ -1162,9 +1162,9 @@ func TestDKeyOnMainWorktreeShowsHint(t *testing.T) {
 
 func TestDKeyOnUnconfiguredRowShowsHint(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: true}
-	m := makeTestModel(tmuxFake, &fakeGitOps{}, &fakeHarnessOps{}, []workspace.Row{
+	m := makeTestModel(tmuxFake, &fakeGitOps{}, &fakeHarnessOps{}, []settings.Row{
 		// Repo == "" → not part of a configured repo.
-		makeRow("", "/somewhere/wt", "feat", "title", workspace.StateRunning, state.AttnActive, fixedNow),
+		makeRow("", "/somewhere/wt", "feat", "title", settings.StateRunning, state.AttnActive, fixedNow),
 	})
 
 	updated, _ := m.Update(keyMsg("D"))
@@ -1186,7 +1186,7 @@ func TestDeleteConfirmFirstYAdvancesToSecond(t *testing.T) {
 	m := model{
 		width:        120,
 		prompt:       promptConfirmDeleteWorktree,
-		deleteTarget: makeRow("/r", "/r/a", "feat", "", workspace.StateStopped, state.AttnInactive, fixedNow),
+		deleteTarget: makeRow("/r", "/r/a", "feat", "", settings.StateStopped, state.AttnInactive, fixedNow),
 	}
 
 	updated, cmd := m.Update(keyMsg("y"))
@@ -1207,7 +1207,7 @@ func TestDeleteConfirmFirstEscCancels(t *testing.T) {
 	m := model{
 		width:           120,
 		prompt:          promptConfirmDeleteWorktree,
-		deleteTarget:    makeRow("/r", "/r/a", "feat", "", workspace.StateStopped, state.AttnInactive, fixedNow),
+		deleteTarget:    makeRow("/r", "/r/a", "feat", "", settings.StateStopped, state.AttnInactive, fixedNow),
 		deleteMergeInfo: "merged into main",
 	}
 
@@ -1235,7 +1235,7 @@ func TestDeleteConfirmSecondDefaultCancels(t *testing.T) {
 		m := model{
 			width:        120,
 			prompt:       promptConfirmDeleteWorktree2,
-			deleteTarget: makeRow("/r", "/r/a", "feat", "", workspace.StateStopped, state.AttnInactive, fixedNow),
+			deleteTarget: makeRow("/r", "/r/a", "feat", "", settings.StateStopped, state.AttnInactive, fixedNow),
 			tmux:         &fakeTmuxOps{available: true},
 			gitOp:        &fakeGitOps{},
 		}
@@ -1258,8 +1258,8 @@ func TestDeleteConfirmSecondDefaultCancels(t *testing.T) {
 func TestDeleteWorktreeFullConfirmFlowDispatchesRemove(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: true, findWindowErr: tmuxctl.ErrWindowNotFound}
 	gitFake := &fakeGitOps{mergeState: git.MergeMerged, mergeBase: "main"}
-	m := makeTestModel(tmuxFake, gitFake, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/r", "/r/a", "feat", "title", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(tmuxFake, gitFake, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/r", "/r/a", "feat", "title", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 
 	// D → first confirm.
@@ -1383,9 +1383,9 @@ func TestDeleteWorktreeCmdGitErrorSkipsWindowKill(t *testing.T) {
 func TestWorktreeDeletedMsgRemovesRowAndClampsCursor(t *testing.T) {
 	m := model{
 		width: 120,
-		workspaceRows: []workspace.Row{
-			makeRow("/r", "/r/a", "main", "a", workspace.StateRunning, state.AttnActive, fixedNow),
-			makeRow("/r", "/r/b", "feat", "b", workspace.StateStopped, state.AttnInactive, fixedNow),
+		workspaceRows: []settings.Row{
+			makeRow("/r", "/r/a", "main", "a", settings.StateRunning, state.AttnActive, fixedNow),
+			makeRow("/r", "/r/b", "feat", "b", settings.StateStopped, state.AttnInactive, fixedNow),
 		},
 		sessionCursor: 1,
 	}
@@ -1407,8 +1407,8 @@ func TestWorktreeDeletedMsgRemovesRowAndClampsCursor(t *testing.T) {
 func TestWorktreeDeletedMsgErrorSetsHintKeepsRow(t *testing.T) {
 	m := model{
 		width: 120,
-		workspaceRows: []workspace.Row{
-			makeRow("/r", "/r/a", "main", "a", workspace.StateRunning, state.AttnActive, fixedNow),
+		workspaceRows: []settings.Row{
+			makeRow("/r", "/r/a", "main", "a", settings.StateRunning, state.AttnActive, fixedNow),
 		},
 	}
 
@@ -1426,11 +1426,11 @@ func TestWorktreeDeletedMsgErrorSetsHintKeepsRow(t *testing.T) {
 // A failed deletion of an optimistically-removed row must restore that row and
 // clear the pending entry so the worktree reappears in the table.
 func TestWorktreeDeletedMsgErrorRestoresPendingRow(t *testing.T) {
-	saved := makeRow("/r", "/r/a", "feat", "a", workspace.StateStopped, state.AttnInactive, fixedNow)
+	saved := makeRow("/r", "/r/a", "feat", "a", settings.StateStopped, state.AttnInactive, fixedNow)
 	m := model{
 		width:          120,
 		workspaceRows:  nil, // row was already optimistically removed
-		pendingDeletes: map[string]workspace.Row{"/r/a": saved},
+		pendingDeletes: map[string]settings.Row{"/r/a": saved},
 	}
 
 	updated, _ := m.Update(worktreeDeletedMsg{path: "/r/a", err: errors.New("modified files")})
@@ -1455,17 +1455,17 @@ func TestWorktreeDeletedMsgErrorRestoresPendingRow(t *testing.T) {
 // cannot select the failed worktree to clean it up. Regression test for that
 // "jump over" bug.
 func TestWorktreeDeletedMsgErrorRestoresRowGroupedByRepo(t *testing.T) {
-	saved := makeRow("/r1", "/r1/b", "feat", "b", workspace.StateStopped, state.AttnInactive, fixedNow)
+	saved := makeRow("/r1", "/r1/b", "feat", "b", settings.StateStopped, state.AttnInactive, fixedNow)
 	m := model{
 		width: 120,
 		// /r1/b was optimistically removed; /r2 sits between /r1's rows, so a
 		// naive append would land /r1/b after /r2/x and break grouping.
-		workspaceRows: []workspace.Row{
-			makeRow("/r1", "/r1/a", "main", "a", workspace.StateRunning, state.AttnActive, fixedNow),
-			makeRow("/r2", "/r2/x", "main", "x", workspace.StateStopped, state.AttnInactive, fixedNow),
+		workspaceRows: []settings.Row{
+			makeRow("/r1", "/r1/a", "main", "a", settings.StateRunning, state.AttnActive, fixedNow),
+			makeRow("/r2", "/r2/x", "main", "x", settings.StateStopped, state.AttnInactive, fixedNow),
 		},
 		sessionCursor:  1, // on /r2/x
-		pendingDeletes: map[string]workspace.Row{"/r1/b": saved},
+		pendingDeletes: map[string]settings.Row{"/r1/b": saved},
 	}
 
 	updated, _ := m.Update(worktreeDeletedMsg{path: "/r1/b", err: errors.New("modified files")})
@@ -1492,7 +1492,7 @@ func TestWorktreeDeletedMsgSuccessClearsPending(t *testing.T) {
 	m := model{
 		width:          120,
 		workspaceRows:  nil,
-		pendingDeletes: map[string]workspace.Row{"/r/a": makeRow("/r", "/r/a", "feat", "a", workspace.StateStopped, state.AttnInactive, fixedNow)},
+		pendingDeletes: map[string]settings.Row{"/r/a": makeRow("/r", "/r/a", "feat", "a", settings.StateStopped, state.AttnInactive, fixedNow)},
 	}
 
 	updated, _ := m.Update(worktreeDeletedMsg{path: "/r/a"})
@@ -1508,12 +1508,12 @@ func TestWorktreeDeletedMsgSuccessClearsPending(t *testing.T) {
 func TestWorkspaceRowsMsgFiltersPendingDeletes(t *testing.T) {
 	m := model{
 		width:          120,
-		pendingDeletes: map[string]workspace.Row{"/r/a": makeRow("/r", "/r/a", "feat", "a", workspace.StateStopped, state.AttnInactive, fixedNow)},
+		pendingDeletes: map[string]settings.Row{"/r/a": makeRow("/r", "/r/a", "feat", "a", settings.StateStopped, state.AttnInactive, fixedNow)},
 	}
 
-	updated, _ := m.Update(workspaceRowsMsg{rows: []workspace.Row{
-		makeRow("/r", "/r/a", "feat", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/r", "/r/b", "other", "b", workspace.StateRunning, state.AttnActive, fixedNow),
+	updated, _ := m.Update(workspaceRowsMsg{rows: []settings.Row{
+		makeRow("/r", "/r/a", "feat", "a", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/r", "/r/b", "other", "b", settings.StateRunning, state.AttnActive, fixedNow),
 	}})
 	m2 := updated.(model)
 
@@ -1526,7 +1526,7 @@ func TestMergeStatusMsgUpdatesDeleteInfoWhenTargetMatches(t *testing.T) {
 	m := model{
 		width:        120,
 		prompt:       promptConfirmDeleteWorktree,
-		deleteTarget: makeRow("/r", "/r/a", "feat", "", workspace.StateStopped, state.AttnInactive, fixedNow),
+		deleteTarget: makeRow("/r", "/r/a", "feat", "", settings.StateStopped, state.AttnInactive, fixedNow),
 	}
 
 	updated, _ := m.Update(mergeStatusMsg{path: "/r/a", state: git.MergeNotMerged, base: "main"})
@@ -1541,7 +1541,7 @@ func TestMergeStatusMsgIgnoredWhenPathMismatch(t *testing.T) {
 	m := model{
 		width:        120,
 		prompt:       promptConfirmDeleteWorktree,
-		deleteTarget: makeRow("/r", "/r/a", "feat", "", workspace.StateStopped, state.AttnInactive, fixedNow),
+		deleteTarget: makeRow("/r", "/r/a", "feat", "", settings.StateStopped, state.AttnInactive, fixedNow),
 	}
 
 	updated, _ := m.Update(mergeStatusMsg{path: "/r/OTHER", state: git.MergeMerged, base: "main"})
@@ -1557,43 +1557,43 @@ func TestMergeStatusMsgIgnoredWhenPathMismatch(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRenderWorktreeDeletePromptShowsMergeAndPermanent(t *testing.T) {
-	base := makeRow("/r", "/r/a", "feat/x", "", workspace.StateStopped, state.AttnInactive, fixedNow)
+	base := makeRow("/r", "/r/a", "feat/x", "", settings.StateStopped, state.AttnInactive, fixedNow)
 
 	m1 := model{width: 200, prompt: promptConfirmDeleteWorktree, deleteTarget: base, deleteMergeInfo: "NOT merged into main"}
-	got1 := m1.renderWorkspaceRows(200, []workspace.Row{base}, 0, fixedNow)
+	got1 := m1.renderWorkspaceRows(200, []settings.Row{base}, 0, fixedNow)
 	if !strings.Contains(got1, "delete worktree") || !strings.Contains(got1, "NOT merged into main") {
 		t.Fatalf("first confirm must show the prompt and merge info, got %q", got1)
 	}
 
 	m2 := model{width: 200, prompt: promptConfirmDeleteWorktree2, deleteTarget: base, deleteMergeInfo: "NOT merged into main"}
-	got2 := m2.renderWorkspaceRows(200, []workspace.Row{base}, 0, fixedNow)
+	got2 := m2.renderWorkspaceRows(200, []settings.Row{base}, 0, fixedNow)
 	if !strings.Contains(got2, "PERMANENTLY") {
 		t.Fatalf("second confirm must warn 'PERMANENTLY', got %q", got2)
 	}
 }
 
 func TestRenderWorktreeDeletePromptForceWarnsDataLoss(t *testing.T) {
-	base := makeRow("/r", "/r/a", "feat/x", "", workspace.StateStopped, state.AttnInactive, fixedNow)
+	base := makeRow("/r", "/r/a", "feat/x", "", settings.StateStopped, state.AttnInactive, fixedNow)
 
 	// Force on: the final confirm must warn that local changes are discarded.
 	force := model{width: 200, prompt: promptConfirmDeleteWorktree2, deleteTarget: base, deleteMergeInfo: "merged into main", deleteForce: true}
-	gotForce := force.renderWorkspaceRows(200, []workspace.Row{base}, 0, fixedNow)
+	gotForce := force.renderWorkspaceRows(200, []settings.Row{base}, 0, fixedNow)
 	if !strings.Contains(gotForce, "discards uncommitted changes") {
 		t.Fatalf("force delete confirm must warn about discarding uncommitted changes, got %q", gotForce)
 	}
 
 	// Force off (safe mode): no data-loss clause — git would refuse a dirty tree.
 	safe := model{width: 200, prompt: promptConfirmDeleteWorktree2, deleteTarget: base, deleteMergeInfo: "merged into main", deleteForce: false}
-	gotSafe := safe.renderWorkspaceRows(200, []workspace.Row{base}, 0, fixedNow)
+	gotSafe := safe.renderWorkspaceRows(200, []settings.Row{base}, 0, fixedNow)
 	if strings.Contains(gotSafe, "discards uncommitted changes") {
 		t.Fatalf("safe delete confirm must not claim data loss, got %q", gotSafe)
 	}
 }
 
 func TestRenderWorktreeDeletePromptShowsCheckingBeforeProbe(t *testing.T) {
-	base := makeRow("/r", "/r/a", "feat", "", workspace.StateStopped, state.AttnInactive, fixedNow)
+	base := makeRow("/r", "/r/a", "feat", "", settings.StateStopped, state.AttnInactive, fixedNow)
 	m := model{width: 200, prompt: promptConfirmDeleteWorktree, deleteTarget: base}
-	got := m.renderWorkspaceRows(200, []workspace.Row{base}, 0, fixedNow)
+	got := m.renderWorkspaceRows(200, []settings.Row{base}, 0, fixedNow)
 	if !strings.Contains(got, "checking merge status") {
 		t.Fatalf("pre-probe prompt must show 'checking merge status…', got %q", got)
 	}

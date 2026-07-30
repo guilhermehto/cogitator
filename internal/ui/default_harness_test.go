@@ -12,8 +12,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/guilhermehto/cogitator/internal/harness"
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
-	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 // ---------------------------------------------------------------------------
@@ -22,7 +22,7 @@ import (
 
 func TestNewWorktreeEnter_SkipsChooserWhenDefaultResolvable(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if err := workspace.SetDefaultHarness("opencode"); err != nil {
+	if err := settings.SetDefaultHarness("opencode"); err != nil {
 		t.Fatalf("set default: %v", err)
 	}
 	ops := &fakeHarnessOpsWithKinds{kinds: []harness.Kind{"codex", "opencode"}}
@@ -44,7 +44,7 @@ func TestNewWorktreeEnter_SkipsChooserWhenDefaultResolvable(t *testing.T) {
 
 func TestNewWorktreeEnter_UnresolvableDefaultOpensChooser(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if err := workspace.SetDefaultHarness("ghost"); err != nil {
+	if err := settings.SetDefaultHarness("ghost"); err != nil {
 		t.Fatalf("set default: %v", err)
 	}
 	// A harness ops whose Get always fails models a configured-but-unregistered
@@ -63,7 +63,7 @@ func TestNewWorktreeEnter_UnresolvableDefaultOpensChooser(t *testing.T) {
 
 func TestLaunchInner_DefaultOverridesRecordedHarness(t *testing.T) {
 	tmux := &fakeTmuxOps{available: true, findWindowErr: errors.New("no window"), ensureWindowResult: "s:1"}
-	row := workspace.Row{Repo: "/r", Worktree: "/r/a", Branch: "feat", Harness: "codex"}
+	row := settings.Row{Repo: "/r", Worktree: "/r/a", Branch: "feat", Harness: "codex"}
 
 	res := launchInner(tmux, row, &fakeHarnessOps{}, tmuxctl.ModeSession, "opencode")()
 
@@ -80,7 +80,7 @@ func TestLaunchInner_DefaultOverridesRecordedHarness(t *testing.T) {
 
 func TestLaunchInner_NoOverrideWhenDefaultEmptyOrMatches(t *testing.T) {
 	tmux := &fakeTmuxOps{available: true, findWindowErr: errors.New("no window"), ensureWindowResult: "s:1"}
-	row := workspace.Row{Repo: "/r", Worktree: "/r/a", Harness: "codex"}
+	row := settings.Row{Repo: "/r", Worktree: "/r/a", Harness: "codex"}
 
 	if res := launchInner(tmux, row, &fakeHarnessOps{}, tmuxctl.ModeSession, "")(); res.harnessKind != "" {
 		t.Errorf("empty default: harnessKind = %q, want empty (no override)", res.harnessKind)
@@ -91,7 +91,7 @@ func TestLaunchInner_NoOverrideWhenDefaultEmptyOrMatches(t *testing.T) {
 }
 
 func TestLaunchResultMsg_OverrideUpsertsRoster(t *testing.T) {
-	ch := make(chan workspace.RosterEntry, 1)
+	ch := make(chan settings.RosterEntry, 1)
 	m := model{width: 120, rosterUpserts: ch}
 
 	m.Update(launchResultMsg{dir: "/r/a", launched: true, harnessKind: "opencode"})
@@ -107,7 +107,7 @@ func TestLaunchResultMsg_OverrideUpsertsRoster(t *testing.T) {
 }
 
 func TestLaunchResultMsg_NoUpsertWithoutOverride(t *testing.T) {
-	ch := make(chan workspace.RosterEntry, 1)
+	ch := make(chan settings.RosterEntry, 1)
 	m := model{width: 120, rosterUpserts: ch}
 
 	m.Update(launchResultMsg{dir: "/r/a", launched: true}) // no harnessKind set
@@ -140,7 +140,7 @@ func TestSettings_OpenCyclePersistClose(t *testing.T) {
 	if m.settingsDefaultHarness == "" {
 		t.Fatal("right on the harness row must select a concrete harness")
 	}
-	if cfg, _ := workspace.LoadConfig(); cfg.DefaultHarness != m.settingsDefaultHarness {
+	if cfg, _ := settings.LoadConfig(); cfg.DefaultHarness != m.settingsDefaultHarness {
 		t.Errorf("default harness not persisted: cfg=%q model=%q", cfg.DefaultHarness, m.settingsDefaultHarness)
 	}
 
@@ -149,7 +149,7 @@ func TestSettings_OpenCyclePersistClose(t *testing.T) {
 	m = updated.(model)
 	updated, _ = m.Update(keyMsg("right"))
 	m = updated.(model)
-	if cfg, _ := workspace.LoadConfig(); cfg.LaunchMode != m.settingsLaunchMode {
+	if cfg, _ := settings.LoadConfig(); cfg.LaunchMode != m.settingsLaunchMode {
 		t.Errorf("launch mode not persisted: cfg=%q model=%q", cfg.LaunchMode, m.settingsLaunchMode)
 	}
 
@@ -161,7 +161,7 @@ func TestSettings_OpenCyclePersistClose(t *testing.T) {
 
 func TestSettings_AlwaysAskClearsDefault(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if err := workspace.SetDefaultHarness("opencode"); err != nil {
+	if err := settings.SetDefaultHarness("opencode"); err != nil {
 		t.Fatalf("seed default: %v", err)
 	}
 	ops := &fakeHarnessOpsWithKinds{kinds: []harness.Kind{"opencode"}}
@@ -176,13 +176,13 @@ func TestSettings_AlwaysAskClearsDefault(t *testing.T) {
 	if m.settingsDefaultHarness != "" {
 		t.Fatalf("cycling past the last harness must wrap to 'always ask', got %q", m.settingsDefaultHarness)
 	}
-	if cfg, _ := workspace.LoadConfig(); cfg.DefaultHarness != "" {
+	if cfg, _ := settings.LoadConfig(); cfg.DefaultHarness != "" {
 		t.Errorf("always-ask must clear the persisted default, got %q", cfg.DefaultHarness)
 	}
 }
 
 func TestRenderSettings_ShowsValues(t *testing.T) {
-	m := model{width: 120, settingsDefaultHarness: "codex", settingsLaunchMode: workspace.LaunchWindow}
+	m := model{width: 120, settingsDefaultHarness: "codex", settingsLaunchMode: settings.LaunchWindow}
 	out := ansi.Strip(m.renderSettings(80))
 	for _, want := range []string{"Settings", "default harness", "codex", "launch mode", "window"} {
 		if !strings.Contains(out, want) {
@@ -210,7 +210,7 @@ func (o *recordingHarnessOps) Kinds() []harness.Kind                     { retur
 func TestLaunchArgv_OverrideBlanksStaleSessionToken(t *testing.T) {
 	rec := &tokenRecordingHarness{}
 	ops := &recordingHarnessOps{h: rec}
-	row := workspace.Row{Worktree: "/r/a", Harness: "codex", SessionID: "codex-123"}
+	row := settings.Row{Worktree: "/r/a", Harness: "codex", SessionID: "codex-123"}
 
 	// Override (default differs from the recorded harness): the stale token
 	// belongs to the old harness and must not flow to the new one.

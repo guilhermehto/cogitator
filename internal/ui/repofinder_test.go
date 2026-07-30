@@ -15,7 +15,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
-	"github.com/guilhermehto/cogitator/internal/workspace"
+	"github.com/guilhermehto/cogitator/internal/settings"
 )
 
 // errScanTest is a sentinel error used to drive the finder's error paths.
@@ -57,7 +57,7 @@ func containsStr(ss []string, want string) bool {
 func TestFilterConfigured_DropsAlreadyConfigured(t *testing.T) {
 	got := filterConfigured(
 		[]string{"/a", "/b", "/c"},
-		[]workspace.RepoConfig{{Path: "/b"}},
+		[]settings.RepoConfig{{Path: "/b"}},
 	)
 	want := []string{"/a", "/c"}
 	if len(got) != len(want) || got[0] != "/a" || got[1] != "/c" {
@@ -119,7 +119,7 @@ func TestScanReposCmd_FindsRepoAndFiltersConfigured(t *testing.T) {
 	}
 
 	// With the repo already configured, the scan must filter it out.
-	if _, err := workspace.AddRepo(want); err != nil {
+	if _, err := settings.AddRepo(want); err != nil {
 		t.Fatalf("AddRepo: %v", err)
 	}
 	msg2 := scanReposCmd(root)().(repoScanMsg)
@@ -340,7 +340,7 @@ func TestRemoveRepoCmd_RemovesThenNoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("canonical: %v", err)
 	}
-	if _, err := workspace.AddRepo(repo); err != nil {
+	if _, err := settings.AddRepo(repo); err != nil {
 		t.Fatalf("AddRepo: %v", err)
 	}
 
@@ -363,7 +363,7 @@ func TestRemoveRepoCmd_RemovesThenNoop(t *testing.T) {
 func TestRemoveRepoKey_OpensConfirm(t *testing.T) {
 	m := model{
 		width:         120,
-		workspaceRows: []workspace.Row{{Repo: "/home/me/myrepo", Worktree: "/home/me/myrepo"}},
+		workspaceRows: []settings.Row{{Repo: "/home/me/myrepo", Worktree: "/home/me/myrepo"}},
 	}
 	updated, cmd := m.Update(keyMsg("R"))
 	m2 := updated.(model)

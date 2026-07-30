@@ -11,8 +11,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 // pullFinishedFrom runs cmd — which may be a tea.Batch of the pull Cmd and the
@@ -45,8 +45,8 @@ func pullFinishedFrom(t *testing.T, cmd tea.Cmd) pullFinishedMsg {
 // worktree path carrying its branch through to the result message.
 func TestPullKeyDispatchesPullForHighlightedRow(t *testing.T) {
 	gitFake := &fakeGitOps{pullResult: "Updating abc..def"}
-	m := makeTestModel(&fakeTmuxOps{available: true}, gitFake, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/r", "/r", "main", "", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(&fakeTmuxOps{available: true}, gitFake, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/r", "/r", "main", "", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 
 	updated, cmd := m.Update(keyMsg("P"))
@@ -72,8 +72,8 @@ func TestPullKeyDispatchesPullForHighlightedRow(t *testing.T) {
 // no Cmd is dispatched, nothing is marked pulling, and a hint explains why.
 func TestPullKeyRejectsDetachedHead(t *testing.T) {
 	gitFake := &fakeGitOps{}
-	m := makeTestModel(&fakeTmuxOps{available: true}, gitFake, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/r", "/r/wt", "", "", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(&fakeTmuxOps{available: true}, gitFake, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/r", "/r/wt", "", "", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 
 	updated, cmd := m.Update(keyMsg("P"))
@@ -97,8 +97,8 @@ func TestPullKeyRejectsDetachedHead(t *testing.T) {
 // already pulling is a no-op (no duplicate dispatch).
 func TestPullKeyIgnoresRepeatWhileInFlight(t *testing.T) {
 	gitFake := &fakeGitOps{}
-	m := makeTestModel(&fakeTmuxOps{available: true}, gitFake, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/r", "/r", "main", "", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(&fakeTmuxOps{available: true}, gitFake, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/r", "/r", "main", "", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 	m.addPulling("/r")
 
@@ -178,10 +178,10 @@ func TestSpinnerTickContinuesWhilePulling(t *testing.T) {
 // TestCanPullWorktreeRejects verifies the guard rejects rows that cannot be
 // pulled, each with a non-empty reason.
 func TestCanPullWorktreeRejects(t *testing.T) {
-	cases := map[string]workspace.Row{
+	cases := map[string]settings.Row{
 		"empty worktree": {Repo: "/r", Branch: "main"},
-		"creating":       {Repo: "/r", Worktree: "/r-feat", Branch: "feat", State: workspace.StateCreating},
-		"missing":        {Repo: "/r", Worktree: "/r-feat", Branch: "feat", State: workspace.StateMissing},
+		"creating":       {Repo: "/r", Worktree: "/r-feat", Branch: "feat", State: settings.StateCreating},
+		"missing":        {Repo: "/r", Worktree: "/r-feat", Branch: "feat", State: settings.StateMissing},
 		"detached HEAD":  {Repo: "/r", Worktree: "/r/wt", Branch: ""},
 	}
 	for name, row := range cases {
@@ -200,8 +200,8 @@ func TestCanPullWorktreeRejects(t *testing.T) {
 func TestRenderWorkspaceRowsShowsPullingIndicator(t *testing.T) {
 	m := model{width: 200}
 	m.addPulling("/r")
-	rows := []workspace.Row{
-		makeRow("/r", "/r", "main", "", workspace.StateStopped, state.AttnInactive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/r", "/r", "main", "", settings.StateStopped, state.AttnInactive, fixedNow),
 	}
 
 	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)

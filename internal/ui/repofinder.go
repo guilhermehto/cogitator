@@ -17,7 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/guilhermehto/cogitator/internal/git"
-	"github.com/guilhermehto/cogitator/internal/workspace"
+	"github.com/guilhermehto/cogitator/internal/settings"
 )
 
 // repoFinderRoot returns the directory scanned for repositories when the finder
@@ -66,7 +66,7 @@ type repoRemoveMsg struct {
 // touched. The result is a repoRemoveMsg.
 func removeRepoCmd(path string) tea.Cmd {
 	return func() tea.Msg {
-		removed, err := workspace.RemoveRepo(path)
+		removed, err := settings.RemoveRepo(path)
 		if err != nil {
 			return repoRemoveMsg{repoPath: path, removeErr: err}
 		}
@@ -80,11 +80,11 @@ func removeRepoCmd(path string) tea.Cmd {
 // finder only offers something new to add.
 func scanReposCmd(root string) tea.Cmd {
 	return func() tea.Msg {
-		repos, err := workspace.DiscoverRepos(root)
+		repos, err := settings.DiscoverRepos(root)
 		if err != nil {
 			return repoScanMsg{err: err}
 		}
-		if cfg, cErr := workspace.LoadConfig(); cErr == nil {
+		if cfg, cErr := settings.LoadConfig(); cErr == nil {
 			repos = filterConfigured(repos, cfg.Repos)
 		}
 		return repoScanMsg{repos: repos}
@@ -105,7 +105,7 @@ func addSelectedRepoCmd(path string) tea.Cmd {
 		if err != nil {
 			return repoAddMsg{repoPath: path, addErr: err}
 		}
-		added, err := workspace.AddRepo(repoRoot)
+		added, err := settings.AddRepo(repoRoot)
 		if err != nil {
 			return repoAddMsg{repoPath: repoRoot, addErr: err}
 		}
@@ -117,7 +117,7 @@ func addSelectedRepoCmd(path string) tea.Cmd {
 // configured, compared by canonical path. Both sides are canonical
 // (DiscoverRepos and LoadConfig each canonicalize), so a plain string match is
 // sufficient.
-func filterConfigured(discovered []string, configured []workspace.RepoConfig) []string {
+func filterConfigured(discovered []string, configured []settings.RepoConfig) []string {
 	if len(configured) == 0 {
 		return discovered
 	}

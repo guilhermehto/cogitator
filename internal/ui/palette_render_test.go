@@ -10,8 +10,8 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 func TestOverlayBox_CentersAndPreservesBackdrop(t *testing.T) {
@@ -44,7 +44,7 @@ func TestOverlayBox_PadsShortBackdropToFieldHeight(t *testing.T) {
 
 func TestRenderPaletteRow_ShowsRepoAndBranch(t *testing.T) {
 	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, nil)
-	row := makeRow("/home/me/alpha", "/home/me/alpha", "main", "title", workspace.StateStopped, state.AttnInactive, fixedNow)
+	row := makeRow("/home/me/alpha", "/home/me/alpha", "main", "title", settings.StateStopped, state.AttnInactive, fixedNow)
 
 	got := ansi.Strip(m.renderPaletteRow(row, "alpha main", "am", 40))
 	if !strings.Contains(got, "alpha") || !strings.Contains(got, "main") {
@@ -54,7 +54,7 @@ func TestRenderPaletteRow_ShowsRepoAndBranch(t *testing.T) {
 
 func TestRenderPaletteRow_RepoOnlyLabelHasNoTrailingBranch(t *testing.T) {
 	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, nil)
-	row := makeRow("/home/me/alpha", "/home/me/alpha", "", "", workspace.StateStopped, state.AttnInactive, fixedNow)
+	row := makeRow("/home/me/alpha", "/home/me/alpha", "", "", settings.StateStopped, state.AttnInactive, fixedNow)
 
 	got := strings.TrimSpace(ansi.Strip(m.renderPaletteRow(row, "alpha", "", 40)))
 	// The status glyph leads, "alpha" follows; nothing should trail it.
@@ -64,9 +64,9 @@ func TestRenderPaletteRow_RepoOnlyLabelHasNoTrailingBranch(t *testing.T) {
 }
 
 func TestView_PaletteOverlaysSwitcherBox(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", workspace.StateRunning, state.AttnActive, fixedNow),
+	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", settings.StateRunning, state.AttnActive, fixedNow),
 	})
 	m.width, m.height = 100, 30
 	m = openPalette(t, m)

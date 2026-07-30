@@ -11,8 +11,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 // wsAnsiRe strips SGR escape sequences so tests can assert on visible text and
@@ -53,9 +53,9 @@ func keyMsg(key string) tea.KeyMsg {
 // fixedNow is a stable reference time used across all workspace render tests.
 var fixedNow = time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 
-// makeRow builds a workspace.Row for testing.
-func makeRow(repo, worktree, branch, title string, st workspace.RowState, attn state.Attention, lastActivity time.Time) workspace.Row {
-	return workspace.Row{
+// makeRow builds a settings.Row for testing.
+func makeRow(repo, worktree, branch, title string, st settings.RowState, attn state.Attention, lastActivity time.Time) settings.Row {
+	return settings.Row{
 		Repo:         repo,
 		Worktree:     worktree,
 		Branch:       branch,
@@ -72,8 +72,8 @@ func makeRow(repo, worktree, branch, title string, st workspace.RowState, attn s
 
 func TestRenderWorkspaceRowsRunningRowShowsTitle(t *testing.T) {
 	m := model{width: 200}
-	rows := []workspace.Row{
-		makeRow("/repo/a", "/repo/a", "main", "my running session", workspace.StateRunning, state.AttnActive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/repo/a", "/repo/a", "main", "my running session", settings.StateRunning, state.AttnActive, fixedNow),
 	}
 	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
 	if !strings.Contains(got, "my running session") {
@@ -83,8 +83,8 @@ func TestRenderWorkspaceRowsRunningRowShowsTitle(t *testing.T) {
 
 func TestRenderWorkspaceRowsRunningRowShowsBranch(t *testing.T) {
 	m := model{width: 200}
-	rows := []workspace.Row{
-		makeRow("/repo/a", "/repo/a", "feat/login", "running session", workspace.StateRunning, state.AttnActive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/repo/a", "/repo/a", "feat/login", "running session", settings.StateRunning, state.AttnActive, fixedNow),
 	}
 	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
 	row := wsRowLineContaining(got, "running session")
@@ -101,8 +101,8 @@ func TestRenderWorkspaceRowsRunningRowShowsBranch(t *testing.T) {
 // identity for a row, so it leads.
 func TestRenderWorkspaceRowsBranchLeadsSessionTitle(t *testing.T) {
 	m := model{width: 200}
-	rows := []workspace.Row{
-		makeRow("/repo/a", "/repo/a", "feat/login", "running session", workspace.StateRunning, state.AttnActive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/repo/a", "/repo/a", "feat/login", "running session", settings.StateRunning, state.AttnActive, fixedNow),
 	}
 	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
 	line := wsStripANSI(wsRowLineContaining(got, "running session"))
@@ -124,8 +124,8 @@ func TestRenderWorkspaceRowsBranchLeadsSessionTitle(t *testing.T) {
 func TestRenderWorkspaceRowsLongSessionTitleTruncated(t *testing.T) {
 	m := model{width: 200}
 	longTitle := "This is a very long session title that must be truncated"
-	rows := []workspace.Row{
-		makeRow("/repo/a", "/repo/a", "feat/auth", longTitle, workspace.StateRunning, state.AttnActive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/repo/a", "/repo/a", "feat/auth", longTitle, settings.StateRunning, state.AttnActive, fixedNow),
 	}
 	got := wsStripANSI(m.renderWorkspaceRows(200, rows, 0, fixedNow))
 	if strings.Contains(got, longTitle) {
@@ -144,8 +144,8 @@ func TestRenderWorkspaceRowsLongSessionTitleTruncated(t *testing.T) {
 
 func TestRenderWorkspaceRowsMultilineSessionTitleStaysOneRow(t *testing.T) {
 	m := model{width: 200}
-	rows := []workspace.Row{
-		makeRow("/repo/a", "/repo/a", "feat/auth", "first line\nsecond line", workspace.StateRunning, state.AttnActive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/repo/a", "/repo/a", "feat/auth", "first line\nsecond line", settings.StateRunning, state.AttnActive, fixedNow),
 	}
 
 	got := wsStripANSI(m.renderWorkspaceRows(200, rows, 0, fixedNow))
@@ -160,8 +160,8 @@ func TestRenderWorkspaceRowsMultilineSessionTitleStaysOneRow(t *testing.T) {
 
 func TestRenderWorkspaceRowsRepoHeaderShowsRepoPath(t *testing.T) {
 	m := model{width: 200}
-	rows := []workspace.Row{
-		makeRow("/srv/code/myrepo", "/srv/code/myrepo", "main", "a session", workspace.StateRunning, state.AttnActive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/srv/code/myrepo", "/srv/code/myrepo", "main", "a session", settings.StateRunning, state.AttnActive, fixedNow),
 	}
 	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
 	header := wsRowLineContaining(got, "myrepo")
@@ -176,8 +176,8 @@ func TestRenderWorkspaceRowsRepoHeaderShowsRepoPath(t *testing.T) {
 func TestRenderWorkspaceRowsStoppedRowShowsTitleDimmed(t *testing.T) {
 	m := model{width: 200}
 	lastAct := fixedNow.Add(-30 * time.Minute)
-	rows := []workspace.Row{
-		makeRow("/repo/a", "/repo/a", "feat/x", "stopped session", workspace.StateStopped, state.AttnInactive, lastAct),
+	rows := []settings.Row{
+		makeRow("/repo/a", "/repo/a", "feat/x", "stopped session", settings.StateStopped, state.AttnInactive, lastAct),
 	}
 	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
 	if !strings.Contains(got, "stopped session") {
@@ -191,8 +191,8 @@ func TestRenderWorkspaceRowsStoppedRowShowsTitleDimmed(t *testing.T) {
 
 func TestRenderWorkspaceRowsEmptyRowShowsWorktreeBase(t *testing.T) {
 	m := model{width: 200}
-	rows := []workspace.Row{
-		makeRow("/repo/a", "/repo/a/worktrees/feat-x", "feat-x", "", workspace.StateStopped, state.AttnInactive, time.Time{}),
+	rows := []settings.Row{
+		makeRow("/repo/a", "/repo/a/worktrees/feat-x", "feat-x", "", settings.StateStopped, state.AttnInactive, time.Time{}),
 	}
 	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
 	if !strings.Contains(got, "feat-x") {
@@ -202,8 +202,8 @@ func TestRenderWorkspaceRowsEmptyRowShowsWorktreeBase(t *testing.T) {
 
 func TestRenderWorkspaceRowsMissingRowShowsMissingLabel(t *testing.T) {
 	m := model{width: 200}
-	rows := []workspace.Row{
-		makeRow("/repo/a", "/repo/a/worktrees/gone", "gone", "old title", workspace.StateMissing, state.AttnInactive, time.Time{}),
+	rows := []settings.Row{
+		makeRow("/repo/a", "/repo/a/worktrees/gone", "gone", "old title", settings.StateMissing, state.AttnInactive, time.Time{}),
 	}
 	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
 	if !strings.Contains(got, "missing") {
@@ -213,8 +213,8 @@ func TestRenderWorkspaceRowsMissingRowShowsMissingLabel(t *testing.T) {
 
 func TestRenderWorkspaceRowsUnknownRowShowsStatusUnknown(t *testing.T) {
 	m := model{width: 200}
-	rows := []workspace.Row{
-		makeRow("/repo/a", "/repo/a/worktrees/unk", "unk", "", workspace.StateUnknown, state.AttnInactive, fixedNow.Add(-2*time.Hour)),
+	rows := []settings.Row{
+		makeRow("/repo/a", "/repo/a/worktrees/unk", "unk", "", settings.StateUnknown, state.AttnInactive, fixedNow.Add(-2*time.Hour)),
 	}
 	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
 	if !strings.Contains(got, "status unknown") {
@@ -224,9 +224,9 @@ func TestRenderWorkspaceRowsUnknownRowShowsStatusUnknown(t *testing.T) {
 
 func TestRenderWorkspaceRowsGroupedByRepo(t *testing.T) {
 	m := model{width: 200}
-	rows := []workspace.Row{
-		makeRow("/repo/alpha", "/repo/alpha", "main", "alpha session", workspace.StateRunning, state.AttnActive, fixedNow),
-		makeRow("/repo/beta", "/repo/beta", "main", "beta session", workspace.StateStopped, state.AttnInactive, fixedNow.Add(-5*time.Minute)),
+	rows := []settings.Row{
+		makeRow("/repo/alpha", "/repo/alpha", "main", "alpha session", settings.StateRunning, state.AttnActive, fixedNow),
+		makeRow("/repo/beta", "/repo/beta", "main", "beta session", settings.StateStopped, state.AttnInactive, fixedNow.Add(-5*time.Minute)),
 	}
 	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
 	// Both repo base names should appear as group headers.
@@ -261,8 +261,8 @@ func TestRenderWorkspaceRowsEmptyListShowsPlaceholder(t *testing.T) {
 // right. A permission-pending running row must show the permission glyph ahead
 // of its title text.
 func TestWorkspaceRowStatusBadgeIsLeftmostColumn(t *testing.T) {
-	rows := []workspace.Row{
-		makeRow("/repo/a", "/repo/a/wt/perm", "feat/perm", "needs permission", workspace.StateRunning, state.AttnPermissionPending, fixedNow),
+	rows := []settings.Row{
+		makeRow("/repo/a", "/repo/a/wt/perm", "feat/perm", "needs permission", settings.StateRunning, state.AttnPermissionPending, fixedNow),
 	}
 	m := model{width: 120}
 	line := wsRowLineContaining(m.renderWorkspaceRows(120, rows, 0, fixedNow), "needs permission")
@@ -292,8 +292,8 @@ func TestSelectedWorkspaceRowHighlightKeepsColour(t *testing.T) {
 	r.SetColorProfile(termenv.ANSI256)
 	defer r.SetColorProfile(orig)
 
-	rows := []workspace.Row{
-		makeRow("/repo/a", "/repo/a", "main", "cursor row", workspace.StateRunning, state.AttnActive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/repo/a", "/repo/a", "main", "cursor row", settings.StateRunning, state.AttnActive, fixedNow),
 	}
 	m := model{width: 80}
 	line := wsRowLineContaining(m.renderWorkspaceRows(80, rows, 0, fixedNow), "cursor row")
@@ -329,8 +329,8 @@ func TestUnselectedWorkspaceRowKeepsColour(t *testing.T) {
 	r.SetColorProfile(termenv.ANSI256)
 	defer r.SetColorProfile(orig)
 
-	rows := []workspace.Row{
-		makeRow("/repo/a", "/repo/a", "main", "plain row", workspace.StateRunning, state.AttnActive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/repo/a", "/repo/a", "main", "plain row", settings.StateRunning, state.AttnActive, fixedNow),
 	}
 	m := model{width: 80}
 	// cursor on a different (non-existent) index so this row is not selected.
@@ -351,13 +351,13 @@ func TestUnselectedWorkspaceRowKeepsColour(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRenderWorkspaceRowsViewportKeepsCursorVisible(t *testing.T) {
-	rows := []workspace.Row{
-		makeRow("/a", "/a/1", "a-1", "row-a-1", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/a", "/a/2", "a-2", "row-a-2", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/a", "/a/3", "a-3", "row-a-3", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/b", "/b/1", "b-1", "row-b-1", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/b", "/b/2", "b-2", "row-b-2", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/b", "/b/3", "b-3", "row-b-3", workspace.StateStopped, state.AttnInactive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/a", "/a/1", "a-1", "row-a-1", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/a", "/a/2", "a-2", "row-a-2", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/a", "/a/3", "a-3", "row-a-3", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/b", "/b/1", "b-1", "row-b-1", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/b", "/b/2", "b-2", "row-b-2", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/b", "/b/3", "b-3", "row-b-3", settings.StateStopped, state.AttnInactive, fixedNow),
 	}
 	m := model{width: 120}
 
@@ -378,13 +378,13 @@ func TestSessionCursorMovementScrollsOnlyAtViewportEdge(t *testing.T) {
 	m := model{
 		width:  120,
 		height: 9, // sessions inner height 5: title + four grouped list lines
-		workspaceRows: []workspace.Row{
-			makeRow("/r", "/r/1", "one", "row-1", workspace.StateStopped, state.AttnInactive, fixedNow),
-			makeRow("/r", "/r/2", "two", "row-2", workspace.StateStopped, state.AttnInactive, fixedNow),
-			makeRow("/r", "/r/3", "three", "row-3", workspace.StateStopped, state.AttnInactive, fixedNow),
-			makeRow("/r", "/r/4", "four", "row-4", workspace.StateStopped, state.AttnInactive, fixedNow),
-			makeRow("/r", "/r/5", "five", "row-5", workspace.StateStopped, state.AttnInactive, fixedNow),
-			makeRow("/r", "/r/6", "six", "row-6", workspace.StateStopped, state.AttnInactive, fixedNow),
+		workspaceRows: []settings.Row{
+			makeRow("/r", "/r/1", "one", "row-1", settings.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/r", "/r/2", "two", "row-2", settings.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/r", "/r/3", "three", "row-3", settings.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/r", "/r/4", "four", "row-4", settings.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/r", "/r/5", "five", "row-5", settings.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/r", "/r/6", "six", "row-6", settings.StateStopped, state.AttnInactive, fixedNow),
 		},
 	}
 
@@ -413,11 +413,11 @@ func TestSessionCursorMovementScrollsOnlyAtViewportEdge(t *testing.T) {
 }
 
 func TestRenderWorkspaceRowsViewportPinsPromptBelowScrollableRows(t *testing.T) {
-	rows := []workspace.Row{
-		makeRow("/r", "/r/1", "one", "row-1", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/r", "/r/2", "two", "row-2", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/r", "/r/3", "three", "row-3", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/r", "/r/4", "four", "row-4", workspace.StateStopped, state.AttnInactive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/r", "/r/1", "one", "row-1", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/r", "/r/2", "two", "row-2", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/r", "/r/3", "three", "row-3", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/r", "/r/4", "four", "row-4", settings.StateStopped, state.AttnInactive, fixedNow),
 	}
 	input := textinput.New()
 	input.SetValue("feature")
@@ -446,13 +446,13 @@ func TestViewFitsLongWorkspaceListToTerminalHeight(t *testing.T) {
 		height:        9,
 		sessionCursor: 5,
 		tickNow:       fixedNow,
-		workspaceRows: []workspace.Row{
-			makeRow("/r", "/r/1", "one", "row-1", workspace.StateStopped, state.AttnInactive, fixedNow),
-			makeRow("/r", "/r/2", "two", "row-2", workspace.StateStopped, state.AttnInactive, fixedNow),
-			makeRow("/r", "/r/3", "three", "row-3", workspace.StateStopped, state.AttnInactive, fixedNow),
-			makeRow("/r", "/r/4", "four", "row-4", workspace.StateStopped, state.AttnInactive, fixedNow),
-			makeRow("/r", "/r/5", "five", "row-5", workspace.StateStopped, state.AttnInactive, fixedNow),
-			makeRow("/r", "/r/6", "six", "row-6", workspace.StateStopped, state.AttnInactive, fixedNow),
+		workspaceRows: []settings.Row{
+			makeRow("/r", "/r/1", "one", "row-1", settings.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/r", "/r/2", "two", "row-2", settings.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/r", "/r/3", "three", "row-3", settings.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/r", "/r/4", "four", "row-4", settings.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/r", "/r/5", "five", "row-5", settings.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/r", "/r/6", "six", "row-6", settings.StateStopped, state.AttnInactive, fixedNow),
 		},
 	}
 
@@ -476,9 +476,9 @@ func TestViewFitsLongWorkspaceListToTerminalHeight(t *testing.T) {
 func TestSessionCursorMovesDownWithJ(t *testing.T) {
 	m := model{
 		width: 120,
-		workspaceRows: []workspace.Row{
-			makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnActive, fixedNow),
-			makeRow("/r", "/r/b", "feat", "row-b", workspace.StateStopped, state.AttnInactive, fixedNow.Add(-1*time.Minute)),
+		workspaceRows: []settings.Row{
+			makeRow("/r", "/r/a", "main", "row-a", settings.StateRunning, state.AttnActive, fixedNow),
+			makeRow("/r", "/r/b", "feat", "row-b", settings.StateStopped, state.AttnInactive, fixedNow.Add(-1*time.Minute)),
 		},
 		sessionCursor: 0,
 	}
@@ -493,9 +493,9 @@ func TestSessionCursorMovesDownWithJ(t *testing.T) {
 func TestSessionCursorMovesUpWithK(t *testing.T) {
 	m := model{
 		width: 120,
-		workspaceRows: []workspace.Row{
-			makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnActive, fixedNow),
-			makeRow("/r", "/r/b", "feat", "row-b", workspace.StateStopped, state.AttnInactive, fixedNow.Add(-1*time.Minute)),
+		workspaceRows: []settings.Row{
+			makeRow("/r", "/r/a", "main", "row-a", settings.StateRunning, state.AttnActive, fixedNow),
+			makeRow("/r", "/r/b", "feat", "row-b", settings.StateStopped, state.AttnInactive, fixedNow.Add(-1*time.Minute)),
 		},
 		sessionCursor: 1,
 	}
@@ -510,8 +510,8 @@ func TestSessionCursorMovesUpWithK(t *testing.T) {
 func TestSessionCursorClampsAtBottom(t *testing.T) {
 	m := model{
 		width: 120,
-		workspaceRows: []workspace.Row{
-			makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnActive, fixedNow),
+		workspaceRows: []settings.Row{
+			makeRow("/r", "/r/a", "main", "row-a", settings.StateRunning, state.AttnActive, fixedNow),
 		},
 		sessionCursor: 0,
 	}
@@ -526,8 +526,8 @@ func TestSessionCursorClampsAtBottom(t *testing.T) {
 func TestSessionCursorClampsAtTop(t *testing.T) {
 	m := model{
 		width: 120,
-		workspaceRows: []workspace.Row{
-			makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnActive, fixedNow),
+		workspaceRows: []settings.Row{
+			makeRow("/r", "/r/a", "main", "row-a", settings.StateRunning, state.AttnActive, fixedNow),
 		},
 		sessionCursor: 0,
 	}
@@ -542,10 +542,10 @@ func TestSessionCursorClampsAtTop(t *testing.T) {
 func threeRowModel(cursor int) model {
 	return model{
 		width: 120,
-		workspaceRows: []workspace.Row{
-			makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnActive, fixedNow),
-			makeRow("/r", "/r/b", "feat", "row-b", workspace.StateStopped, state.AttnInactive, fixedNow.Add(-1*time.Minute)),
-			makeRow("/r", "/r/c", "fix", "row-c", workspace.StateStopped, state.AttnInactive, fixedNow.Add(-2*time.Minute)),
+		workspaceRows: []settings.Row{
+			makeRow("/r", "/r/a", "main", "row-a", settings.StateRunning, state.AttnActive, fixedNow),
+			makeRow("/r", "/r/b", "feat", "row-b", settings.StateStopped, state.AttnInactive, fixedNow.Add(-1*time.Minute)),
+			makeRow("/r", "/r/c", "fix", "row-c", settings.StateStopped, state.AttnInactive, fixedNow.Add(-2*time.Minute)),
 		},
 		sessionCursor: cursor,
 	}
@@ -596,12 +596,12 @@ func multiRepoModel(cursor int) model {
 	// idx 0,1 -> /a ; idx 2 -> /b ; idx 3,4 -> /c
 	return model{
 		width: 120,
-		workspaceRows: []workspace.Row{
-			makeRow("/a", "/a", "main", "a-root", workspace.StateRunning, state.AttnActive, fixedNow),
-			makeRow("/a", "/a/feat", "feat", "a-feat", workspace.StateStopped, state.AttnInactive, fixedNow),
-			makeRow("/b", "/b", "main", "b-root", workspace.StateStopped, state.AttnInactive, fixedNow),
-			makeRow("/c", "/c", "main", "c-root", workspace.StateStopped, state.AttnInactive, fixedNow),
-			makeRow("/c", "/c/x", "x", "c-x", workspace.StateStopped, state.AttnInactive, fixedNow),
+		workspaceRows: []settings.Row{
+			makeRow("/a", "/a", "main", "a-root", settings.StateRunning, state.AttnActive, fixedNow),
+			makeRow("/a", "/a/feat", "feat", "a-feat", settings.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/b", "/b", "main", "b-root", settings.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/c", "/c", "main", "c-root", settings.StateStopped, state.AttnInactive, fixedNow),
+			makeRow("/c", "/c/x", "x", "c-x", settings.StateStopped, state.AttnInactive, fixedNow),
 		},
 		sessionCursor: cursor,
 	}
@@ -642,9 +642,9 @@ func TestCtrlUJumpsToPrevRepo(t *testing.T) {
 func TestSessionCursorDownArrowEquivalentToJ(t *testing.T) {
 	m := model{
 		width: 120,
-		workspaceRows: []workspace.Row{
-			makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnActive, fixedNow),
-			makeRow("/r", "/r/b", "feat", "row-b", workspace.StateStopped, state.AttnInactive, fixedNow.Add(-1*time.Minute)),
+		workspaceRows: []settings.Row{
+			makeRow("/r", "/r/a", "main", "row-a", settings.StateRunning, state.AttnActive, fixedNow),
+			makeRow("/r", "/r/b", "feat", "row-b", settings.StateStopped, state.AttnInactive, fixedNow.Add(-1*time.Minute)),
 		},
 		sessionCursor: 0,
 	}
@@ -659,9 +659,9 @@ func TestSessionCursorDownArrowEquivalentToJ(t *testing.T) {
 func TestSessionCursorUpArrowEquivalentToK(t *testing.T) {
 	m := model{
 		width: 120,
-		workspaceRows: []workspace.Row{
-			makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnActive, fixedNow),
-			makeRow("/r", "/r/b", "feat", "row-b", workspace.StateStopped, state.AttnInactive, fixedNow.Add(-1*time.Minute)),
+		workspaceRows: []settings.Row{
+			makeRow("/r", "/r/a", "main", "row-a", settings.StateRunning, state.AttnActive, fixedNow),
+			makeRow("/r", "/r/b", "feat", "row-b", settings.StateStopped, state.AttnInactive, fixedNow.Add(-1*time.Minute)),
 		},
 		sessionCursor: 1,
 	}
@@ -679,8 +679,8 @@ func TestAToggleStillWorksWithWorkspaceRows(t *testing.T) {
 	m := model{
 		width:           120,
 		recentCollapsed: true,
-		workspaceRows: []workspace.Row{
-			makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnActive, fixedNow),
+		workspaceRows: []settings.Row{
+			makeRow("/r", "/r/a", "main", "row-a", settings.StateRunning, state.AttnActive, fixedNow),
 		},
 	}
 
@@ -715,9 +715,9 @@ func TestTickMsgDoesNotMoveCursor(t *testing.T) {
 	m := model{
 		width:         120,
 		sessionCursor: 1,
-		workspaceRows: []workspace.Row{
-			makeRow("/r", "/r/a", "main", "row-a", workspace.StateRunning, state.AttnActive, fixedNow),
-			makeRow("/r", "/r/b", "feat", "row-b", workspace.StateStopped, state.AttnInactive, fixedNow.Add(-1*time.Minute)),
+		workspaceRows: []settings.Row{
+			makeRow("/r", "/r/a", "main", "row-a", settings.StateRunning, state.AttnActive, fixedNow),
+			makeRow("/r", "/r/b", "feat", "row-b", settings.StateStopped, state.AttnInactive, fixedNow.Add(-1*time.Minute)),
 		},
 	}
 
@@ -771,8 +771,8 @@ func TestViewFallsBackToLiveOnlyWhenNoWorkspaceRows(t *testing.T) {
 func TestStoppedRowRelativeTimeUsesTickNow(t *testing.T) {
 	m := model{width: 200}
 	lastAct := fixedNow.Add(-2 * time.Hour)
-	rows := []workspace.Row{
-		makeRow("/repo/a", "/repo/a", "main", "old session", workspace.StateStopped, state.AttnInactive, lastAct),
+	rows := []settings.Row{
+		makeRow("/repo/a", "/repo/a", "main", "old session", settings.StateStopped, state.AttnInactive, lastAct),
 	}
 
 	// Render with fixedNow as reference — expect "2h".
@@ -807,8 +807,8 @@ func makeWorktreePromptModel(branchText string) model {
 // TestPromptNewWorktreeRendersInSessionsPane asserts that the branch-name
 // prompt label and the typed value appear in renderWorkspaceRows output.
 func TestPromptNewWorktreeRendersInSessionsPane(t *testing.T) {
-	rows := []workspace.Row{
-		makeRow("/repo/a", "/repo/a", "main", "running", workspace.StateRunning, state.AttnActive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/repo/a", "/repo/a", "main", "running", settings.StateRunning, state.AttnActive, fixedNow),
 	}
 	m := makeWorktreePromptModel("feat/my-branch")
 	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
@@ -838,8 +838,8 @@ func TestPromptNewWorktreeRendersInEmptySessionsPane(t *testing.T) {
 // TestPromptIdleDoesNotRenderWorktreePromptInSessionsPane confirms that the
 // branch-name prompt is absent when no prompt is active (no regression).
 func TestPromptIdleDoesNotRenderWorktreePromptInSessionsPane(t *testing.T) {
-	rows := []workspace.Row{
-		makeRow("/repo/a", "/repo/a", "main", "running", workspace.StateRunning, state.AttnActive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/repo/a", "/repo/a", "main", "running", settings.StateRunning, state.AttnActive, fixedNow),
 	}
 	m := model{width: 200, prompt: promptIdle}
 	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
@@ -855,21 +855,21 @@ func TestPromptIdleDoesNotRenderWorktreePromptInSessionsPane(t *testing.T) {
 func TestPromptNewWorktreeShowsBaseBranchWhenRootRowKnown(t *testing.T) {
 	ti := textinput.New()
 	ti.SetValue("feat/new-thing")
-	rootRow := workspace.Row{
+	rootRow := settings.Row{
 		Repo:     "/repo/a",
 		Worktree: "/repo/a",
 		Branch:   "main",
 		IsRoot:   true,
-		State:    workspace.StateRunning,
+		State:    settings.StateRunning,
 	}
 	m := model{
 		width:           200,
 		prompt:          promptNewWorktree,
 		input:           ti,
 		newWorktreeRepo: "/repo/a",
-		workspaceRows:   []workspace.Row{rootRow},
+		workspaceRows:   []settings.Row{rootRow},
 	}
-	got := wsStripANSI(m.renderWorkspaceRows(200, []workspace.Row{rootRow}, 0, fixedNow))
+	got := wsStripANSI(m.renderWorkspaceRows(200, []settings.Row{rootRow}, 0, fixedNow))
 
 	if !strings.Contains(got, "new worktree off main:") {
 		t.Fatalf("prompt must show 'new worktree off main:' when root branch is known, got %q", got)
@@ -886,8 +886,8 @@ func TestPromptNewWorktreeShowsBaseBranchWhenRootRowKnown(t *testing.T) {
 // shows a fetch-specific label (not the new-worktree label) plus the typed
 // value, so the user can tell the fetch flow apart from 'n'.
 func TestPromptFetchBranchRendersFetchLabel(t *testing.T) {
-	rows := []workspace.Row{
-		makeRow("/repo/a", "/repo/a", "main", "running", workspace.StateRunning, state.AttnActive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/repo/a", "/repo/a", "main", "running", settings.StateRunning, state.AttnActive, fixedNow),
 	}
 	ti := textinput.New()
 	ti.SetValue("feature/remote-only")
@@ -917,8 +917,8 @@ func TestFormatCreatingRowShowsSpinnerAndFetchingVerb(t *testing.T) {
 			},
 		},
 	}
-	rows := []workspace.Row{
-		{Repo: "/repo/a", Worktree: "/repo/a-feature/login", Branch: "feature/login", State: workspace.StateCreating},
+	rows := []settings.Row{
+		{Repo: "/repo/a", Worktree: "/repo/a-feature/login", Branch: "feature/login", State: settings.StateCreating},
 	}
 	got := wsStripANSI(m.renderWorkspaceRows(200, rows, 0, fixedNow))
 
@@ -942,8 +942,8 @@ func TestFormatCreatingRowShowsCreatingVerbForLocalFlow(t *testing.T) {
 			createKey("/repo/a", "feat"): {repo: "/repo/a", dest: "/repo/a-feat", branch: "feat", fromRemote: false},
 		},
 	}
-	rows := []workspace.Row{
-		{Repo: "/repo/a", Worktree: "/repo/a-feat", Branch: "feat", State: workspace.StateCreating},
+	rows := []settings.Row{
+		{Repo: "/repo/a", Worktree: "/repo/a-feat", Branch: "feat", State: settings.StateCreating},
 	}
 	got := wsStripANSI(m.renderWorkspaceRows(200, rows, 0, fixedNow))
 

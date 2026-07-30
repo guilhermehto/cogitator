@@ -12,8 +12,8 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 
 	"github.com/guilhermehto/cogitator/internal/harness"
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 // ---------------------------------------------------------------------------
@@ -82,7 +82,7 @@ func TestDefaultHarnessIndex_ReturnsZeroWhenOpencodeAbsent(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // makeChooserModel builds a model in promptNewWorktree with a branch typed.
-func makeChooserModel(harnOp harnessOps, rows []workspace.Row) model {
+func makeChooserModel(harnOp harnessOps, rows []settings.Row) model {
 	ti := newTestInput()
 	ti.SetValue("feat")
 	return model{
@@ -97,8 +97,8 @@ func makeChooserModel(harnOp harnessOps, rows []workspace.Row) model {
 
 func TestEnterOnBranchPromptOpensChooser(t *testing.T) {
 	ops := &fakeHarnessOpsWithKinds{kinds: []harness.Kind{"codex", "opencode"}}
-	m := makeChooserModel(ops, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "a", workspace.StateStopped, state.AttnInactive, time.Time{}),
+	m := makeChooserModel(ops, []settings.Row{
+		makeRow("/r", "/r/a", "main", "a", settings.StateStopped, state.AttnInactive, time.Time{}),
 	})
 
 	updated, _ := m.Update(keyMsg("enter"))
@@ -320,7 +320,7 @@ func TestChooserDefaultsToOpencodeWhenNoDefaultHarnessSet(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestWorktreeCreatedMsgWritesRosterEntryForCodex(t *testing.T) {
-	upserts := make(chan workspace.RosterEntry, 4)
+	upserts := make(chan settings.RosterEntry, 4)
 	m := model{
 		width:         120,
 		rosterUpserts: upserts,
@@ -346,7 +346,7 @@ func TestWorktreeCreatedMsgWritesRosterEntryForCodex(t *testing.T) {
 }
 
 func TestWorktreeCreatedMsgDefaultsHarnessToOpencodeWhenEmpty(t *testing.T) {
-	upserts := make(chan workspace.RosterEntry, 4)
+	upserts := make(chan settings.RosterEntry, 4)
 	m := model{
 		width:         120,
 		rosterUpserts: upserts,
@@ -396,14 +396,14 @@ func TestRecorderApplySnapshotPreservesExistingHarness(t *testing.T) {
 	wtDir := tmp + "/cogitator/wt"
 
 	// Pre-seed the roster with a codex entry.
-	seed := map[string]workspace.RosterEntry{
+	seed := map[string]settings.RosterEntry{
 		wtDir: {
 			Dir:          wtDir,
 			Harness:      "codex",
 			LastActivity: time.Now().Add(-time.Hour),
 		},
 	}
-	if err := workspace.Save(seed); err != nil {
+	if err := settings.Save(seed); err != nil {
 		t.Fatalf("Save seed: %v", err)
 	}
 
@@ -422,7 +422,7 @@ func TestRecorderApplySnapshotPreservesExistingHarness(t *testing.T) {
 	snapCh <- snap
 	close(snapCh)
 
-	rec := workspace.NewRecorder()
+	rec := settings.NewRecorder()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -430,7 +430,7 @@ func TestRecorderApplySnapshotPreservesExistingHarness(t *testing.T) {
 	}()
 	<-done
 
-	loaded, err := workspace.Load()
+	loaded, err := settings.Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}

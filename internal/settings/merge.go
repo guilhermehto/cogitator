@@ -1,10 +1,10 @@
-// Package workspace manages durable user configuration and the session roster
+// Package settings manages durable user configuration and the session roster
 // for cogitator. merge.go provides the pure Merge function that combines
 // repos, worktrees, roster, live sessions, and tmux window presence into a
 // single ordered list of Row values for the UI to render.
 //
 // No import of bubbletea or internal/ui is permitted in this package.
-package workspace
+package settings
 
 import (
 	"time"

@@ -2,8 +2,8 @@ package ui
 
 import (
 	"github.com/guilhermehto/cogitator/internal/harness"
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 // rosterToRestored converts a loaded roster map into the slice accepted by
@@ -13,8 +13,8 @@ import (
 //
 // The Provider field maps to the provider kind; legacy entries fall back to
 // Harness, and an empty value defaults to "opencode", matching the defaulting
-// in workspace/applySnapshot so the seed key aligns with snapshot Provider.
-func rosterToRestored(roster map[string]workspace.RosterEntry) []state.RestoredSession {
+// in settings/applySnapshot so the seed key aligns with snapshot Provider.
+func rosterToRestored(roster map[string]settings.RosterEntry) []state.RestoredSession {
 	if len(roster) == 0 {
 		return nil
 	}
