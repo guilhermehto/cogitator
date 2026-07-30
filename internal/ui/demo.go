@@ -15,10 +15,10 @@ import (
 
 // RunDemo starts the TUI populated with a curated synthetic worktree roster —
 // the merged worktree/tmux view that is cogitator's headline feature. No mDNS
-// discovery, no git/tmux shell-outs, and no Taskwarrior pane: the workspace
-// rows are injected directly and the background row build is suppressed (the
-// model.demo flag) so the capture is deterministic. Intended for the README
-// screenshot / asciinema captures.
+// discovery and no git/tmux shell-outs: the workspace rows are injected
+// directly and the background row build is suppressed (the model.demo flag)
+// so the capture is deterministic. Intended for the README screenshot /
+// asciinema captures.
 func RunDemo(cfg *config.Config, logger *slog.Logger) error {
 	if cfg == nil {
 		cfg = config.Default()
@@ -46,8 +46,7 @@ func RunDemo(cfg *config.Config, logger *slog.Logger) error {
 	snaps := make(chan state.Snapshot, 1)
 	snaps <- snap
 
-	// nil tw suppresses the Tasks pane (twAvail=false).
-	m := newModel(snaps, cfg, false, false, nil)
+	m := newModel(snaps, cfg, false, false)
 	m.demo = true
 	m.workspaceRows = rows
 

@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"context"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -17,7 +16,6 @@ import (
 	"github.com/guilhermehto/cogitator/internal/git"
 	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/taskwarrior"
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
@@ -51,26 +49,14 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-// focusArea tracks which pane currently holds keyboard focus.
-// Iota order is load-bearing: zero value maps to focusSessions, keeping
-// existing model{} literals in tests valid without explicit initialisation.
-type focusArea int
-
-const (
-	focusSessions focusArea = iota
-	focusTasks
-)
-
-// promptMode tracks whether the task input bar is active and in which mode.
-// Iota order is load-bearing: zero value maps to promptIdle, keeping
-// existing model{} literals in tests valid without explicit initialisation.
+// promptMode tracks whether the sessions-pane input bar is active and in
+// which mode. Iota order is load-bearing: zero value maps to promptIdle,
+// keeping existing model{} literals in tests valid without explicit
+// initialisation.
 type promptMode int
 
 const (
 	promptIdle promptMode = iota
-	promptAdd
-	promptEdit
-	promptConfirmDelete
 	// promptNewWorktree is active while the user types a branch name for 'n'.
 	// On enter, the branch name is passed to git.AddWorktree + harness launch.
 	// On esc, the prompt is cancelled without creating anything.
@@ -481,20 +467,10 @@ type model struct {
 	gitOp  gitOps
 	harnOp harnessOps
 
-	// Taskwarrior fields
-	tw               ClientAPI
-	twAvail          bool
-	tasksActive      bool
-	tasks            []taskwarrior.TaskView
-	tasksErr         error // last error from Export; nil on success
-	tasksLoaded      bool
-	taskCursor       int
-	focus            focusArea
-	prompt           promptMode
-	input            textinput.Model
-	lastMutationErr  error
-	lastMutationOp   string
-	mutationInFlight bool
+	// prompt/input drive the sessions-pane input bar shared by every prompt
+	// mode (new worktree, fetch branch, repo finder, session switcher, ...).
+	prompt promptMode
+	input  textinput.Model
 }
 
 // launchCmd performs the jump/resume tmux operations for the given row and
@@ -1001,9 +977,6 @@ func (m model) Init() tea.Cmd {
 	// of whether repos are configured — it is cheap and avoids a conditional
 	// that would complicate Init.
 	tick := tickCmd()
-	if m.twAvail {
-		return tea.Batch(waitSnapshot(m.snaps), loadTasksCmd(m.tw, m.cfg.TaskwarriorTimeout), tick)
-	}
 	return tea.Batch(waitSnapshot(m.snaps), tick)
 }
 
@@ -1028,30 +1001,20 @@ func paneInnerWidth(w int) int {
 	return inner
 }
 
-// paneHeights returns the total and inner heights for the sessions and tasks
-// panes under the model's current terminal and footer state. Keeping this
-// calculation shared between Update and View lets cursor movement adjust the
-// sessions viewport using exactly the height View will render.
-func (m model) paneHeights() (sessionsOuterH, tasksOuterH, sessionsInnerH, tasksInnerH int) {
+// paneHeights returns the total and inner heights for the sessions pane under
+// the model's current terminal and footer state. Keeping this calculation
+// shared between Update and View lets cursor movement adjust the sessions
+// viewport using exactly the height View will render.
+func (m model) paneHeights() (sessionsOuterH, sessionsInnerH int) {
 	extraFooterRows := 0
 	if m.debug && unreachableFooter(m.snap.UnreachableInstances) != "" {
 		extraFooterRows++
 	}
-	if taskwarriorErrorFooter(m.lastMutationOp, m.lastMutationErr) != "" {
-		extraFooterRows++
-	}
 
-	tasksActive := m.twAvail && m.tasksActive
-	if tasksActive {
-		tasksOuterH = max(8, m.height/3)
-	}
 	// The application header and legend always reserve one row each.
-	sessionsOuterH = max(6, m.height-tasksOuterH-2-extraFooterRows)
+	sessionsOuterH = max(6, m.height-2-extraFooterRows)
 	sessionsInnerH = max(1, sessionsOuterH-2)
-	if tasksActive {
-		tasksInnerH = max(1, tasksOuterH-2)
-	}
-	return sessionsOuterH, tasksOuterH, sessionsInnerH, tasksInnerH
+	return sessionsOuterH, sessionsInnerH
 }
 
 // syncSessionScroll moves the grouped sessions viewport just enough to keep
@@ -1067,7 +1030,7 @@ func (m *model) syncSessionScroll() {
 // sessionsListHeight is the number of grouped repo/worktree lines available
 // inside the sessions pane after its title and pinned hint/prompt lines.
 func (m model) sessionsListHeight() int {
-	_, _, innerH, _ := m.paneHeights()
+	_, innerH := m.paneHeights()
 	return max(0, innerH-1-m.workspaceFooterLineCount())
 }
 
@@ -1078,60 +1041,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// This ensures Esc inside a prompt clears the prompt rather than quitting.
 		if m.prompt != promptIdle {
 			switch m.prompt {
-			case promptConfirmDelete:
-				if msg.String() == "y" || msg.String() == "Y" {
-					tasks := m.tasks
-					cursor := m.taskCursor
-					m.mutationInFlight = true
-					m.prompt = promptIdle
-					return m, mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "delete", func(c ClientAPI, ctx context.Context) error {
-						return c.Delete(ctx, tasks[cursor].ID)
-					})
-				}
-				// Any other key (including esc) cancels the confirm prompt.
-				m.prompt = promptIdle
-				return m, nil
-
-			case promptAdd, promptEdit:
-				switch msg.String() {
-				case "enter":
-					value := m.input.Value()
-					isEdit := m.prompt == promptEdit
-					tasks := m.tasks
-					cursor := m.taskCursor
-					m.prompt = promptIdle
-					m.input.Blur()
-					m.input.SetValue("")
-					m.mutationInFlight = true
-					// Batch the input update cmd (cursor blink teardown) with the mutation.
-					_, inputCmd := m.input.Update(msg)
-					var mutCmd tea.Cmd
-					if isEdit {
-						mutCmd = mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "modify", func(c ClientAPI, ctx context.Context) error {
-							return c.Modify(ctx, tasks[cursor].ID, value)
-						})
-					} else {
-						mutCmd = mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "add", func(c ClientAPI, ctx context.Context) error {
-							return c.Add(ctx, value)
-						})
-					}
-					return m, tea.Batch(inputCmd, mutCmd)
-
-				case "esc":
-					// Cancel prompt without quitting — must short-circuit before global quit.
-					m.prompt = promptIdle
-					m.input.Blur()
-					m.input.SetValue("")
-					return m, nil
-
-				default:
-					// Forward all other keys to the textinput so typing, backspace,
-					// cursor movement, and the blink Cmd all work correctly.
-					var cmd tea.Cmd
-					m.input, cmd = m.input.Update(msg)
-					return m, cmd
-				}
-
 			case promptNewWorktree, promptFetchBranch:
 				// Branch-name prompt for 'n' (new worktree) and 'F' (fetch from
 				// origin). On enter, advance to the harness chooser; the fetch-vs-
@@ -1417,346 +1326,229 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// (c) Tasks pane activation and focus swap.
-		if msg.String() == "T" {
-			if m.twAvail {
-				m.tasksActive = !m.tasksActive
-				if m.tasksActive {
-					m.focus = focusTasks
-					if !m.tasksLoaded {
-						return m, loadTasksCmd(m.tw, m.cfg.TaskwarriorTimeout)
-					}
-				} else {
-					m.focus = focusSessions
-				}
+		// Sessions-focused keys. The sessions pane is the only pane, so every
+		// key reaches this switch once the global/prompt handlers above have
+		// passed on it.
+		// Clear any transient tmux hint on any key press.
+		m.tmuxHint = ""
+
+		// `gg` jumps to the top: the first `g` arms pendingG, the second
+		// fires. Any other key clears it.
+		wasPendingG := m.pendingG
+		m.pendingG = false
+
+		switch msg.String() {
+		case "a":
+			m.recentCollapsed = !m.recentCollapsed
+		case "j", "down":
+			if n := len(m.workspaceRows); n > 0 {
+				m.sessionCursor = min(m.sessionCursor+1, n-1)
+				m.syncSessionScroll()
 			}
-			return m, nil
-		}
-
-		if msg.String() == "tab" {
-			if m.twAvail && m.tasksActive {
-				if m.focus == focusSessions {
-					m.focus = focusTasks
-				} else {
-					m.focus = focusSessions
-				}
+		case "k", "up":
+			if n := len(m.workspaceRows); n > 0 {
+				m.sessionCursor = max(m.sessionCursor-1, 0)
+				m.syncSessionScroll()
 			}
-			// No-op when !twAvail or tasks are inactive — focus stays on sessions.
-			return m, nil
-		}
-
-		// (d) Sessions-focused keys.
-		if m.focus == focusSessions {
-			// Clear any transient tmux hint on any key press.
-			m.tmuxHint = ""
-
-			// `gg` jumps to the top: the first `g` arms pendingG, the second
-			// fires. Any other key clears it.
-			wasPendingG := m.pendingG
-			m.pendingG = false
-
-			switch msg.String() {
-			case "a":
-				m.recentCollapsed = !m.recentCollapsed
-			case "j", "down":
-				if n := len(m.workspaceRows); n > 0 {
-					m.sessionCursor = min(m.sessionCursor+1, n-1)
-					m.syncSessionScroll()
-				}
-			case "k", "up":
-				if n := len(m.workspaceRows); n > 0 {
-					m.sessionCursor = max(m.sessionCursor-1, 0)
-					m.syncSessionScroll()
-				}
-			case "g":
-				if wasPendingG {
-					m.sessionCursor = 0
-					m.syncSessionScroll()
-				} else {
-					m.pendingG = true
-				}
-			case "<":
+		case "g":
+			if wasPendingG {
 				m.sessionCursor = 0
 				m.syncSessionScroll()
-			case "G", ">":
-				if n := len(m.workspaceRows); n > 0 {
-					m.sessionCursor = n - 1
-					m.syncSessionScroll()
-				}
-			case "ctrl+d":
-				m.sessionCursor = m.repoBoundary(1)
+			} else {
+				m.pendingG = true
+			}
+		case "<":
+			m.sessionCursor = 0
+			m.syncSessionScroll()
+		case "G", ">":
+			if n := len(m.workspaceRows); n > 0 {
+				m.sessionCursor = n - 1
 				m.syncSessionScroll()
-			case "ctrl+u":
-				m.sessionCursor = m.repoBoundary(-1)
-				m.syncSessionScroll()
+			}
+		case "ctrl+d":
+			m.sessionCursor = m.repoBoundary(1)
+			m.syncSessionScroll()
+		case "ctrl+u":
+			m.sessionCursor = m.repoBoundary(-1)
+			m.syncSessionScroll()
 
-			case "enter":
-				// Jump to a running agent or resume a stopped one.
-				// Guard: tmux must be available.
-				tmuxAvail := m.tmux != nil && m.tmux.Available()
-				if !tmuxAvail {
-					m.tmuxHint = "tmux not available — start cogitator inside a tmux session to use jump/resume"
-					return m, nil
-				}
-				if len(m.workspaceRows) == 0 {
-					return m, nil
-				}
-				row := m.workspaceRows[m.sessionCursor]
-
-				// Missing rows cannot be resumed (directory absent from disk).
-				if row.State == workspace.StateMissing {
-					m.tmuxHint = "worktree directory is missing — cannot resume"
-					return m, nil
-				}
-
-				// Pending-create placeholder rows are not on disk yet.
-				if row.State == workspace.StateCreating {
-					m.tmuxHint = "worktree is still being created…"
-					return m, nil
-				}
-
-				m.recordSessionSwitch(row)
-				return m, launchCmd(m.tmux, row, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
-
-			case "n":
-				// New worktree: collect a branch name via prompt.
-				tmuxAvail := m.tmux != nil && m.tmux.Available()
-				if !tmuxAvail {
-					m.tmuxHint = "tmux not available — start cogitator inside a tmux session to create worktrees"
-					return m, nil
-				}
-				if len(m.workspaceRows) == 0 {
-					return m, nil
-				}
-				row := m.workspaceRows[m.sessionCursor]
-				// Determine the repo path: use row.Repo if set, else row.Worktree.
-				repoPath := row.Repo
-				if repoPath == "" {
-					repoPath = row.Worktree
-				}
-				if repoPath == "" {
-					return m, nil
-				}
-				m.newWorktreeRepo = repoPath
-				m.worktreeFromRemote = false
-				m.prompt = promptNewWorktree
-				m.input.Placeholder = "branch name"
-				m.input.SetValue("")
-				focusCmd := m.input.Focus()
-				return m, focusCmd
-
-			case "F":
-				// Fetch a branch from origin into a new worktree: collect the
-				// branch name via prompt, then (after the harness chooser) fetch
-				// and check it out. Mirrors 'n' but sets worktreeFromRemote so the
-				// chooser dispatches the fetch path.
-				tmuxAvail := m.tmux != nil && m.tmux.Available()
-				if !tmuxAvail {
-					m.tmuxHint = "tmux not available — start cogitator inside a tmux session to create worktrees"
-					return m, nil
-				}
-				if len(m.workspaceRows) == 0 {
-					return m, nil
-				}
-				row := m.workspaceRows[m.sessionCursor]
-				// Determine the repo path: use row.Repo if set, else row.Worktree.
-				repoPath := row.Repo
-				if repoPath == "" {
-					repoPath = row.Worktree
-				}
-				if repoPath == "" {
-					return m, nil
-				}
-				m.newWorktreeRepo = repoPath
-				m.worktreeFromRemote = true
-				m.prompt = promptFetchBranch
-				m.input.Placeholder = "branch name to fetch from origin"
-				m.input.SetValue("")
-				focusCmd := m.input.Focus()
-				return m, focusCmd
-
-			case "A":
-				// Open the embedded repo finder: scan $HOME for git repos in
-				// the background, then let the user fuzzy-filter and pick one.
-				// Runs entirely inside the TUI (no ExecProcess), so it cannot
-				// disturb the host tmux client.
-				m.prompt = promptAddRepo
-				m.repoFinderScanning = true
-				m.repoFinderAll = nil
-				m.repoFinderMatches = nil
-				m.repoFinderCursor = 0
-				m.repoFinderErr = ""
-				m.input.Placeholder = "filter repos"
-				m.input.SetValue("")
-				return m, tea.Batch(m.input.Focus(), scanReposCmd(repoFinderRoot()))
-
-			case "D":
-				// Delete worktree: open the first of two confirmations and
-				// kick off an async merge-status probe to annotate it. tmux is
-				// not required (git removal works without it; window cleanup is
-				// best-effort).
-				if len(m.workspaceRows) == 0 {
-					return m, nil
-				}
-				row := m.workspaceRows[m.sessionCursor]
-				if ok, reason := canDeleteWorktree(row); !ok {
-					m.tmuxHint = reason
-					return m, nil
-				}
-				m.deleteTarget = row
-				m.deleteMergeInfo = ""
-				// Resolve force-delete once, here, so the confirm prompt's
-				// data-loss warning and the eventual removal agree on the flag.
-				m.deleteForce = true
-				if wsCfg, err := workspace.LoadConfig(); err == nil {
-					m.deleteForce = wsCfg.ForceDeleteEnabled()
-				}
-				m.prompt = promptConfirmDeleteWorktree
-				return m, mergeStatusCmd(m.gitOp, row.Repo, row.Branch, row.Worktree)
-
-			case "R":
-				// Untrack repo: drop the repo under the cursor from cogitator's
-				// config. Non-destructive — the repo and its worktrees stay on
-				// disk — so a single confirmation gates it.
-				if len(m.workspaceRows) == 0 {
-					return m, nil
-				}
-				row := m.workspaceRows[m.sessionCursor]
-				if row.Repo == "" {
-					m.tmuxHint = "no repo to remove for this row"
-					return m, nil
-				}
-				m.removeRepoTarget = row.Repo
-				m.prompt = promptConfirmRemoveRepo
+		case "enter":
+			// Jump to a running agent or resume a stopped one.
+			// Guard: tmux must be available.
+			tmuxAvail := m.tmux != nil && m.tmux.Available()
+			if !tmuxAvail {
+				m.tmuxHint = "tmux not available — start cogitator inside a tmux session to use jump/resume"
 				return m, nil
-
-			case "P":
-				// Pull latest into the highlighted worktree's branch from origin.
-				// Handy for refreshing a base branch before branching a new
-				// worktree off it. tmux is not required — this is a pure git
-				// operation.
-				if len(m.workspaceRows) == 0 {
-					return m, nil
-				}
-				row := m.workspaceRows[m.sessionCursor]
-				if ok, reason := canPullWorktree(row); !ok {
-					m.tmuxHint = reason
-					return m, nil
-				}
-				if m.pulling[row.Worktree] {
-					// A pull for this worktree is already in flight; ignore the
-					// repeated keypress rather than dispatching a duplicate.
-					return m, nil
-				}
-				m.addPulling(row.Worktree)
-				var spinnerC tea.Cmd
-				if !m.spinnerActive {
-					m.spinnerActive = true
-					spinnerC = spinnerTickCmd()
-				}
-				return m, tea.Batch(pullCmd(m.gitOp, row.Worktree, row.Branch), spinnerC)
 			}
+			if len(m.workspaceRows) == 0 {
+				return m, nil
+			}
+			row := m.workspaceRows[m.sessionCursor]
+
+			// Missing rows cannot be resumed (directory absent from disk).
+			if row.State == workspace.StateMissing {
+				m.tmuxHint = "worktree directory is missing — cannot resume"
+				return m, nil
+			}
+
+			// Pending-create placeholder rows are not on disk yet.
+			if row.State == workspace.StateCreating {
+				m.tmuxHint = "worktree is still being created…"
+				return m, nil
+			}
+
+			m.recordSessionSwitch(row)
+			return m, launchCmd(m.tmux, row, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
+
+		case "n":
+			// New worktree: collect a branch name via prompt.
+			tmuxAvail := m.tmux != nil && m.tmux.Available()
+			if !tmuxAvail {
+				m.tmuxHint = "tmux not available — start cogitator inside a tmux session to create worktrees"
+				return m, nil
+			}
+			if len(m.workspaceRows) == 0 {
+				return m, nil
+			}
+			row := m.workspaceRows[m.sessionCursor]
+			// Determine the repo path: use row.Repo if set, else row.Worktree.
+			repoPath := row.Repo
+			if repoPath == "" {
+				repoPath = row.Worktree
+			}
+			if repoPath == "" {
+				return m, nil
+			}
+			m.newWorktreeRepo = repoPath
+			m.worktreeFromRemote = false
+			m.prompt = promptNewWorktree
+			m.input.Placeholder = "branch name"
+			m.input.SetValue("")
+			focusCmd := m.input.Focus()
+			return m, focusCmd
+
+		case "F":
+			// Fetch a branch from origin into a new worktree: collect the
+			// branch name via prompt, then (after the harness chooser) fetch
+			// and check it out. Mirrors 'n' but sets worktreeFromRemote so the
+			// chooser dispatches the fetch path.
+			tmuxAvail := m.tmux != nil && m.tmux.Available()
+			if !tmuxAvail {
+				m.tmuxHint = "tmux not available — start cogitator inside a tmux session to create worktrees"
+				return m, nil
+			}
+			if len(m.workspaceRows) == 0 {
+				return m, nil
+			}
+			row := m.workspaceRows[m.sessionCursor]
+			// Determine the repo path: use row.Repo if set, else row.Worktree.
+			repoPath := row.Repo
+			if repoPath == "" {
+				repoPath = row.Worktree
+			}
+			if repoPath == "" {
+				return m, nil
+			}
+			m.newWorktreeRepo = repoPath
+			m.worktreeFromRemote = true
+			m.prompt = promptFetchBranch
+			m.input.Placeholder = "branch name to fetch from origin"
+			m.input.SetValue("")
+			focusCmd := m.input.Focus()
+			return m, focusCmd
+
+		case "A":
+			// Open the embedded repo finder: scan $HOME for git repos in
+			// the background, then let the user fuzzy-filter and pick one.
+			// Runs entirely inside the TUI (no ExecProcess), so it cannot
+			// disturb the host tmux client.
+			m.prompt = promptAddRepo
+			m.repoFinderScanning = true
+			m.repoFinderAll = nil
+			m.repoFinderMatches = nil
+			m.repoFinderCursor = 0
+			m.repoFinderErr = ""
+			m.input.Placeholder = "filter repos"
+			m.input.SetValue("")
+			return m, tea.Batch(m.input.Focus(), scanReposCmd(repoFinderRoot()))
+
+		case "D":
+			// Delete worktree: open the first of two confirmations and
+			// kick off an async merge-status probe to annotate it. tmux is
+			// not required (git removal works without it; window cleanup is
+			// best-effort).
+			if len(m.workspaceRows) == 0 {
+				return m, nil
+			}
+			row := m.workspaceRows[m.sessionCursor]
+			if ok, reason := canDeleteWorktree(row); !ok {
+				m.tmuxHint = reason
+				return m, nil
+			}
+			m.deleteTarget = row
+			m.deleteMergeInfo = ""
+			// Resolve force-delete once, here, so the confirm prompt's
+			// data-loss warning and the eventual removal agree on the flag.
+			m.deleteForce = true
+			if wsCfg, err := workspace.LoadConfig(); err == nil {
+				m.deleteForce = wsCfg.ForceDeleteEnabled()
+			}
+			m.prompt = promptConfirmDeleteWorktree
+			return m, mergeStatusCmd(m.gitOp, row.Repo, row.Branch, row.Worktree)
+
+		case "R":
+			// Untrack repo: drop the repo under the cursor from cogitator's
+			// config. Non-destructive — the repo and its worktrees stay on
+			// disk — so a single confirmation gates it.
+			if len(m.workspaceRows) == 0 {
+				return m, nil
+			}
+			row := m.workspaceRows[m.sessionCursor]
+			if row.Repo == "" {
+				m.tmuxHint = "no repo to remove for this row"
+				return m, nil
+			}
+			m.removeRepoTarget = row.Repo
+			m.prompt = promptConfirmRemoveRepo
 			return m, nil
-		}
 
-		// (e) Tasks-focused keys — only when focused on tasks and no mutation in flight.
-		if m.focus == focusTasks && m.tasksActive && !m.mutationInFlight {
-			tasks := m.tasks
-			cursor := m.taskCursor
-			switch msg.String() {
-			case "j", "down":
-				if len(tasks) > 0 {
-					m.taskCursor = min(cursor+1, len(tasks)-1)
-				}
-			case "k", "up":
-				if len(tasks) > 0 {
-					m.taskCursor = max(cursor-1, 0)
-				}
-			case "a":
-				m.prompt = promptAdd
-				m.input.SetValue("")
-				focusCmd := m.input.Focus()
-				return m, focusCmd
-			case "e":
-				if len(tasks) > 0 && cursor >= 0 {
-					m.prompt = promptEdit
-					m.input.SetValue(flattenTaskDSL(tasks[cursor]))
-					focusCmd := m.input.Focus()
-					return m, focusCmd
-				}
-			case "d":
-				if len(tasks) > 0 && cursor >= 0 {
-					m.mutationInFlight = true
-					return m, mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "done", func(c ClientAPI, ctx context.Context) error {
-						return c.Done(ctx, tasks[cursor].ID)
-					})
-				}
-			case "s":
-				// Toggle: running task → stop, idle task → start.
-				// We branch on Start.IsZero() rather than tracking a flag so
-				// the action stays consistent with whatever Export last
-				// reported, even if the row was mutated out-of-band.
-				if len(tasks) > 0 && cursor >= 0 {
-					m.mutationInFlight = true
-					if tasks[cursor].Start.IsZero() {
-						return m, mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "start", func(c ClientAPI, ctx context.Context) error {
-							return c.Start(ctx, tasks[cursor].ID)
-						})
-					}
-					return m, mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "stop", func(c ClientAPI, ctx context.Context) error {
-						return c.Stop(ctx, tasks[cursor].ID)
-					})
-				}
-			case "D":
-				if len(tasks) > 0 && cursor >= 0 {
-					m.prompt = promptConfirmDelete
-				}
-			case "U":
-				m.mutationInFlight = true
-				return m, mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "undo", func(c ClientAPI, ctx context.Context) error {
-					return c.Undo(ctx)
-				})
+		case "P":
+			// Pull latest into the highlighted worktree's branch from origin.
+			// Handy for refreshing a base branch before branching a new
+			// worktree off it. tmux is not required — this is a pure git
+			// operation.
+			if len(m.workspaceRows) == 0 {
+				return m, nil
 			}
+			row := m.workspaceRows[m.sessionCursor]
+			if ok, reason := canPullWorktree(row); !ok {
+				m.tmuxHint = reason
+				return m, nil
+			}
+			if m.pulling[row.Worktree] {
+				// A pull for this worktree is already in flight; ignore the
+				// repeated keypress rather than dispatching a duplicate.
+				return m, nil
+			}
+			m.addPulling(row.Worktree)
+			var spinnerC tea.Cmd
+			if !m.spinnerActive {
+				m.spinnerActive = true
+				spinnerC = spinnerTickCmd()
+			}
+			return m, tea.Batch(pullCmd(m.gitOp, row.Worktree, row.Branch), spinnerC)
 		}
 		return m, nil
 
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		// Recompute the input width so the prompt fits inside the bordered
-		// tasks pane. The prefix "edit #999: " is 11 chars; we reserve that
-		// space so the cursor never overflows the pane boundary.
-		const editPromptLen = len("edit #999: ")
-		m.input.Width = max(0, paneInnerWidth(m.width)-editPromptLen)
+		// sessions pane. The prefix "fetch branch from origin: " is the
+		// longest prompt label; we reserve that much space so the cursor
+		// never overflows the pane boundary.
+		const promptLabelLen = len("fetch branch from origin: ")
+		m.input.Width = max(0, paneInnerWidth(m.width)-promptLabelLen)
 		m.syncSessionScroll()
-	case tasksLoadedMsg:
-		// Sort once at load time so m.tasks[m.taskCursor] is always the
-		// highlighted row. Sorting in the render path instead would
-		// desynchronise the cursor index from action dispatch (done, stop,
-		// delete, etc. all read m.tasks[m.taskCursor]).
-		m.tasks = sortedTasks(msg.tasks)
-		m.tasksErr = msg.err
-		m.tasksLoaded = true
-		// Clamp cursor into [0, len-1]. Allow -1 when the list is empty so
-		// downstream key handlers can no-op cleanly without a bounds check.
-		switch {
-		case len(m.tasks) == 0:
-			m.taskCursor = -1
-		case m.taskCursor >= len(m.tasks):
-			m.taskCursor = len(m.tasks) - 1
-		case m.taskCursor < 0:
-			m.taskCursor = 0
-		}
-	case taskMutationOkMsg:
-		m.mutationInFlight = false
-		m.lastMutationErr = nil
-		m.lastMutationOp = msg.op
-		// Re-fetch the task list so the pane reflects the mutation result.
-		return m, loadTasksCmd(m.tw, m.cfg.TaskwarriorTimeout)
-	case taskMutationFailedMsg:
-		m.mutationInFlight = false
-		m.lastMutationErr = msg.err
-		m.lastMutationOp = msg.op
-		// Do not refresh — leave the existing list intact and surface the error.
 
 	case launchResultMsg:
 		// A launch/resume Cmd completed.
@@ -2190,22 +1982,11 @@ func (m model) View() string {
 
 	recentMins := int(cfg.RecentWindow.Minutes())
 
-	var headerHint string
-	tasksActive := m.twAvail && m.tasksActive
-	viewFocus := m.focus
-	if !tasksActive {
-		viewFocus = focusSessions
-	}
-
-	if viewFocus == focusSessions {
-		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  ? help",
-			live, recent, recentMins, m.snap.UpdatedAt.Format("15:04:05"))
-	} else {
-		headerHint = fmt.Sprintf("  %d pending  ·  ? help", len(m.tasks))
-	}
+	headerHint := fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  ? help",
+		live, recent, recentMins, m.snap.UpdatedAt.Format("15:04:05"))
 	header := titleStyle.Render("cogitator") + dimStyle.Render(headerHint)
 
-	legend := legendLine(m.width, tasksActive)
+	legend := legendLine()
 	// The unreachable footer is gated behind --debug because transient
 	// "instance unreachable" warnings (laptop sleep, network blips,
 	// short-lived opencode processes) are noisy during normal operation
@@ -2214,18 +1995,11 @@ func (m model) View() string {
 	if m.debug {
 		footer = unreachableFooter(m.snap.UnreachableInstances)
 	}
-	mutationFooter := taskwarriorErrorFooter(m.lastMutationOp, m.lastMutationErr)
 
-	_, tasksOuterH, sessionsInnerH, tasksInnerH := m.paneHeights()
+	_, sessionsInnerH := m.paneHeights()
 
-	// Choose border style based on which pane is focused.
-	sessionsStyle := paneStyle
-	tasksStyle := paneStyle
-	if viewFocus == focusSessions {
-		sessionsStyle = paneFocusedStyle
-	} else {
-		tasksStyle = paneFocusedStyle
-	}
+	// The sessions pane is the only pane, so it always renders focused.
+	sessionsStyle := paneFocusedStyle
 
 	// When repos are configured, render the merged worktree view. Otherwise
 	// fall back to the live-only path so --status/--demo and unconfigured
@@ -2284,40 +2058,24 @@ func (m model) View() string {
 	}
 	sessionsPane := sessionsStyle.Width(paneW).Height(sessionsInnerH).Render(sessionContent)
 
-	parts := []string{header, sessionsPane}
-	if tasksActive {
-		tasksContent := m.renderTasksPane(tasksOuterH, paneW)
-		tasksPane := tasksStyle.Width(paneW).Height(tasksInnerH).Render(tasksContent)
-		parts = append(parts, tasksPane)
-	}
-	parts = append(parts, legend)
+	parts := []string{header, sessionsPane, legend}
 	if footer != "" {
 		parts = append(parts, footer)
-	}
-	if mutationFooter != "" {
-		parts = append(parts, mutationFooter)
 	}
 	return strings.Join(parts, "\n")
 }
 
-// newModel constructs the TUI model. tw is injected so demo / test paths can
-// substitute a synthetic ClientAPI without shelling out to the `task` binary;
-// production callers pass taskwarrior.NewClient(). If tw is nil, the Tasks
-// pane is suppressed (twAvail=false). debug enables diagnostic UI elements
+// newModel constructs the TUI model. debug enables diagnostic UI elements
 // such as the unreachable-instance footer.
-func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debug bool, tw ClientAPI) model {
+func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debug bool) model {
 	if cfg == nil {
 		cfg = config.Default()
 	}
 
-	twAvail := tw != nil && tw.Available()
-
 	ti := textinput.New()
-	ti.Placeholder = "description project:foo +tag priority:H due:tomorrow"
-	// Override AcceptSuggestion so Tab is never consumed by the suggestion
-	// mechanism. Tab is routed by the Update loop to switch focus between
-	// panes; disabling the binding here prevents the textinput from
-	// intercepting it when the input bar is active.
+	// Override AcceptSuggestion so it is never consumed by the suggestion
+	// mechanism, since the sessions pane's various prompts set their own
+	// placeholder and don't want it clobbered.
 	ti.KeyMap.AcceptSuggestion = key.NewBinding(key.WithDisabled())
 	// Width is intentionally left at zero here; it is recomputed in Update
 	// on the first tea.WindowSizeMsg so it tracks the actual terminal width.
@@ -2339,18 +2097,8 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 		gitOp:  realGitOps{},
 		harnOp: realHarnessOps{},
 
-		tw:               tw,
-		twAvail:          twAvail,
-		tasksActive:      twAvail,
-		tasks:            nil,
-		tasksLoaded:      false,
-		taskCursor:       0,
-		focus:            focusSessions,
-		prompt:           promptIdle,
-		input:            ti,
-		lastMutationErr:  nil,
-		lastMutationOp:   "",
-		mutationInFlight: false,
+		prompt: promptIdle,
+		input:  ti,
 	}
 }
 

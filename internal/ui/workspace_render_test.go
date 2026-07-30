@@ -793,60 +793,38 @@ func TestStoppedRowRelativeTimeUsesTickNow(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // makeWorktreePromptModel builds a model with promptNewWorktree active and the
-// given branch text pre-filled in the input widget. twAvail controls whether
-// taskwarrior is reported as installed — the sessions-pane prompt must render
-// regardless of that flag.
-func makeWorktreePromptModel(branchText string, twAvail bool) model {
+// given branch text pre-filled in the input widget.
+func makeWorktreePromptModel(branchText string) model {
 	ti := textinput.New()
 	ti.SetValue(branchText)
 	return model{
-		width:   200,
-		twAvail: twAvail,
-		prompt:  promptNewWorktree,
-		input:   ti,
+		width:  200,
+		prompt: promptNewWorktree,
+		input:  ti,
 	}
 }
 
-// TestPromptNewWorktreeRendersInSessionsPaneTwAvailTrue asserts that the
-// branch-name prompt label and the typed value appear in renderWorkspaceRows
-// output when taskwarrior IS available.
-func TestPromptNewWorktreeRendersInSessionsPaneTwAvailTrue(t *testing.T) {
+// TestPromptNewWorktreeRendersInSessionsPane asserts that the branch-name
+// prompt label and the typed value appear in renderWorkspaceRows output.
+func TestPromptNewWorktreeRendersInSessionsPane(t *testing.T) {
 	rows := []workspace.Row{
 		makeRow("/repo/a", "/repo/a", "main", "running", workspace.StateRunning, state.AttnActive, fixedNow),
 	}
-	m := makeWorktreePromptModel("feat/my-branch", true)
+	m := makeWorktreePromptModel("feat/my-branch")
 	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
 
 	if !strings.Contains(got, "new worktree branch:") {
-		t.Fatalf("sessions pane must contain 'new worktree branch:' label (twAvail=true), got %q", got)
+		t.Fatalf("sessions pane must contain 'new worktree branch:' label, got %q", got)
 	}
 	if !strings.Contains(got, "feat/my-branch") {
-		t.Fatalf("sessions pane must contain typed branch value (twAvail=true), got %q", got)
-	}
-}
-
-// TestPromptNewWorktreeRendersInSessionsPaneTwAvailFalse asserts that the
-// branch-name prompt renders even when taskwarrior is NOT installed — the
-// sessions pane must not depend on m.twAvail.
-func TestPromptNewWorktreeRendersInSessionsPaneTwAvailFalse(t *testing.T) {
-	rows := []workspace.Row{
-		makeRow("/repo/a", "/repo/a", "main", "running", workspace.StateRunning, state.AttnActive, fixedNow),
-	}
-	m := makeWorktreePromptModel("feat/no-tw", false)
-	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
-
-	if !strings.Contains(got, "new worktree branch:") {
-		t.Fatalf("sessions pane must contain 'new worktree branch:' label (twAvail=false), got %q", got)
-	}
-	if !strings.Contains(got, "feat/no-tw") {
-		t.Fatalf("sessions pane must contain typed branch value (twAvail=false), got %q", got)
+		t.Fatalf("sessions pane must contain typed branch value, got %q", got)
 	}
 }
 
 // TestPromptNewWorktreeRendersInEmptySessionsPane asserts that the prompt
 // still renders in the early-return (no worktrees configured) path.
 func TestPromptNewWorktreeRendersInEmptySessionsPane(t *testing.T) {
-	m := makeWorktreePromptModel("feat/empty-path", false)
+	m := makeWorktreePromptModel("feat/empty-path")
 	got := m.renderWorkspaceRows(200, nil, 0, fixedNow)
 
 	if !strings.Contains(got, "new worktree branch:") {
@@ -974,23 +952,5 @@ func TestFormatCreatingRowShowsCreatingVerbForLocalFlow(t *testing.T) {
 	}
 	if strings.Contains(got, "(fetching…)") {
 		t.Fatalf("local flow must not show '(fetching…)', got %q", got)
-	}
-}
-
-// TestTaskPromptLineOmitsWorktreePrompts asserts that taskPromptLine does NOT
-// mirror the worktree branch-name prompt: it is a sessions-pane action and must
-// render in one place only (renderWorkspaceRows), not duplicated in the tasks
-// pane.
-func TestTaskPromptLineOmitsWorktreePrompts(t *testing.T) {
-	ti := textinput.New()
-	ti.SetValue("feat/task-pane")
-	for _, p := range []promptMode{promptNewWorktree, promptFetchBranch, promptConfirmDeleteWorktree, promptConfirmDeleteWorktree2} {
-		m := model{prompt: p, input: ti}
-		if isTaskPrompt(p) {
-			t.Fatalf("isTaskPrompt(%v) must be false", p)
-		}
-		if got := m.taskPromptLine(); got != "" {
-			t.Fatalf("taskPromptLine must be empty for sessions-pane prompt %v, got %q", p, got)
-		}
 	}
 }

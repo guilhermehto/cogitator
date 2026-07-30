@@ -37,11 +37,6 @@ var (
 	// colour so it is visible but does not compete with the session title.
 	providerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
 
-	// taskActiveStyle highlights a running Taskwarrior task. Bold + green so
-	// the running row is distinguishable from the cursor (reverse-video) and
-	// from the priority glyph palette.
-	taskActiveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Bold(true)
-
 	cellLineBreakReplacer = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ")
 )
 
@@ -70,9 +65,6 @@ const (
 	glyphPermission = "\U000f033e" // 󰌾
 	glyphError      = "\U000f0026" // 󰀦
 	glyphFinished   = "\U000f012c" // 󰄬 check — agent finished, awaiting your return
-	// glyphTaskActive marks a running Taskwarrior task in the ST column.
-	// When active, it replaces the priority glyph for that row.
-	glyphTaskActive = "\U000f040a" // 󰐊 play
 
 	// Workspace / worktree row glyphs.
 	glyphWtStopped = "\U000f0766" // 󰝦 same as glyphInactive — agent stopped
@@ -126,14 +118,6 @@ var (
 // pending-create row to signal an in-flight worktree create/fetch.
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-// taskPriorityGlyph maps Taskwarrior priority codes to display glyphs.
-// No entry means the cell is left blank (normal priority).
-var taskPriorityGlyph = map[string]string{
-	"H": "\U000f0071", // 󰁱 high
-	"M": "●",          // medium
-	"L": "·",          // low
-}
-
 const (
 	colStateW    = 5
 	colStatusW   = 10
@@ -144,16 +128,6 @@ const (
 	// branch on a worktree row. The branch leads (it is what you navigate by),
 	// so the title is de-emphasised and longer titles are truncated with "…".
 	maxSessionTitleW = 48
-)
-
-// Task pane column widths. DESC takes the remainder after all fixed columns
-// and gaps are subtracted from the available inner width.
-const (
-	colTaskStateW   = 3
-	colTaskIDW      = 5
-	colTaskProjectW = 14
-	colTaskTagsW    = 16
-	colTaskDueW     = 10
 )
 
 func attnLabel(a state.Attention, source state.Source) string {
@@ -204,10 +178,9 @@ func styledStatus(s string) string {
 	}
 }
 
-// legendLine renders the status-icon legend, optionally appending task-priority
-// glyphs. If the combined line would exceed width, the task glyphs are omitted
-// so the legend never wraps on narrow terminals.
-func legendLine(width int, includeTasks bool) string {
+// legendLine renders the status-icon legend for the sessions pane's attention
+// glyphs.
+func legendLine() string {
 	sessionParts := []string{
 		dimStyle.Render("legend:"),
 		attnActiveStyle.Render(glyphActive) + " " + dimStyle.Render("active"),
@@ -218,24 +191,7 @@ func legendLine(width int, includeTasks bool) string {
 		attnPermStyle.Render(glyphPermission) + " " + dimStyle.Render("permission"),
 		attnErrStyle.Render(glyphError) + " " + dimStyle.Render("error"),
 	}
-	sessionLegend := strings.Join(sessionParts, "  ")
-	if !includeTasks {
-		return sessionLegend
-	}
-
-	taskParts := []string{
-		taskActiveStyle.Render(glyphTaskActive) + " " + dimStyle.Render("running"),
-		taskPriorityGlyph["H"] + " " + dimStyle.Render("high"),
-		"● " + dimStyle.Render("medium"),
-		"· " + dimStyle.Render("low"),
-	}
-	taskLegend := strings.Join(taskParts, " · ")
-
-	combined := sessionLegend + "    " + taskLegend
-	if width > 0 && lipgloss.Width(combined) > width {
-		return sessionLegend
-	}
-	return combined
+	return strings.Join(sessionParts, "  ")
 }
 
 func (m model) renderAllSessions(width int, rows []state.SessionView, recentByInstance map[string]int) string {
@@ -620,9 +576,8 @@ func (m model) renderWorkspaceRowsViewport(width, height int, rows []workspace.R
 	}
 
 	// Render branch-name prompt when the user pressed 'n' (new worktree) or 'F'
-	// (fetch from origin). This must render regardless of m.twAvail — the
-	// sessions pane is independent of taskwarrior. Placed after the hint so it is
-	// always the last visible line.
+	// (fetch from origin). Placed after the hint so it is always the last
+	// visible line.
 	if m.prompt == promptNewWorktree || m.prompt == promptFetchBranch {
 		b.WriteString(m.worktreePromptLine() + "\n")
 	}
@@ -992,16 +947,6 @@ var helpSections = []helpSection{
 		{"A", "add repo"},
 		{"R", "remove (untrack) repo"},
 	}},
-	{"Tasks", [][2]string{
-		{"T", "show / hide tasks pane"},
-		{"tab", "switch focus (sessions / tasks)"},
-		{"a", "add task"},
-		{"e", "edit task"},
-		{"s", "start / stop task"},
-		{"d", "mark done"},
-		{"D", "delete task"},
-		{"U", "undo"},
-	}},
 	{"General", [][2]string{
 		{"?", "toggle this help"},
 		{"S", "settings"},
@@ -1040,13 +985,15 @@ func renderHelp(fieldW int) string {
 		contentW = max(1, fieldW-4)
 	}
 
-	// Split the sections across two columns. Sessions+Worktrees lead the left
-	// column; Tasks+General the right. The columns are rendered independently
-	// then zipped row-for-row so the box reads top-to-bottom in two streams.
+	// Split the sections across two columns: Sessions alone on the left,
+	// Worktrees+General on the right. This is the most balanced whole-section
+	// split for three sections of uneven length. The columns are rendered
+	// independently then zipped row-for-row so the box reads top-to-bottom in
+	// two streams.
 	const gap = 3
 	colW := max(1, (contentW-gap)/2)
-	left := helpColumn(helpSections[:2], keyW, colW)
-	right := helpColumn(helpSections[2:], keyW, colW)
+	left := helpColumn(helpSections[:1], keyW, colW)
+	right := helpColumn(helpSections[1:], keyW, colW)
 
 	var lines []string
 	lines = append(lines, padToWidth(" "+headerStyle.Render("Keybindings"), contentW))
