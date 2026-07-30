@@ -7,12 +7,15 @@ package ui
 // git, or opencode binary is required.
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/guilhermehto/cogitator/internal/config"
+	"github.com/guilhermehto/cogitator/internal/pathnorm"
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
@@ -210,6 +213,23 @@ func TestWorkspaceRowsMsgAppliesRows(t *testing.T) {
 	}
 }
 
+// TestWorkspaceRowsMsgAppliesRoot asserts that workspaceRowsMsg's root is
+// applied to the model, including when rows is empty (the zero-repos case,
+// which is exactly when View's fallback branch needs a resolved root to
+// exclude workspace-owned sessions).
+func TestWorkspaceRowsMsgAppliesRoot(t *testing.T) {
+	ch := make(chan state.Snapshot, 1)
+	m := snapshotModel(ch)
+	m.rowsBuilding = true
+
+	updated, _ := m.Update(workspaceRowsMsg{rows: nil, root: "/some/workspace/root"})
+	m2 := updated.(model)
+
+	if m2.workspaceRoot != "/some/workspace/root" {
+		t.Errorf("workspaceRoot not applied; got %q", m2.workspaceRoot)
+	}
+}
+
 // TestWorkspaceRowsMsgClearsBuildingFlag asserts that rowsBuilding is false
 // after workspaceRowsMsg when no dirty flag is set.
 func TestWorkspaceRowsMsgClearsBuildingFlag(t *testing.T) {
@@ -397,5 +417,70 @@ func TestDemoRendersWorktreeRoster(t *testing.T) {
 	}
 	if strings.Contains(out, "no live or recent sessions") {
 		t.Error("demo must render the worktree roster, not the live-session fallback")
+	}
+}
+
+// TestViewFallbackExcludesWorkspaceOwnedSession verifies that when no repos
+// are configured — exactly the case where View renders the live-only
+// fallback via renderAllSessions — a live session whose Directory lies under
+// the resolved workspace root is excluded from both the fallback listing and
+// the header's live/recent counts. Without this, an install with zero
+// configured repos would surface a workspace session's per-repo checkout as
+// an ordinary live session.
+func TestViewFallbackExcludesWorkspaceOwnedSession(t *testing.T) {
+	root := t.TempDir()
+	memberDir := filepath.Join(root, "session-1", "repo")
+	if err := os.MkdirAll(memberDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", memberDir, err)
+	}
+	canonRoot, err := pathnorm.Canonical(root)
+	if err != nil {
+		t.Fatalf("Canonical(%q): %v", root, err)
+	}
+	canonMember, err := pathnorm.Canonical(memberDir)
+	if err != nil {
+		t.Fatalf("Canonical(%q): %v", memberDir, err)
+	}
+
+	m := model{
+		width:         120,
+		workspaceRoot: canonRoot,
+		snap: state.Snapshot{
+			UpdatedAt: fixedNow,
+			Sessions: []state.SessionView{
+				{
+					InstanceID:   "i1",
+					InstanceName: "inst-1",
+					SessionID:    "workspace-owned",
+					Title:        "workspace-owned-title",
+					Directory:    canonMember,
+					StatusType:   "busy",
+					Attention:    state.AttnActive,
+					Source:       state.SourceLive,
+				},
+				{
+					InstanceID:   "i2",
+					InstanceName: "inst-2",
+					SessionID:    "ordinary",
+					Title:        "ordinary-title",
+					Directory:    t.TempDir(),
+					StatusType:   "busy",
+					Attention:    state.AttnActive,
+					Source:       state.SourceLive,
+				},
+			},
+		},
+		// workspaceRows is nil — no repos configured; the fallback branch renders.
+	}
+
+	got := m.View()
+	if strings.Contains(got, "workspace-owned-title") {
+		t.Errorf("fallback view must exclude the workspace-owned session, got %q", got)
+	}
+	if !strings.Contains(got, "ordinary-title") {
+		t.Errorf("fallback view must still render the ordinary session, got %q", got)
+	}
+	if !strings.Contains(got, "1 live") {
+		t.Errorf("header must count only the ordinary session as live, got %q", got)
 	}
 }

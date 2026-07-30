@@ -15,6 +15,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/git"
 	"github.com/guilhermehto/cogitator/internal/harness"
+	"github.com/guilhermehto/cogitator/internal/pathnorm"
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
@@ -23,11 +24,17 @@ import (
 type snapshotMsg state.Snapshot
 
 // workspaceRowsMsg is returned by buildWorkspaceRowsCmd when the background
-// workspace-row build completes. It carries the merged row list and the
-// resolved tmux launch mode so the Update handler can apply them atomically.
+// workspace-row build completes. It carries the merged row list, the
+// resolved tmux launch mode, and the resolved workspace root so the Update
+// handler can apply them atomically.
 type workspaceRowsMsg struct {
 	rows       []settings.Row
 	launchMode tmuxctl.LaunchMode
+	// root is the resolved workspace root (settings.ResolveWorkspaceRoot),
+	// carried alongside rows/launchMode because buildWorkspaceRows resolves it
+	// even on its zero-repos early return — the exact case where View's
+	// fallback branch needs it to exclude workspace-owned sessions.
+	root string
 }
 
 // tickMsg is sent by tickCmd on each relative-time refresh interval.
@@ -310,6 +317,14 @@ type model struct {
 	// on each snapshot and on each tickMsg. It is nil when no repos are
 	// configured (zero value is safe — View() guards on len > 0).
 	workspaceRows []settings.Row
+	// workspaceRoot is the resolved workspace root (settings.ResolveWorkspaceRoot),
+	// refreshed alongside workspaceRows. View uses it to exclude
+	// workspace-owned session directories from the live-only fallback path
+	// and from the header's live/recent counts, so a workspace session's
+	// per-repo checkouts are never double-counted alongside their own
+	// workspaceRows entry. Empty disables the exclusion (matches
+	// pre-workspace behaviour) until the first successful resolve.
+	workspaceRoot string
 	// sessionCursor is the index into the visible worktree rows list that
 	// currently holds keyboard focus. Zero value (0) is safe.
 	sessionCursor int
@@ -1644,9 +1659,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Rebuild rows so the new repo appears immediately rather than
 			// waiting for the next snapshot. Reapply the create overlay so an
 			// in-flight fetch's spinner row is not dropped by the rebuild.
-			rows, mode := buildWorkspaceRows(m.snap, m.cfg)
+			rows, mode, root := buildWorkspaceRows(m.snap, m.cfg)
 			m.workspaceRows = injectPendingCreates(rows, m.pendingCreates)
 			m.launchMode = mode
+			m.workspaceRoot = root
 			if n := len(m.workspaceRows); n == 0 {
 				m.sessionCursor = 0
 			} else if m.sessionCursor >= n {
@@ -1670,9 +1686,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Rebuild rows so the repo disappears immediately rather than
 			// waiting for the next snapshot. Reapply the create overlay so an
 			// in-flight fetch's spinner row is not dropped by the rebuild.
-			rows, mode := buildWorkspaceRows(m.snap, m.cfg)
+			rows, mode, root := buildWorkspaceRows(m.snap, m.cfg)
 			m.workspaceRows = injectPendingCreates(rows, m.pendingCreates)
 			m.launchMode = mode
+			m.workspaceRoot = root
 			if n := len(m.workspaceRows); n == 0 {
 				m.sessionCursor = 0
 			} else if m.sessionCursor >= n {
@@ -1775,6 +1792,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		rows := filterPendingDeletes(msg.rows, m.pendingDeletes)
 		m.workspaceRows = injectPendingCreates(rows, m.pendingCreates)
 		m.launchMode = msg.launchMode
+		m.workspaceRoot = msg.root
 		// Clamp cursor so it never points past the end of the new row list.
 		if n := len(m.workspaceRows); n == 0 {
 			m.sessionCursor = 0
@@ -1965,7 +1983,13 @@ func (m model) View() string {
 	if cfg == nil {
 		cfg = config.Default()
 	}
-	rows, recentByInstance := visibleSessions(m.snap.Sessions, m.recentCollapsed, m.snap.UpdatedAt, cfg.InactiveHideAfter)
+	// Exclude workspace-owned session directories before visibleSessions runs:
+	// they already have their own row in workspaceRows (settings.Merge applies
+	// the same exclusion), so the live-only fallback and the header's
+	// live/recent counts must agree rather than double-counting them. This is
+	// the one call site that filters — visibleSessions itself is untouched.
+	sessions := excludeWorkspaceOwnedSessions(m.snap.Sessions, m.workspaceRoot)
+	rows, recentByInstance := visibleSessions(sessions, m.recentCollapsed, m.snap.UpdatedAt, cfg.InactiveHideAfter)
 	paneW := m.width - 2
 	if paneW < 30 {
 		paneW = 30
@@ -2144,8 +2168,8 @@ func (m model) repoBoundary(dir int) int {
 // mutations to the model.
 func buildWorkspaceRowsCmd(snap state.Snapshot, cfg *config.Config) tea.Cmd {
 	return func() tea.Msg {
-		rows, mode := buildWorkspaceRows(snap, cfg)
-		return workspaceRowsMsg{rows: rows, launchMode: mode}
+		rows, mode, root := buildWorkspaceRows(snap, cfg)
+		return workspaceRowsMsg{rows: rows, launchMode: mode, root: root}
 	}
 }
 
@@ -2159,19 +2183,29 @@ func buildWorkspaceRowsCmd(snap state.Snapshot, cfg *config.Config) tea.Cmd {
 // fallback: unknown rows render as stopped instead of unknown).
 //
 // It also returns the resolved tmux launch mode from workspace config so the
-// caller can keep its launch behaviour in sync with config edits.
+// caller can keep its launch behaviour in sync with config edits, and the
+// resolved workspace root so the caller can exclude workspace-owned session
+// directories from the live-only fallback path.
 //
 // Returns nil rows when no repos are configured (zero-value safe for callers);
-// the launch mode is still resolved (defaulting to ModeWindow).
-func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) ([]settings.Row, tmuxctl.LaunchMode) {
+// the launch mode and workspace root are still resolved in that case —
+// the fallback view (which renders exactly when repos are empty) needs the
+// root to exclude workspace-owned sessions from its own listing.
+func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) ([]settings.Row, tmuxctl.LaunchMode, string) {
 	wsCfg, err := settings.LoadConfig()
 	if err != nil {
-		return nil, tmuxctl.ModeWindow
+		return nil, tmuxctl.ModeWindow, ""
 	}
 	mode := launchModeFor(wsCfg.LaunchMode)
+	root, err := settings.ResolveWorkspaceRoot(wsCfg)
+	if err != nil {
+		// Unresolvable root (e.g. nested inside a git working tree) — disable
+		// the exclusion rather than failing the whole row build.
+		root = ""
+	}
 	if len(wsCfg.Repos) == 0 {
 		// No repos configured — live-only path.
-		return nil, mode
+		return nil, mode, root
 	}
 
 	// Display repos alphabetically by name. Sort the in-memory copy only;
@@ -2222,7 +2256,44 @@ func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) ([]settings.Row
 		}
 	}
 
-	return settings.Merge(wsCfg.Repos, worktreesByRepo, roster, liveTopLevel, tmuxDirs), mode
+	return settings.Merge(wsCfg.Repos, worktreesByRepo, roster, liveTopLevel, tmuxDirs, root), mode, root
+}
+
+// excludeWorkspaceOwnedSessions drops sessions whose Directory lies at or
+// below workspaceRoot from sessions. It is View's counterpart to
+// settings.Merge's own exclusion (settings.filterWorkspaceOwnedWorktrees):
+// without it, a workspace session's per-repo worktree would render twice —
+// once as its workspaceRows entry, once via the live-only fallback path and
+// the header's live/recent counts, both of which are built from this slice.
+//
+// An empty workspaceRoot is a no-op (returns sessions unchanged), matching
+// settings.PathUnderRoot's own empty-root behaviour, so --demo/--status and
+// any install that has not yet resolved a root render exactly as before this
+// exclusion existed. processBellTransitions deliberately runs on the raw,
+// unfiltered m.snap.Sessions rather than through this function — a workspace
+// session that needs attention should still ring the bell.
+func excludeWorkspaceOwnedSessions(sessions []state.SessionView, workspaceRoot string) []state.SessionView {
+	if workspaceRoot == "" || len(sessions) == 0 {
+		return sessions
+	}
+	root, err := pathnorm.Canonical(workspaceRoot)
+	if err != nil {
+		root = workspaceRoot
+	}
+	out := make([]state.SessionView, 0, len(sessions))
+	for _, sv := range sessions {
+		if sv.Directory != "" {
+			dir, err := pathnorm.Canonical(sv.Directory)
+			if err != nil {
+				dir = sv.Directory
+			}
+			if settings.PathUnderRoot(root, dir) {
+				continue
+			}
+		}
+		out = append(out, sv)
+	}
+	return out
 }
 
 // resolvedDefaultHarness returns the configured default harness kind when one
