@@ -19,6 +19,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
+	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 type snapshotMsg state.Snapshot
@@ -35,6 +36,25 @@ type workspaceRowsMsg struct {
 	// even on its zero-repos early return — the exact case where View's
 	// fallback branch needs it to exclude workspace-owned sessions.
 	root string
+}
+
+// viewMode selects which top-level view occupies the full pane: Sessions
+// (worktrees merged across configured repos) or Workspaces (multi-repo
+// bundles and their sessions). Iota order is load-bearing: the zero value
+// maps to viewSessions, keeping existing model{} literals in tests valid
+// without explicit initialisation — the same convention promptMode documents
+// below.
+type viewMode int
+
+const (
+	viewSessions viewMode = iota
+	viewWorkspaces
+)
+
+// wsStatusMsg carries the result of loadWorkspaceStatusCmd: the workspace set
+// merged with live/roster status, ready for the Workspaces view to render.
+type wsStatusMsg struct {
+	statuses []workspace.WorkspaceStatus
 }
 
 // tickMsg is sent by tickCmd on each relative-time refresh interval.
@@ -301,6 +321,57 @@ func (realHarnessOps) Kinds() []harness.Kind {
 	return harness.DefaultRegistry.Kinds()
 }
 
+// storeOps is the injectable seam for workspace persistence, mirroring
+// tmuxOps/gitOps/harnessOps over their real implementations. *workspace.Store
+// satisfies it via realStoreOps. Kept narrow (mirrors the Store's own public
+// surface) so tests can inject a fake instead of driving real XDG paths in a
+// temp directory.
+type storeOps interface {
+	LoadWorkspaces() ([]workspace.Workspace, error)
+	SaveWorkspaces(workspaces []workspace.Workspace) error
+	AddWorkspace(name string) (workspace.Workspace, error)
+	RemoveWorkspace(name string) error
+	AddSession(workspaceName string, session workspace.Session) error
+	RemoveSession(workspaceName, sessionName string) error
+	AttachRepo(workspaceName, repoPath string) error
+	DetachRepo(workspaceName, repoPath string) error
+}
+
+// realStoreOps delegates to a concrete *workspace.Store.
+type realStoreOps struct{ store *workspace.Store }
+
+func (r realStoreOps) LoadWorkspaces() ([]workspace.Workspace, error) {
+	return r.store.LoadWorkspaces()
+}
+
+func (r realStoreOps) SaveWorkspaces(workspaces []workspace.Workspace) error {
+	return r.store.SaveWorkspaces(workspaces)
+}
+
+func (r realStoreOps) AddWorkspace(name string) (workspace.Workspace, error) {
+	return r.store.AddWorkspace(name)
+}
+
+func (r realStoreOps) RemoveWorkspace(name string) error {
+	return r.store.RemoveWorkspace(name)
+}
+
+func (r realStoreOps) AddSession(workspaceName string, session workspace.Session) error {
+	return r.store.AddSession(workspaceName, session)
+}
+
+func (r realStoreOps) RemoveSession(workspaceName, sessionName string) error {
+	return r.store.RemoveSession(workspaceName, sessionName)
+}
+
+func (r realStoreOps) AttachRepo(workspaceName, repoPath string) error {
+	return r.store.AttachRepo(workspaceName, repoPath)
+}
+
+func (r realStoreOps) DetachRepo(workspaceName, repoPath string) error {
+	return r.store.DetachRepo(workspaceName, repoPath)
+}
+
 type model struct {
 	snap            state.Snapshot
 	width           int
@@ -474,13 +545,36 @@ type model struct {
 	switchOrder map[string]int
 	switchSeq   int
 
-	// Injectable seams for tmux, git, and harness operations. Nil values are
-	// replaced with the real implementations in newModel. Tests inject fakes.
-	// Zero-value model{} literals in tests are safe: action Cmds guard on nil
-	// and return an error result rather than panicking.
+	// Workspaces view (Tab) state. view selects which top-level view occupies
+	// the pane; wsStatuses is the merged workspace/session list built by
+	// loadWorkspaceStatusCmd on Init and refreshed on each snapshot.
+	// wsCursor/wsScroll are this view's own cursor and scroll position, kept
+	// separate from sessionCursor/sessionScroll so Tab never disturbs the
+	// other view's position. wsPendingG mirrors pendingG for this view's own
+	// `gg` jump-to-top, kept separate so a `g` pressed in one view can never
+	// arm the other's.
+	view       viewMode
+	wsStatuses []workspace.WorkspaceStatus
+	wsCursor   int
+	wsScroll   int
+	wsPendingG bool
+	// wsBuilding/wsDirty coalesce loadWorkspaceStatusCmd exactly as
+	// rowsBuilding/rowsDirty do for buildWorkspaceRowsCmd: only one load runs
+	// at a time, and a burst of snapshots arriving while one is in flight
+	// collapses into a single follow-up load using the latest snapshot.
+	wsBuilding bool
+	wsDirty    bool
+
+	// Injectable seams for tmux, git, harness, and workspace-store operations.
+	// Nil values are replaced with the real implementations in newModel (store
+	// is wired separately by RunTUI after newModel returns, like viewMarker
+	// and rosterUpserts). Tests inject fakes. Zero-value model{} literals in
+	// tests are safe: action Cmds guard on nil and return an error result
+	// rather than panicking.
 	tmux   tmuxOps
 	gitOp  gitOps
 	harnOp harnessOps
+	store  storeOps
 
 	// prompt/input drive the sessions-pane input bar shared by every prompt
 	// mode (new worktree, fetch branch, repo finder, session switcher, ...).
@@ -992,7 +1086,16 @@ func (m model) Init() tea.Cmd {
 	// of whether repos are configured — it is cheap and avoids a conditional
 	// that would complicate Init.
 	tick := tickCmd()
-	return tea.Batch(waitSnapshot(m.snaps), tick)
+	// Kick off the initial Workspaces-view load so it is ready before the
+	// user ever presses Tab, rather than waiting for the first snapshot.
+	// Gated behind !m.demo (mirroring the snapshotMsg row build below) so
+	// --demo never touches the workspaces store and its capture stays
+	// deterministic.
+	var wsC tea.Cmd
+	if !m.demo {
+		wsC = loadWorkspaceStatusCmd(m.store, m.snap)
+	}
+	return tea.Batch(waitSnapshot(m.snaps), tick, wsC)
 }
 
 func waitSnapshot(ch <-chan state.Snapshot) tea.Cmd {
@@ -1341,6 +1444,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// (b.4) View swap — Tab toggles the whole content area between the
+		// Sessions and Workspaces views. Global; only reachable when no prompt
+		// is active, since the pre-empt block above short-circuits first. Each
+		// view keeps its own cursor/scroll state, so swapping never disturbs
+		// the other view's position.
+		if msg.String() == "tab" {
+			if m.view == viewWorkspaces {
+				m.view = viewSessions
+			} else {
+				m.view = viewWorkspaces
+			}
+			return m, nil
+		}
+
+		// Workspaces-view keys route through their own method rather than
+		// adding arms here, following updateSettings's precedent — this
+		// switch already exceeds the configured gocyclo minimum.
+		if m.view == viewWorkspaces {
+			return m.updateWorkspaceView(msg)
+		}
+
 		// Sessions-focused keys. The sessions pane is the only pane, so every
 		// key reaches this switch once the global/prompt handlers above have
 		// passed on it.
@@ -1564,6 +1688,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		const promptLabelLen = len("fetch branch from origin: ")
 		m.input.Width = max(0, paneInnerWidth(m.width)-promptLabelLen)
 		m.syncSessionScroll()
+		m.syncWsScroll()
 
 	case launchResultMsg:
 		// A launch/resume Cmd completed.
@@ -1783,7 +1908,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				buildC = buildWorkspaceRowsCmd(m.snap, m.cfg)
 			}
 		}
-		return m, tea.Batch(next, bellC, buildC)
+		var wsC tea.Cmd
+		// Same coalescing, same demo gate, for the Workspaces view's status
+		// load — it also touches the workspaces store and must stay out of
+		// the deterministic --demo capture.
+		if !m.demo {
+			if m.wsBuilding {
+				m.wsDirty = true
+			} else {
+				m.wsBuilding = true
+				wsC = loadWorkspaceStatusCmd(m.store, m.snap)
+			}
+		}
+		return m, tea.Batch(next, bellC, buildC, wsC)
 
 	case workspaceRowsMsg:
 		// Apply both optimistic overlays: drop rows awaiting deletion, and
@@ -1804,6 +1941,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rowsDirty = false
 			m.rowsBuilding = true
 			return m, buildWorkspaceRowsCmd(m.snap, m.cfg)
+		}
+		return m, nil
+
+	case wsStatusMsg:
+		m.wsStatuses = msg.statuses
+		// Clamp the Workspaces-view cursor so it never points past the end of
+		// the new entry list (workspace headers + session rows).
+		if n := wsEntryCount(m.wsStatuses); n == 0 {
+			m.wsCursor = 0
+		} else if m.wsCursor >= n {
+			m.wsCursor = n - 1
+		}
+		m.wsBuilding = false
+		if m.wsDirty {
+			m.wsDirty = false
+			m.wsBuilding = true
+			return m, loadWorkspaceStatusCmd(m.store, m.snap)
 		}
 		return m, nil
 
@@ -2033,44 +2187,58 @@ func (m model) View() string {
 	case m.prompt == promptAddRepo:
 		sessionContent = m.renderRepoFinder(paneW, sessionsInnerH)
 	case m.prompt == promptSwitchSession:
-		// Render the worktree list as the backdrop, then composite the floating
-		// switcher box centred over it so the surrounding sessions stay visible.
+		// Render whichever view (Sessions or Workspaces) is active as the
+		// backdrop, then composite the floating switcher box centred over it
+		// so the surrounding view stays visible.
 		now := m.tickNow
 		if now.IsZero() {
 			now = time.Now()
 		}
-		backdrop := m.renderWorkspaceRowsViewport(paneW, sessionsInnerH, m.workspaceRows, m.sessionCursor, now)
+		var backdrop string
+		if m.view == viewWorkspaces {
+			backdrop = m.renderWorkspacesView(paneW, sessionsInnerH)
+		} else {
+			backdrop = m.renderWorkspaceRowsViewport(paneW, sessionsInnerH, m.workspaceRows, m.sessionCursor, now)
+		}
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderSessionPalette(paneW, sessionsInnerH))
 	case m.prompt == promptHelp:
-		// Render the normal session list as the backdrop, then composite the
+		// Render whichever view is active as the backdrop, then composite the
 		// floating help box centred over it so the pane stays visible behind.
 		now := m.tickNow
 		if now.IsZero() {
 			now = time.Now()
 		}
 		var backdrop string
-		if len(m.workspaceRows) > 0 {
+		switch {
+		case m.view == viewWorkspaces:
+			backdrop = m.renderWorkspacesView(paneW, sessionsInnerH)
+		case len(m.workspaceRows) > 0:
 			backdrop = m.renderWorkspaceRowsViewport(paneW, sessionsInnerH, m.workspaceRows, m.sessionCursor, now)
-		} else {
+		default:
 			backdrop = m.renderAllSessions(paneW, rows, recentByInstance)
 		}
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, renderHelp(paneW))
 	case m.prompt == promptSettings:
-		// Render the session list as the backdrop, then composite the settings
-		// modal centred over it so the pane stays visible behind.
+		// Render whichever view is active as the backdrop, then composite the
+		// settings modal centred over it so the pane stays visible behind.
 		now := m.tickNow
 		if now.IsZero() {
 			now = time.Now()
 		}
 		var backdrop string
-		if len(m.workspaceRows) > 0 {
+		switch {
+		case m.view == viewWorkspaces:
+			backdrop = m.renderWorkspacesView(paneW, sessionsInnerH)
+		case len(m.workspaceRows) > 0:
 			backdrop = m.renderWorkspaceRowsViewport(paneW, sessionsInnerH, m.workspaceRows, m.sessionCursor, now)
-		} else {
+		default:
 			backdrop = m.renderAllSessions(paneW, rows, recentByInstance)
 		}
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderSettings(paneW))
 	case m.prompt == promptChooseHarness:
 		sessionContent = m.renderHarnessChooser(paneW, sessionsInnerH)
+	case m.view == viewWorkspaces:
+		sessionContent = m.renderWorkspacesView(paneW, sessionsInnerH)
 	case len(m.workspaceRows) > 0:
 		now := m.tickNow
 		if now.IsZero() {
@@ -2115,8 +2283,15 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 		pulling:         map[string]bool{},
 		cfg:             cfg,
 
+		// Init always attempts an initial Workspaces-view load (skipped only
+		// under --demo). Starting wsBuilding true means a snapshot arriving
+		// before that load completes coalesces into wsDirty instead of
+		// dispatching a second, concurrent load — see loadWorkspaceStatusCmd.
+		wsBuilding: true,
+
 		// Inject real implementations for tmux, git, and harness operations.
-		// Tests can override these fields with fakes after construction.
+		// Tests can override these fields with fakes after construction. store
+		// is wired separately by RunTUI (mirrors viewMarker/rosterUpserts).
 		tmux:   realTmuxOps{},
 		gitOp:  realGitOps{},
 		harnOp: realHarnessOps{},
@@ -2170,6 +2345,41 @@ func buildWorkspaceRowsCmd(snap state.Snapshot, cfg *config.Config) tea.Cmd {
 	return func() tea.Msg {
 		rows, mode, root := buildWorkspaceRows(snap, cfg)
 		return workspaceRowsMsg{rows: rows, launchMode: mode, root: root}
+	}
+}
+
+// loadWorkspaceStatusCmd returns a tea.Cmd that loads the workspace set from
+// store, joins it to the roster and the live session snapshot via
+// workspace.MergeStatus, and delivers the result as a wsStatusMsg. snap is
+// captured by value at dispatch time, matching buildWorkspaceRowsCmd. store
+// may be nil (no workspace store wired, or --demo/tests) — the load is
+// skipped and an empty result is returned rather than dispatching to a nil
+// interface.
+func loadWorkspaceStatusCmd(store storeOps, snap state.Snapshot) tea.Cmd {
+	return func() tea.Msg {
+		if store == nil {
+			return wsStatusMsg{}
+		}
+		workspaces, err := store.LoadWorkspaces()
+		if err != nil {
+			// Non-fatal: render with an empty workspace set rather than
+			// failing the whole load.
+			workspaces = nil
+		}
+		roster, err := settings.Load()
+		if err != nil {
+			roster = map[string]settings.RosterEntry{}
+		}
+		// Pre-filter to top-level sessions only, matching buildWorkspaceRows'
+		// contract for settings.Merge (MergeStatus documents the same
+		// requirement).
+		var liveTopLevel []state.SessionView
+		for _, sv := range snap.Sessions {
+			if !shouldHideSubagent(sv) && sv.ParentID == "" {
+				liveTopLevel = append(liveTopLevel, sv)
+			}
+		}
+		return wsStatusMsg{statuses: workspace.MergeStatus(workspaces, roster, liveTopLevel)}
 	}
 }
 

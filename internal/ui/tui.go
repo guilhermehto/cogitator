@@ -15,6 +15,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/singleinstance"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/supervisor"
+	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) error {
@@ -78,12 +79,28 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 	rec := settings.NewRecorder()
 	rec.Run(ctx, store.Subscribe())
 
+	// Construct the workspace store beside the roster recorder: it is the
+	// single writer of workspaces.json for the lifetime of this process,
+	// mirroring how rec is the single writer of roster.json. A construction
+	// failure (e.g. an unresolvable config directory) is non-fatal — the
+	// Workspaces view falls back to its empty state rather than aborting
+	// startup, exactly like the roster-restore and single-instance guards
+	// above.
+	var wsStore storeOps
+	if s, err := workspace.NewStore(); err != nil {
+		logger.Warn("workspace store init failed; workspaces view will be unavailable", "err", err)
+	} else {
+		wsStore = realStoreOps{store: s}
+	}
+
 	m := newModel(store.Subscribe(), cfg, bellEnabled, debug)
 	// Wire the recorder's Upserts channel so the model can inject create-time
 	// roster entries (e.g. for Codex worktrees that are never live-discovered).
 	m.rosterUpserts = rec.Upserts
 	// Wire the store so jump/resume clears the AttnFinished badge.
 	m.viewMarker = store
+	// Wire the workspace store so the Workspaces view can load workspaces.json.
+	m.store = wsStore
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
 }
