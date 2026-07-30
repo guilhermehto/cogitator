@@ -96,6 +96,58 @@ func FetchAndAddWorktree(repoPath, branch, dest string) (string, error) {
 	return canonical, nil
 }
 
+// CheckRefFormat validates branch as a legal git branch name by running
+// `git check-ref-format --branch <branch>`. This is the authoritative check —
+// unlike workspace.ValidBranchShape's conservative pure pre-check, it enforces
+// git's full ref-name grammar (no "~^:?*[\", no "@{", no trailing ".lock",
+// etc.). It needs no repository context, since ref-name syntax does not
+// depend on any particular repo. Returns a non-nil error (wrapping git's
+// message) when branch is not a valid branch name.
+func CheckRefFormat(branch string) error {
+	if _, err := runGit("", "check-ref-format", "--branch", branch); err != nil {
+		return fmt.Errorf("invalid branch name %q: %w", branch, err)
+	}
+	return nil
+}
+
+// BranchExists reports whether a local branch named branch already exists in
+// the repository rooted at repoPath. It runs `git rev-parse --verify --quiet
+// refs/heads/<branch>`, the same probe defaultBranch uses to test for "main"
+// and "master".
+func BranchExists(repoPath, branch string) bool {
+	_, err := runGit(repoPath, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
+	return err == nil
+}
+
+// PruneWorktrees removes administrative files for worktrees under repoPath
+// whose working directory is gone, by running `git worktree prune`. It is
+// best-effort rollback cleanup: callers that already have a primary error to
+// report should ignore a non-nil return here rather than let it mask that
+// error.
+func PruneWorktrees(repoPath string) error {
+	if _, err := runGit(repoPath, "worktree", "prune"); err != nil {
+		return fmt.Errorf("git worktree prune: %w", err)
+	}
+	return nil
+}
+
+// DeleteBranch deletes branch in the repository rooted at repoPath, running
+// `git branch -D <branch>` (or `-d` when force is false). It is best-effort
+// rollback cleanup for callers that need to guarantee a branch is gone even
+// when an earlier RemoveWorktree call itself failed and so never reached its
+// own branch-delete step; a non-nil return (e.g. branch already gone) should
+// not mask a primary error.
+func DeleteBranch(repoPath, branch string, force bool) error {
+	flag := "-d"
+	if force {
+		flag = "-D"
+	}
+	if _, err := runGit(repoPath, "branch", flag, branch); err != nil {
+		return fmt.Errorf("git branch %s %s: %w", flag, branch, err)
+	}
+	return nil
+}
+
 // Pull fast-forwards branch in the worktree at worktreePath from origin by
 // running `git pull --ff-only --no-tags --autostash origin <branch>` there.
 //

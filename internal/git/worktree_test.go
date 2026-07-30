@@ -627,3 +627,104 @@ func TestPull_DivergedHistoryErrors(t *testing.T) {
 		t.Fatal("expected --ff-only Pull to refuse a diverged branch")
 	}
 }
+
+// TestCheckRefFormat_AcceptsLegalNames verifies that ordinary and slash-
+// namespaced branch names, plus a slug-shaped name (the only kind
+// workspace.SessionBranch ever produces), all pass.
+func TestCheckRefFormat_AcceptsLegalNames(t *testing.T) {
+	for _, name := range []string{"main", "feature/foo", "payments-migration"} {
+		if err := git.CheckRefFormat(name); err != nil {
+			t.Errorf("CheckRefFormat(%q): unexpected error: %v", name, err)
+		}
+	}
+}
+
+// TestCheckRefFormat_RejectsIllegalNames verifies that names git's ref-name
+// grammar rejects (leading '-', embedded "..", trailing ".lock") are reported
+// as errors rather than silently accepted, and that no repository is needed
+// to run the check.
+func TestCheckRefFormat_RejectsIllegalNames(t *testing.T) {
+	for _, name := range []string{"-bad", "bad..name", "bad.lock", ""} {
+		if err := git.CheckRefFormat(name); err == nil {
+			t.Errorf("CheckRefFormat(%q): expected error, got nil", name)
+		}
+	}
+}
+
+// TestBranchExists_TrueAfterCreation verifies BranchExists reports true for a
+// branch checked out by AddWorktree and false for a name that was never
+// created, mirroring the probe defaultBranch uses for "main"/"master".
+func TestBranchExists_TrueAfterCreation(t *testing.T) {
+	repo := initRepo(t)
+
+	if git.BranchExists(repo, "feature") {
+		t.Error("BranchExists(feature) = true before the branch is created")
+	}
+
+	wtDir := filepath.Join(t.TempDir(), "feature-wt")
+	if _, err := git.AddWorktree(repo, "feature", wtDir); err != nil {
+		t.Fatalf("AddWorktree: %v", err)
+	}
+
+	if !git.BranchExists(repo, "feature") {
+		t.Error("BranchExists(feature) = false after the branch is created")
+	}
+	if git.BranchExists(repo, "never-created") {
+		t.Error("BranchExists(never-created) = true, want false")
+	}
+}
+
+// TestPruneWorktrees_RemovesStaleRegistration verifies that after a worktree
+// directory is deleted out from under git (bypassing `worktree remove`),
+// PruneWorktrees drops it from `git worktree list`.
+func TestPruneWorktrees_RemovesStaleRegistration(t *testing.T) {
+	repo := initRepo(t)
+
+	wtDir := filepath.Join(t.TempDir(), "feature-wt")
+	if _, err := git.AddWorktree(repo, "feature", wtDir); err != nil {
+		t.Fatalf("AddWorktree: %v", err)
+	}
+	if err := os.RemoveAll(wtDir); err != nil {
+		t.Fatalf("remove worktree dir by hand: %v", err)
+	}
+
+	if err := git.PruneWorktrees(repo); err != nil {
+		t.Fatalf("PruneWorktrees: %v", err)
+	}
+
+	wts, err := git.ListWorktrees(repo)
+	if err != nil {
+		t.Fatalf("ListWorktrees: %v", err)
+	}
+	if len(wts) != 1 {
+		t.Fatalf("expected 1 worktree after prune, got %d: %v", len(wts), wts)
+	}
+}
+
+// TestDeleteBranch_RemovesBranch verifies DeleteBranch removes a branch that
+// is not checked out by any worktree, and that force=true removes an
+// unmerged one that `-d` would refuse.
+func TestDeleteBranch_RemovesBranch(t *testing.T) {
+	repo := initRepo(t)
+
+	wtDir := filepath.Join(t.TempDir(), "feature-wt")
+	gotPath, err := git.AddWorktree(repo, "feature", wtDir)
+	if err != nil {
+		t.Fatalf("AddWorktree: %v", err)
+	}
+	// Add an unmerged commit so a non-force delete would be refused.
+	commitFile(t, gotPath, "scratch.txt", "wip", "unmerged work")
+	if err := git.RemoveWorktree(repo, gotPath, "", false); err != nil {
+		t.Fatalf("RemoveWorktree (leave branch behind): %v", err)
+	}
+	if !git.BranchExists(repo, "feature") {
+		t.Fatal("branch should still exist after removing the worktree without deleting it")
+	}
+
+	if err := git.DeleteBranch(repo, "feature", true); err != nil {
+		t.Fatalf("DeleteBranch: %v", err)
+	}
+	if git.BranchExists(repo, "feature") {
+		t.Error("branch still exists after DeleteBranch")
+	}
+}
