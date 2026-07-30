@@ -1,4 +1,4 @@
-// Package workspace manages durable user configuration and the session roster
+// Package settings manages durable user configuration and the session roster
 // for cogitator. Only facts that survive a reboot are persisted here: the list
 // of configured repo roots, the preferred harness, and (in roster.go) the
 // last-known state of each worktree.
@@ -8,7 +8,7 @@
 // unset or empty.
 //
 // No import of bubbletea or internal/ui is permitted in this package.
-package workspace
+package settings
 
 import (
 	"encoding/json"

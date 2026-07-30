@@ -15,9 +15,9 @@ import (
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/git"
 	"github.com/guilhermehto/cogitator/internal/harness"
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
-	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 type snapshotMsg state.Snapshot
@@ -26,7 +26,7 @@ type snapshotMsg state.Snapshot
 // workspace-row build completes. It carries the merged row list and the
 // resolved tmux launch mode so the Update handler can apply them atomically.
 type workspaceRowsMsg struct {
-	rows       []workspace.Row
+	rows       []settings.Row
 	launchMode tmuxctl.LaunchMode
 }
 
@@ -236,8 +236,8 @@ type viewMarker interface {
 // launchModeFor maps the workspace config's LaunchMode to the tmuxctl mode used
 // by the action Cmds. LaunchWindow maps to ModeWindow; everything else
 // (including the empty default) maps to ModeSession.
-func launchModeFor(m workspace.LaunchMode) tmuxctl.LaunchMode {
-	if m == workspace.LaunchWindow {
+func launchModeFor(m settings.LaunchMode) tmuxctl.LaunchMode {
+	if m == settings.LaunchWindow {
 		return tmuxctl.ModeWindow
 	}
 	return tmuxctl.ModeSession
@@ -306,10 +306,10 @@ type model struct {
 	cfg             *config.Config
 
 	// Workspace / worktree fields.
-	// workspaceRows is the merged list of worktree rows built by workspace.Merge
+	// workspaceRows is the merged list of worktree rows built by settings.Merge
 	// on each snapshot and on each tickMsg. It is nil when no repos are
 	// configured (zero value is safe — View() guards on len > 0).
-	workspaceRows []workspace.Row
+	workspaceRows []settings.Row
 	// sessionCursor is the index into the visible worktree rows list that
 	// currently holds keyboard focus. Zero value (0) is safe.
 	sessionCursor int
@@ -354,14 +354,14 @@ type model struct {
 	// working copy of the persisted config, snapshotted on open and written
 	// back on each change. An empty settingsDefaultHarness means "always ask".
 	settingsDefaultHarness string
-	settingsLaunchMode     workspace.LaunchMode
+	settingsLaunchMode     settings.LaunchMode
 	// settingsErr holds the last config-save error shown in the settings modal
 	// (empty when the last write succeeded).
 	settingsErr string
 	// rosterUpserts is the channel used to inject create-time roster entries
-	// into the recorder without calling workspace.Save directly. Nil when the
+	// into the recorder without calling settings.Save directly. Nil when the
 	// recorder is not wired (e.g. in tests that don't need roster writes).
-	rosterUpserts chan<- workspace.RosterEntry
+	rosterUpserts chan<- settings.RosterEntry
 	// viewMarker reports a session as viewed by the user (jump/resume) so the
 	// store can clear its AttnFinished badge. nil in tests that don't exercise
 	// the launch path; the handler guards on nil.
@@ -369,7 +369,7 @@ type model struct {
 	// deleteTarget is the worktree row captured when the user presses 'D' to
 	// begin the two-step delete confirmation. Zero value when no delete is in
 	// progress. Cleared on cancel and on dispatch of the delete Cmd.
-	deleteTarget workspace.Row
+	deleteTarget settings.Row
 	// deleteMergeInfo is the human-readable branch merge status shown in the
 	// delete confirmation prompts (e.g. "merged into main"). Empty until the
 	// async probe (mergeStatusCmd) returns; rendered as "checking…" meanwhile.
@@ -406,7 +406,7 @@ type model struct {
 	// While a path is pending, workspaceRowsMsg filters it out so an in-flight
 	// snapshot rebuild (the worktree still exists on disk until git finishes)
 	// cannot resurrect the row. Entries clear on deletion success or failure.
-	pendingDeletes map[string]workspace.Row
+	pendingDeletes map[string]settings.Row
 	// pendingCreates tracks worktrees being created ('n') or fetched ('F') that
 	// do not exist on disk yet, keyed by createKey(repo, branch). Each is shown
 	// as an optimistic spinner row injected into the table until newWorktreeCmd
@@ -445,7 +445,7 @@ type model struct {
 	// indexes those slices, holding the current fuzzy-filtered view ordered
 	// best-first; sessionPaletteCursor indexes sessionPaletteMatches. Zero values
 	// are safe (palette closed).
-	sessionPaletteRows    []workspace.Row
+	sessionPaletteRows    []settings.Row
 	sessionPaletteLabels  []string
 	sessionPaletteMatches []int
 	sessionPaletteCursor  int
@@ -482,7 +482,7 @@ type model struct {
 //   - no window: EnsureWindow → Select
 //
 // The function is a tea.Cmd (runs off the UI goroutine).
-func launchCmd(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl.LaunchMode, defaultKind string) tea.Cmd {
+func launchCmd(ops tmuxOps, row settings.Row, harnOp harnessOps, mode tmuxctl.LaunchMode, defaultKind string) tea.Cmd {
 	inner := launchInner(ops, row, harnOp, mode, defaultKind)
 	return func() tea.Msg {
 		res := inner()
@@ -502,7 +502,7 @@ func launchCmd(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl.L
 // overrideKind is the new kind when an override happened and empty otherwise,
 // so callers upsert the roster only on a real switch. Falls back to opencode
 // when the harness cannot be resolved.
-func launchArgv(row workspace.Row, harnOp harnessOps, defaultKind string) (argv []string, overrideKind harness.Kind) {
+func launchArgv(row settings.Row, harnOp harnessOps, defaultKind string) (argv []string, overrideKind harness.Kind) {
 	kind := harness.Kind(row.Harness)
 	if kind == "" {
 		kind = harness.KindOpenCode
@@ -528,7 +528,7 @@ func launchArgv(row workspace.Row, harnOp harnessOps, defaultKind string) (argv 
 	return argv, overrideKind
 }
 
-func launchInner(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl.LaunchMode, defaultKind string) func() launchResultMsg {
+func launchInner(ops tmuxOps, row settings.Row, harnOp harnessOps, mode tmuxctl.LaunchMode, defaultKind string) func() launchResultMsg {
 	return func() launchResultMsg {
 		if ops == nil || !ops.Available() {
 			return launchResultMsg{dir: row.Worktree, err: tmuxctl.ErrNotAvailable}
@@ -753,13 +753,13 @@ func (m *model) addPulling(path string) {
 // returning a user-facing reason when it cannot. A worktree that is not yet on
 // disk (creating) or whose directory is missing has nowhere to run git; a
 // detached HEAD (empty branch) has no branch name to pull from origin.
-func canPullWorktree(row workspace.Row) (bool, string) {
+func canPullWorktree(row settings.Row) (bool, string) {
 	switch {
 	case row.Worktree == "":
 		return false, "no worktree selected"
-	case row.State == workspace.StateCreating:
+	case row.State == settings.StateCreating:
 		return false, "worktree is still being created"
-	case row.State == workspace.StateMissing:
+	case row.State == settings.StateMissing:
 		return false, "worktree directory is missing — cannot pull"
 	case row.Branch == "":
 		return false, "cannot pull: detached HEAD has no branch"
@@ -770,9 +770,9 @@ func canPullWorktree(row workspace.Row) (bool, string) {
 // removeWorktreeRow optimistically drops target's row from the visible table
 // and records it in pendingDeletes so a failed deletion can restore it. The
 // session cursor is clamped so it never points past the shortened list.
-func (m *model) removeWorktreeRow(target workspace.Row) {
+func (m *model) removeWorktreeRow(target settings.Row) {
 	if m.pendingDeletes == nil {
-		m.pendingDeletes = map[string]workspace.Row{}
+		m.pendingDeletes = map[string]settings.Row{}
 	}
 	m.pendingDeletes[target.Worktree] = target
 	remaining := m.workspaceRows[:0:0]
@@ -798,14 +798,14 @@ func (m *model) removeWorktreeRow(target workspace.Row) {
 // out-of-sequence index, making j/k navigation skip over it. The session cursor
 // is nudged so it keeps pointing at the same row. The next snapshot rebuild
 // reconciles exact intra-repo ordering.
-func (m *model) restoreWorktreeRow(saved workspace.Row) {
+func (m *model) restoreWorktreeRow(saved settings.Row) {
 	insertAt := len(m.workspaceRows)
 	for i, row := range m.workspaceRows {
 		if row.Repo == saved.Repo {
 			insertAt = i + 1
 		}
 	}
-	m.workspaceRows = append(m.workspaceRows, workspace.Row{})
+	m.workspaceRows = append(m.workspaceRows, settings.Row{})
 	copy(m.workspaceRows[insertAt+1:], m.workspaceRows[insertAt:])
 	m.workspaceRows[insertAt] = saved
 	if insertAt <= m.sessionCursor {
@@ -818,7 +818,7 @@ func (m *model) restoreWorktreeRow(saved workspace.Row) {
 // removing yet; without this filter the row would flash back into the table
 // between the confirmation and the deletion completing. Returns rows unchanged
 // when nothing is pending.
-func filterPendingDeletes(rows []workspace.Row, pending map[string]workspace.Row) []workspace.Row {
+func filterPendingDeletes(rows []settings.Row, pending map[string]settings.Row) []settings.Row {
 	if len(pending) == 0 {
 		return rows
 	}
@@ -879,7 +879,7 @@ func (m *model) clearPendingCreate(repo, branch string) {
 	}
 	filtered := m.workspaceRows[:0:0]
 	for _, row := range m.workspaceRows {
-		if row.State == workspace.StateCreating && row.Repo == repo && row.Branch == branch {
+		if row.State == settings.StateCreating && row.Repo == repo && row.Branch == branch {
 			continue
 		}
 		filtered = append(filtered, row)
@@ -899,7 +899,7 @@ func (m *model) clearPendingCreate(repo, branch string) {
 // that has appeared, or a placeholder already injected, is never duplicated.
 // Placeholders are appended in a stable repo+branch order to avoid frame-to-
 // frame jitter when several creates run at once.
-func injectPendingCreates(rows []workspace.Row, pending map[string]pendingCreate) []workspace.Row {
+func injectPendingCreates(rows []settings.Row, pending map[string]pendingCreate) []settings.Row {
 	if len(pending) == 0 {
 		return rows
 	}
@@ -922,11 +922,11 @@ func injectPendingCreates(rows []workspace.Row, pending map[string]pendingCreate
 		if present {
 			continue
 		}
-		out = append(out, workspace.Row{
+		out = append(out, settings.Row{
 			Repo:     pc.repo,
 			Worktree: pc.dest,
 			Branch:   pc.branch,
-			State:    workspace.StateCreating,
+			State:    settings.StateCreating,
 		})
 	}
 	return out
@@ -936,11 +936,11 @@ func injectPendingCreates(rows []workspace.Row, pending map[string]pendingCreate
 // reason when it may not. The repository's primary worktree (Worktree == Repo)
 // and rows not associated with a configured repo are protected: git refuses the
 // former, and the latter has no repo root to run `git worktree remove` from.
-func canDeleteWorktree(row workspace.Row) (bool, string) {
+func canDeleteWorktree(row settings.Row) (bool, string) {
 	if row.Worktree == "" {
 		return false, "no worktree selected"
 	}
-	if row.State == workspace.StateCreating {
+	if row.State == settings.StateCreating {
 		return false, "worktree is still being created"
 	}
 	if row.Repo == "" {
@@ -1164,7 +1164,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.prompt = promptIdle
-				m.deleteTarget = workspace.Row{}
+				m.deleteTarget = settings.Row{}
 				m.deleteMergeInfo = ""
 				return m, nil
 
@@ -1175,7 +1175,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if msg.String() == "y" || msg.String() == "Y" {
 					target := m.deleteTarget
 					m.prompt = promptIdle
-					m.deleteTarget = workspace.Row{}
+					m.deleteTarget = settings.Row{}
 					m.deleteMergeInfo = ""
 					// Optimistically drop the row now: git worktree removal can
 					// take a few seconds, and leaving the row visible looks like
@@ -1187,7 +1187,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, deleteWorktreeCmd(m.tmux, m.gitOp, target.Repo, target.Worktree, target.Branch, m.launchMode, m.deleteForce)
 				}
 				m.prompt = promptIdle
-				m.deleteTarget = workspace.Row{}
+				m.deleteTarget = settings.Row{}
 				m.deleteMergeInfo = ""
 				return m, nil
 
@@ -1226,11 +1226,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.tmuxHint = "tmux not available — start cogitator inside a tmux session to use jump/resume"
 						return m, nil
 					}
-					if row.State == workspace.StateMissing {
+					if row.State == settings.StateMissing {
 						m.tmuxHint = "worktree directory is missing — cannot resume"
 						return m, nil
 					}
-					if row.State == workspace.StateCreating {
+					if row.State == settings.StateCreating {
 						m.tmuxHint = "worktree is still being created…"
 						return m, nil
 					}
@@ -1386,13 +1386,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			row := m.workspaceRows[m.sessionCursor]
 
 			// Missing rows cannot be resumed (directory absent from disk).
-			if row.State == workspace.StateMissing {
+			if row.State == settings.StateMissing {
 				m.tmuxHint = "worktree directory is missing — cannot resume"
 				return m, nil
 			}
 
 			// Pending-create placeholder rows are not on disk yet.
-			if row.State == workspace.StateCreating {
+			if row.State == settings.StateCreating {
 				m.tmuxHint = "worktree is still being created…"
 				return m, nil
 			}
@@ -1490,7 +1490,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Resolve force-delete once, here, so the confirm prompt's
 			// data-loss warning and the eventual removal agree on the flag.
 			m.deleteForce = true
-			if wsCfg, err := workspace.LoadConfig(); err == nil {
+			if wsCfg, err := settings.LoadConfig(); err == nil {
 				m.deleteForce = wsCfg.ForceDeleteEnabled()
 			}
 			m.prompt = promptConfirmDeleteWorktree
@@ -1565,7 +1565,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// status display reflect what is now running. Mirrors the create-time
 		// roster write; Title/SessionID refresh on the next discovery snapshot.
 		if msg.launched && msg.harnessKind != "" && msg.dir != "" && m.rosterUpserts != nil {
-			entry := workspace.RosterEntry{
+			entry := settings.RosterEntry{
 				Dir:          msg.dir,
 				Harness:      msg.harnessKind,
 				Provider:     msg.harnessKind,
@@ -1600,7 +1600,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if kind == "" {
 					kind = string(harness.KindOpenCode)
 				}
-				entry := workspace.RosterEntry{
+				entry := settings.RosterEntry{
 					Dir:          msg.canonDest,
 					Harness:      kind,
 					Provider:     kind,
@@ -1710,7 +1710,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// deletion was confirmed; remove it again defensively (idempotent) in
 		// case it was never optimistically removed (e.g. a direct dispatch).
 		delete(m.pendingDeletes, msg.path)
-		var remaining []workspace.Row
+		var remaining []settings.Row
 		for _, row := range m.workspaceRows {
 			if row.Worktree != msg.path {
 				remaining = append(remaining, row)
@@ -1873,7 +1873,7 @@ func (m *model) closeSessionPalette() {
 // recordSessionSwitch marks a worktree as the most recently jumped to or
 // resumed, so the ctrl+P switcher can order rows most-recently-used first.
 // Rows with no worktree path (nothing to key on) are ignored.
-func (m *model) recordSessionSwitch(row workspace.Row) {
+func (m *model) recordSessionSwitch(row settings.Row) {
 	if row.Worktree == "" {
 		return
 	}
@@ -1889,8 +1889,8 @@ func (m *model) recordSessionSwitch(row workspace.Row) {
 // order for worktrees never jumped to this run. startOnPrevious is true when
 // both of the top two rows have a recorded switch — i.e. a genuine "previous"
 // session exists — so the palette cursor should start on row 1.
-func (m model) orderedSessionRows() (rows []workspace.Row, startOnPrevious bool) {
-	rows = append([]workspace.Row(nil), m.workspaceRows...)
+func (m model) orderedSessionRows() (rows []settings.Row, startOnPrevious bool) {
+	rows = append([]settings.Row(nil), m.workspaceRows...)
 	sort.SliceStable(rows, func(i, j int) bool {
 		si, oi := m.switchOrder[rows[i].Worktree]
 		sj, oj := m.switchOrder[rows[j].Worktree]
@@ -1909,7 +1909,7 @@ func (m model) orderedSessionRows() (rows []workspace.Row, startOnPrevious bool)
 
 // hasSwitchRecord reports whether the row's worktree has been jumped to or
 // resumed this run.
-func (m model) hasSwitchRecord(row workspace.Row) bool {
+func (m model) hasSwitchRecord(row settings.Row) bool {
 	_, ok := m.switchOrder[row.Worktree]
 	return ok
 }
@@ -1918,7 +1918,7 @@ func (m model) hasSwitchRecord(row workspace.Row) bool {
 // session switcher: the repo's base name and the branch, space-separated. The
 // repo path falls back to the worktree path when Repo is unset, matching the
 // fallback used by the 'n'/'F'/'R' handlers.
-func sessionPaletteLabel(row workspace.Row) string {
+func sessionPaletteLabel(row settings.Row) string {
 	repo := row.Repo
 	if repo == "" {
 		repo = row.Worktree
@@ -2086,7 +2086,7 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 		bellEnabled:     bellEnabled,
 		debug:           debug,
 		bellSent:        map[rowKey]state.Attention{},
-		pendingDeletes:  map[string]workspace.Row{},
+		pendingDeletes:  map[string]settings.Row{},
 		pendingCreates:  map[string]pendingCreate{},
 		pulling:         map[string]bool{},
 		cfg:             cfg,
@@ -2106,7 +2106,7 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 // current position: dir > 0 jumps to the first row of the next repo group,
 // dir < 0 to the first row of the previous group (or the current group's first
 // row when the cursor sits mid-group, matching vim's section motion). Rows are
-// contiguous by Repo (workspace.Merge groups them), so a group begins wherever
+// contiguous by Repo (settings.Merge groups them), so a group begins wherever
 // Repo differs from the previous row. Returns the cursor unchanged when there
 // is no group in that direction.
 func (m model) repoBoundary(dir int) int {
@@ -2150,7 +2150,7 @@ func buildWorkspaceRowsCmd(snap state.Snapshot, cfg *config.Config) tea.Cmd {
 }
 
 // buildWorkspaceRows loads workspace config, roster, git worktrees, and tmux
-// window dirs, then calls workspace.Merge to produce the merged row list. It
+// window dirs, then calls settings.Merge to produce the merged row list. It
 // is called on every snapshot update so the list stays in sync with live
 // session changes.
 //
@@ -2163,8 +2163,8 @@ func buildWorkspaceRowsCmd(snap state.Snapshot, cfg *config.Config) tea.Cmd {
 //
 // Returns nil rows when no repos are configured (zero-value safe for callers);
 // the launch mode is still resolved (defaulting to ModeWindow).
-func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) ([]workspace.Row, tmuxctl.LaunchMode) {
-	wsCfg, err := workspace.LoadConfig()
+func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) ([]settings.Row, tmuxctl.LaunchMode) {
+	wsCfg, err := settings.LoadConfig()
 	if err != nil {
 		return nil, tmuxctl.ModeWindow
 	}
@@ -2197,14 +2197,14 @@ func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) ([]workspace.Ro
 		worktreesByRepo[repo.Path] = wts
 	}
 
-	roster, err := workspace.Load()
+	roster, err := settings.Load()
 	if err != nil {
 		// Non-fatal: proceed with an empty roster.
-		roster = map[string]workspace.RosterEntry{}
+		roster = map[string]settings.RosterEntry{}
 	}
 
 	// Pre-filter to top-level sessions only (shouldHideSubagent is private to
-	// the ui package; workspace.Merge trusts the caller to do this filtering).
+	// the ui package; settings.Merge trusts the caller to do this filtering).
 	var liveTopLevel []state.SessionView
 	for _, sv := range snap.Sessions {
 		if !shouldHideSubagent(sv) && sv.ParentID == "" {
@@ -2222,7 +2222,7 @@ func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) ([]workspace.Ro
 		}
 	}
 
-	return workspace.Merge(wsCfg.Repos, worktreesByRepo, roster, liveTopLevel, tmuxDirs), mode
+	return settings.Merge(wsCfg.Repos, worktreesByRepo, roster, liveTopLevel, tmuxDirs), mode
 }
 
 // resolvedDefaultHarness returns the configured default harness kind when one
@@ -2230,7 +2230,7 @@ func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) ([]workspace.Ro
 // unregistered default (e.g. removed or renamed) resolves to "", so callers
 // fall back to the per-launch "always ask" behaviour.
 func resolvedDefaultHarness(harnOp harnessOps) string {
-	wsCfg, err := workspace.LoadConfig()
+	wsCfg, err := settings.LoadConfig()
 	if err != nil || wsCfg.DefaultHarness == "" || harnOp == nil {
 		return ""
 	}
@@ -2252,7 +2252,7 @@ func (m model) startNewWorktree(repoPath, branch, harnessKind string, fromRemote
 	m.harnessChooserKinds = nil
 	m.harnessChooserCursor = 0
 	launchMode := m.launchMode
-	if wsCfg, err := workspace.LoadConfig(); err == nil {
+	if wsCfg, err := settings.LoadConfig(); err == nil {
 		launchMode = launchModeFor(wsCfg.LaunchMode)
 	}
 	// Optimistic spinner row for the duration of the create/fetch.
@@ -2283,17 +2283,17 @@ func settingsHarnessOptions(harnOp harnessOps) []string {
 
 // normalizeSettingsLaunchMode maps the unset launch mode to its effective
 // default (session) so the modal always displays a concrete value.
-func normalizeSettingsLaunchMode(mode workspace.LaunchMode) workspace.LaunchMode {
-	if mode == workspace.LaunchWindow {
-		return workspace.LaunchWindow
+func normalizeSettingsLaunchMode(mode settings.LaunchMode) settings.LaunchMode {
+	if mode == settings.LaunchWindow {
+		return settings.LaunchWindow
 	}
-	return workspace.LaunchSession
+	return settings.LaunchSession
 }
 
 // openSettings snapshots the persisted config into the modal's working copy and
 // opens the settings overlay.
 func (m *model) openSettings() {
-	wsCfg, _ := workspace.LoadConfig()
+	wsCfg, _ := settings.LoadConfig()
 	m.settingsDefaultHarness = wsCfg.DefaultHarness
 	m.settingsLaunchMode = normalizeSettingsLaunchMode(wsCfg.LaunchMode)
 	m.settingsCursor = 0
@@ -2328,15 +2328,15 @@ func (m *model) cycleSetting(delta int) {
 		opts := settingsHarnessOptions(m.harnOp)
 		i := indexOfString(opts, m.settingsDefaultHarness)
 		m.settingsDefaultHarness = opts[wrapIndex(i+delta, len(opts))]
-		m.recordSettingsErr(workspace.SetDefaultHarness(m.settingsDefaultHarness))
+		m.recordSettingsErr(settings.SetDefaultHarness(m.settingsDefaultHarness))
 	case 1:
 		// Only two launch modes, so ±1 always toggles.
-		if m.settingsLaunchMode == workspace.LaunchWindow {
-			m.settingsLaunchMode = workspace.LaunchSession
+		if m.settingsLaunchMode == settings.LaunchWindow {
+			m.settingsLaunchMode = settings.LaunchSession
 		} else {
-			m.settingsLaunchMode = workspace.LaunchWindow
+			m.settingsLaunchMode = settings.LaunchWindow
 		}
-		if err := workspace.SetLaunchMode(m.settingsLaunchMode); err != nil {
+		if err := settings.SetLaunchMode(m.settingsLaunchMode); err != nil {
 			m.recordSettingsErr(err)
 		} else {
 			m.recordSettingsErr(nil)

@@ -11,8 +11,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 var (
@@ -420,7 +420,7 @@ type workspaceDisplayLine struct {
 
 // workspaceDisplayLines expands the flat worktree slice into the visual order
 // used by the sessions pane, inserting one header before each repo group.
-func workspaceDisplayLines(rows []workspace.Row) []workspaceDisplayLine {
+func workspaceDisplayLines(rows []settings.Row) []workspaceDisplayLine {
 	type repoGroup struct {
 		repo string
 		rows []int
@@ -505,14 +505,14 @@ func (m model) workspaceFooterLineCount() int {
 
 // renderWorkspaceRows renders the complete merged worktree list grouped by
 // repo. It remains the unbounded helper used by focused rendering tests.
-func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, now time.Time) string {
+func (m model) renderWorkspaceRows(width int, rows []settings.Row, cursor int, now time.Time) string {
 	return m.renderWorkspaceRowsViewport(width, 0, rows, cursor, now)
 }
 
 // renderWorkspaceRowsViewport renders the merged worktree list within height
 // rows. The Sessions title and active hint/prompt lines are pinned; only the
 // grouped repo/worktree lines scroll.
-func (m model) renderWorkspaceRowsViewport(width, height int, rows []workspace.Row, cursor int, now time.Time) string {
+func (m model) renderWorkspaceRowsViewport(width, height int, rows []settings.Row, cursor int, now time.Time) string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Sessions") + "\n")
 	if len(rows) == 0 {
@@ -551,7 +551,7 @@ func (m model) renderWorkspaceRowsViewport(width, height int, rows []workspace.R
 		row := rows[i]
 		var line string
 		switch {
-		case row.State == workspace.StateCreating:
+		case row.State == settings.StateCreating:
 			line = m.formatCreatingRow(row, width-2)
 		case m.pulling[row.Worktree]:
 			line = m.formatSpinnerRow(row, width-2, "pulling")
@@ -801,7 +801,7 @@ func (m model) renderSessionPalette(fieldW, fieldH int) string {
 // state-coloured branch — so the switcher reads the same as the pane it jumps
 // into. width is the row's cell budget; the line is ellipsis-truncated to fit.
 // The selection band is applied by the caller.
-func (m model) renderPaletteRow(row workspace.Row, label, query string, width int) string {
+func (m model) renderPaletteRow(row settings.Row, label, query string, width int) string {
 	positions, _ := fuzzyMatchPositions(query, label)
 	matched := make(map[int]bool, len(positions))
 	for _, p := range positions {
@@ -827,13 +827,13 @@ func (m model) renderPaletteRow(row workspace.Row, label, query string, width in
 // mirroring how the session list styles a branch by run-state: running branches
 // read in the default foreground, stopped are dimmed, missing/unknown carry
 // their warning colours.
-func paletteBranchStyle(s workspace.RowState) lipgloss.Style {
+func paletteBranchStyle(s settings.RowState) lipgloss.Style {
 	switch s {
-	case workspace.StateRunning:
+	case settings.StateRunning:
 		return lipgloss.NewStyle()
-	case workspace.StateMissing:
+	case settings.StateMissing:
 		return wtMissingStyle
-	case workspace.StateUnknown:
+	case settings.StateUnknown:
 		return wtUnknownStyle
 	default:
 		return wtStoppedStyle
@@ -1079,7 +1079,7 @@ func worktreeSessionWidth(width int) int {
 // branchLabel returns the worktree's branch — the primary, navigable identity
 // for a row — falling back to the worktree directory's base name when the
 // branch is unknown.
-func branchLabel(row workspace.Row) string {
+func branchLabel(row settings.Row) string {
 	if row.Branch != "" {
 		return row.Branch
 	}
@@ -1102,20 +1102,20 @@ func sessionTitleSuffix(title string) string {
 // (stopped / missing / unknown) otherwise. Shared by the session list and the
 // ctrl+P switcher so both speak the same status vocabulary. The returned cell
 // is glyph + trailing space (two cells wide for single-width glyphs).
-func worktreeStatusCell(row workspace.Row) string {
-	if row.State == workspace.StateRunning {
+func worktreeStatusCell(row settings.Row) string {
+	if row.State == settings.StateRunning {
 		return attnLabel(row.Attention, state.SourceLive)
 	}
 	var glyph string
 	var glyphStyle lipgloss.Style
 	switch row.State {
-	case workspace.StateStopped:
+	case settings.StateStopped:
 		glyph = glyphWtStopped
 		glyphStyle = wtStoppedStyle
-	case workspace.StateMissing:
+	case settings.StateMissing:
 		glyph = glyphWtMissing
 		glyphStyle = wtMissingStyle
-	case workspace.StateUnknown:
+	case settings.StateUnknown:
 		glyph = glyphWtUnknown
 		glyphStyle = wtUnknownStyle
 	default:
@@ -1125,14 +1125,14 @@ func worktreeStatusCell(row workspace.Row) string {
 	return glyphStyle.Render(glyph) + " "
 }
 
-// formatWorktreeRow renders a single workspace.Row as a fixed-width line.
+// formatWorktreeRow renders a single settings.Row as a fixed-width line.
 //
 // Columns are status | session | activity. The status column is left-most so
 // the session's status reads first: running rows show the live attention badge
 // (active / permission / question / error), and non-running rows show the
 // worktree run-state glyph (stopped / empty / missing / unknown). This keeps
 // the status in the same place the cursor highlight starts.
-func formatWorktreeRow(now time.Time, row workspace.Row, width int) string {
+func formatWorktreeRow(now time.Time, row settings.Row, width int) string {
 	sessionW := worktreeSessionWidth(width)
 
 	statusCell := worktreeStatusCell(row)
@@ -1141,7 +1141,7 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int) string {
 	// navigate by); the session title trails as muted, truncated text.
 	var titleStr string
 	switch row.State {
-	case workspace.StateRunning:
+	case settings.StateRunning:
 		// Running: branch leads, session title trails muted. When the branch is
 		// unknown, fall back to the title (or worktree dir) as the lead.
 		if row.Branch != "" {
@@ -1151,7 +1151,7 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int) string {
 		} else {
 			titleStr = filepath.Base(row.Worktree)
 		}
-	case workspace.StateStopped:
+	case settings.StateStopped:
 		// Stopped: same layout, dimmed lead.
 		if row.Branch != "" {
 			titleStr = wtStoppedStyle.Render(row.Branch) + sessionTitleSuffix(row.Title)
@@ -1162,9 +1162,9 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int) string {
 			}
 			titleStr = wtStoppedStyle.Render(lead)
 		}
-	case workspace.StateMissing:
+	case settings.StateMissing:
 		titleStr = wtMissingStyle.Render(branchLabel(row) + " (missing)")
-	case workspace.StateUnknown:
+	case settings.StateUnknown:
 		titleStr = wtUnknownStyle.Render(branchLabel(row)) + "  " + wtPathStyle.Render("status unknown")
 	default:
 		titleStr = dimStyle.Render(branchLabel(row))
@@ -1176,7 +1176,7 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int) string {
 
 	// Activity column: relative last-activity for stopped/unknown rows.
 	var activityStr string
-	if !row.LastActivity.IsZero() && (row.State == workspace.StateStopped || row.State == workspace.StateUnknown) {
+	if !row.LastActivity.IsZero() && (row.State == settings.StateStopped || row.State == settings.StateUnknown) {
 		activityStr = dimStyle.Render(formatRelative(now, row.LastActivity))
 	}
 
@@ -1192,7 +1192,7 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int) string {
 // with an animated spinner in the status column. The verb reflects the flow
 // ("fetching…" for 'F', "creating…" for 'n'), looked up from pendingCreates so
 // the synthetic Row needs no extra field.
-func (m model) formatCreatingRow(row workspace.Row, width int) string {
+func (m model) formatCreatingRow(row settings.Row, width int) string {
 	verb := "creating"
 	if pc, ok := m.pendingCreates[createKey(row.Repo, row.Branch)]; ok && pc.fromRemote {
 		verb = "fetching"
@@ -1204,7 +1204,7 @@ func (m model) formatCreatingRow(row workspace.Row, width int) string {
 // status column and a "(<verb>…)" suffix, signalling an in-flight git operation
 // (creating/fetching a worktree, or pulling its branch). The frame index comes
 // from the model so successive spinnerTickMsgs animate it.
-func (m model) formatSpinnerRow(row workspace.Row, width int, verb string) string {
+func (m model) formatSpinnerRow(row settings.Row, width int, verb string) string {
 	sessionW := worktreeSessionWidth(width)
 
 	glyph := "⠋"

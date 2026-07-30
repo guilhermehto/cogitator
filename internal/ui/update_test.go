@@ -13,9 +13,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/guilhermehto/cogitator/internal/config"
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
-	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 // ---------------------------------------------------------------------------
@@ -95,8 +95,8 @@ func TestSnapshotMsgDoesNotBuildRowsInline(t *testing.T) {
 	ch := make(chan state.Snapshot, 1)
 	m := snapshotModel(ch)
 	// Pre-populate rows so we can detect if they were cleared or rebuilt.
-	m.workspaceRows = []workspace.Row{
-		makeRow("/r", "/r/a", "main", "existing", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m.workspaceRows = []settings.Row{
+		makeRow("/r", "/r/a", "main", "existing", settings.StateStopped, state.AttnInactive, fixedNow),
 	}
 
 	snap := state.Snapshot{Sessions: []state.SessionView{{SessionID: "s1"}}}
@@ -131,8 +131,8 @@ func TestSnapshotMsgDemoSuppressesBuild(t *testing.T) {
 	ch := make(chan state.Snapshot, 1)
 	m := snapshotModel(ch)
 	m.demo = true
-	m.workspaceRows = []workspace.Row{
-		makeRow("/r", "/r/a", "main", "curated", workspace.StateRunning, state.AttnActive, fixedNow),
+	m.workspaceRows = []settings.Row{
+		makeRow("/r", "/r/a", "main", "curated", settings.StateRunning, state.AttnActive, fixedNow),
 	}
 
 	snap := state.Snapshot{Sessions: []state.SessionView{{SessionID: "s1"}}}
@@ -154,7 +154,7 @@ func TestLiveSessionsForMatchesRunningRows(t *testing.T) {
 	rows := demoWorktrees(fixedNow)
 	want := 0
 	for _, r := range rows {
-		if r.State == workspace.StateRunning {
+		if r.State == settings.StateRunning {
 			want++
 		}
 	}
@@ -195,8 +195,8 @@ func TestWorkspaceRowsMsgAppliesRows(t *testing.T) {
 	m := snapshotModel(ch)
 	m.rowsBuilding = true
 
-	rows := []workspace.Row{
-		makeRow("/r", "/r/a", "main", "built", workspace.StateRunning, state.AttnActive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/r", "/r/a", "main", "built", settings.StateRunning, state.AttnActive, fixedNow),
 	}
 	msg := workspaceRowsMsg{rows: rows, launchMode: tmuxctl.ModeSession}
 	updated, _ := m.Update(msg)
@@ -233,8 +233,8 @@ func TestWorkspaceRowsMsgClampsSessionCursor(t *testing.T) {
 	m.rowsBuilding = true
 	m.sessionCursor = 5 // beyond any row list
 
-	rows := []workspace.Row{
-		makeRow("/r", "/r/a", "main", "only", workspace.StateStopped, state.AttnInactive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/r", "/r/a", "main", "only", settings.StateStopped, state.AttnInactive, fixedNow),
 	}
 	updated, _ := m.Update(workspaceRowsMsg{rows: rows})
 	m2 := updated.(model)

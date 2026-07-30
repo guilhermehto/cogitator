@@ -1,4 +1,4 @@
-package workspace_test
+package settings_test
 
 import (
 	"encoding/json"
@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
-	"github.com/guilhermehto/cogitator/internal/workspace"
+	"github.com/guilhermehto/cogitator/internal/settings"
 )
 
 // withConfigEnv sets XDG_CONFIG_HOME to dir for the duration of the test and
@@ -33,7 +33,7 @@ func TestLoadConfig_NoFile(t *testing.T) {
 	tmp := t.TempDir()
 	withConfigEnv(t, tmp)
 
-	cfg, err := workspace.LoadConfig()
+	cfg, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig with no file: %v", err)
 	}
@@ -45,11 +45,11 @@ func TestLoadConfig_NoFile(t *testing.T) {
 	}
 
 	// Saving should create the file.
-	if err := workspace.SaveConfig(cfg); err != nil {
+	if err := settings.SaveConfig(cfg); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}
 
-	path, err := workspace.ConfigPath()
+	path, err := settings.ConfigPath()
 	if err != nil {
 		t.Fatalf("ConfigPath: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestLoadConfig_WithReposAndHarness(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	cfg, err := workspace.LoadConfig()
+	cfg, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestLoadConfig_MissingRepoPaths(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	cfg, err := workspace.LoadConfig()
+	cfg, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig with absent repo: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestLoadConfig_XDGFallback(t *testing.T) {
 	}
 	expected := filepath.Join(home, ".config", "cogitator", "config.json")
 
-	got, err := workspace.ConfigPath()
+	got, err := settings.ConfigPath()
 	if err != nil {
 		t.Fatalf("ConfigPath: %v", err)
 	}
@@ -184,20 +184,20 @@ func TestSaveConfig_RoundTrip(t *testing.T) {
 		}
 	}
 
-	original := workspace.Config{
-		Repos: []workspace.RepoConfig{
+	original := settings.Config{
+		Repos: []settings.RepoConfig{
 			{Path: repo1},
 			{Path: repo2},
 		},
 		DefaultHarness: "opencode",
-		LaunchMode:     workspace.LaunchSession,
+		LaunchMode:     settings.LaunchSession,
 	}
 
-	if err := workspace.SaveConfig(original); err != nil {
+	if err := settings.SaveConfig(original); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}
 
-	loaded, err := workspace.LoadConfig()
+	loaded, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig after save: %v", err)
 	}
@@ -208,8 +208,8 @@ func TestSaveConfig_RoundTrip(t *testing.T) {
 	if loaded.DefaultHarness != "opencode" {
 		t.Errorf("DefaultHarness: got %q, want %q", loaded.DefaultHarness, "opencode")
 	}
-	if loaded.LaunchMode != workspace.LaunchSession {
-		t.Errorf("LaunchMode: got %q, want %q", loaded.LaunchMode, workspace.LaunchSession)
+	if loaded.LaunchMode != settings.LaunchSession {
+		t.Errorf("LaunchMode: got %q, want %q", loaded.LaunchMode, settings.LaunchSession)
 	}
 	for i, r := range loaded.Repos {
 		if r.Missing {
@@ -229,7 +229,7 @@ func TestAddRepo_AppendsAndDedups(t *testing.T) {
 		t.Fatalf("mkdir repo: %v", err)
 	}
 
-	added, err := workspace.AddRepo(repo)
+	added, err := settings.AddRepo(repo)
 	if err != nil {
 		t.Fatalf("AddRepo: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestAddRepo_AppendsAndDedups(t *testing.T) {
 	}
 
 	// Second add of the same path is a no-op duplicate.
-	added, err = workspace.AddRepo(repo)
+	added, err = settings.AddRepo(repo)
 	if err != nil {
 		t.Fatalf("AddRepo (dup): %v", err)
 	}
@@ -246,7 +246,7 @@ func TestAddRepo_AppendsAndDedups(t *testing.T) {
 		t.Fatalf("AddRepo: expected added=false on duplicate")
 	}
 
-	loaded, err := workspace.LoadConfig()
+	loaded, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -276,14 +276,14 @@ func TestAddRepo_PreservesExisting(t *testing.T) {
 		}
 	}
 
-	if _, err := workspace.AddRepo(first); err != nil {
+	if _, err := settings.AddRepo(first); err != nil {
 		t.Fatalf("AddRepo first: %v", err)
 	}
-	if _, err := workspace.AddRepo(second); err != nil {
+	if _, err := settings.AddRepo(second); err != nil {
 		t.Fatalf("AddRepo second: %v", err)
 	}
 
-	loaded, err := workspace.LoadConfig()
+	loaded, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -305,12 +305,12 @@ func TestRemoveRepo_DropsAndReportsMissing(t *testing.T) {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", d, err)
 		}
-		if _, err := workspace.AddRepo(d); err != nil {
+		if _, err := settings.AddRepo(d); err != nil {
 			t.Fatalf("AddRepo %s: %v", d, err)
 		}
 	}
 
-	removed, err := workspace.RemoveRepo(first)
+	removed, err := settings.RemoveRepo(first)
 	if err != nil {
 		t.Fatalf("RemoveRepo: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestRemoveRepo_DropsAndReportsMissing(t *testing.T) {
 		t.Fatalf("RemoveRepo: expected removed=true for tracked repo")
 	}
 
-	loaded, err := workspace.LoadConfig()
+	loaded, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -334,7 +334,7 @@ func TestRemoveRepo_DropsAndReportsMissing(t *testing.T) {
 	}
 
 	// Removing the same path again is a no-op.
-	removed, err = workspace.RemoveRepo(first)
+	removed, err = settings.RemoveRepo(first)
 	if err != nil {
 		t.Fatalf("RemoveRepo (already gone): %v", err)
 	}
@@ -348,10 +348,10 @@ func TestLoadConfigDefaultsLaunchMode(t *testing.T) {
 	withConfigEnv(t, tmp)
 
 	// No launchMode key on disk → empty (caller treats as window).
-	if err := workspace.SaveConfig(workspace.Config{}); err != nil {
+	if err := settings.SaveConfig(settings.Config{}); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}
-	loaded, err := workspace.LoadConfig()
+	loaded, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestLoadConfigUnknownLaunchModeFallsBackToSession(t *testing.T) {
 	tmp := t.TempDir()
 	withConfigEnv(t, tmp)
 
-	path, err := workspace.ConfigPath()
+	path, err := settings.ConfigPath()
 	if err != nil {
 		t.Fatalf("ConfigPath: %v", err)
 	}
@@ -375,12 +375,12 @@ func TestLoadConfigUnknownLaunchModeFallsBackToSession(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	loaded, err := workspace.LoadConfig()
+	loaded, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if loaded.LaunchMode != workspace.LaunchSession {
-		t.Errorf("LaunchMode: got %q, want %q (fallback)", loaded.LaunchMode, workspace.LaunchSession)
+	if loaded.LaunchMode != settings.LaunchSession {
+		t.Errorf("LaunchMode: got %q, want %q (fallback)", loaded.LaunchMode, settings.LaunchSession)
 	}
 }
 
@@ -389,10 +389,10 @@ func TestForceDeleteEnabledDefaultsToTrueWhenUnset(t *testing.T) {
 	withConfigEnv(t, tmp)
 
 	// No forceDeleteWorktree key on disk → force is the default (enabled).
-	if err := workspace.SaveConfig(workspace.Config{}); err != nil {
+	if err := settings.SaveConfig(settings.Config{}); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}
-	loaded, err := workspace.LoadConfig()
+	loaded, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -409,10 +409,10 @@ func TestForceDeleteEnabledRespectsExplicitFalse(t *testing.T) {
 	withConfigEnv(t, tmp)
 
 	disabled := false
-	if err := workspace.SaveConfig(workspace.Config{ForceDeleteWorktree: &disabled}); err != nil {
+	if err := settings.SaveConfig(settings.Config{ForceDeleteWorktree: &disabled}); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}
-	loaded, err := workspace.LoadConfig()
+	loaded, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -429,10 +429,10 @@ func TestForceDeleteEnabledRespectsExplicitFalse(t *testing.T) {
 func TestSetDefaultHarness_RoundTrip(t *testing.T) {
 	withConfigEnv(t, t.TempDir())
 
-	if err := workspace.SetDefaultHarness("codex"); err != nil {
+	if err := settings.SetDefaultHarness("codex"); err != nil {
 		t.Fatalf("SetDefaultHarness: %v", err)
 	}
-	cfg, err := workspace.LoadConfig()
+	cfg, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -440,10 +440,10 @@ func TestSetDefaultHarness_RoundTrip(t *testing.T) {
 		t.Errorf("DefaultHarness = %q, want codex", cfg.DefaultHarness)
 	}
 
-	if err := workspace.SetDefaultHarness(""); err != nil {
+	if err := settings.SetDefaultHarness(""); err != nil {
 		t.Fatalf("SetDefaultHarness clear: %v", err)
 	}
-	cfg, _ = workspace.LoadConfig()
+	cfg, _ = settings.LoadConfig()
 	if cfg.DefaultHarness != "" {
 		t.Errorf("DefaultHarness = %q, want empty after clear", cfg.DefaultHarness)
 	}
@@ -454,17 +454,17 @@ func TestSetDefaultHarness_RoundTrip(t *testing.T) {
 func TestSetLaunchMode_PreservesOtherFields(t *testing.T) {
 	withConfigEnv(t, t.TempDir())
 
-	if err := workspace.SetDefaultHarness("opencode"); err != nil {
+	if err := settings.SetDefaultHarness("opencode"); err != nil {
 		t.Fatalf("seed harness: %v", err)
 	}
-	if err := workspace.SetLaunchMode(workspace.LaunchWindow); err != nil {
+	if err := settings.SetLaunchMode(settings.LaunchWindow); err != nil {
 		t.Fatalf("SetLaunchMode: %v", err)
 	}
-	cfg, err := workspace.LoadConfig()
+	cfg, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.LaunchMode != workspace.LaunchWindow {
+	if cfg.LaunchMode != settings.LaunchWindow {
 		t.Errorf("LaunchMode = %q, want window", cfg.LaunchMode)
 	}
 	if cfg.DefaultHarness != "opencode" {

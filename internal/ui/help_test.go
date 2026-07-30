@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 func TestQuestionMark_OpensHelpOverlay(t *testing.T) {
@@ -32,8 +32,8 @@ func TestHelpOverlay_DismissedByAnyKey(t *testing.T) {
 }
 
 func TestView_HelpOverlaysBoxOverSessions(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 	m.width, m.height = 100, 30
 	m.prompt = promptHelp

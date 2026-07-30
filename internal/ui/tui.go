@@ -11,10 +11,10 @@ import (
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/omp"
 	"github.com/guilhermehto/cogitator/internal/provider"
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/singleinstance"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/supervisor"
-	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) error {
@@ -42,10 +42,10 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 
 	// Seed the store with last-known attention from the persisted roster so
 	// badges (finished, errored, permission, question) survive restarts.
-	// workspace.Load prunes missing dirs and returns an empty map when the
+	// settings.Load prunes missing dirs and returns an empty map when the
 	// file is absent; on any other error we fall back to an empty seed rather
 	// than aborting startup.
-	if roster, err := workspace.Load(); err == nil {
+	if roster, err := settings.Load(); err == nil {
 		store.RestoreSessions(rosterToRestored(roster))
 	} else {
 		logger.Warn("roster load failed; starting without restored badges", "err", err)
@@ -75,7 +75,7 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 	// Start the roster recorder as a distinct subscriber. It drains snapshots
 	// in its own goroutine and writes roster.json atomically off the hot path.
 	// Cancelled by the existing defer cancel() above.
-	rec := workspace.NewRecorder()
+	rec := settings.NewRecorder()
 	rec.Run(ctx, store.Subscribe())
 
 	m := newModel(store.Subscribe(), cfg, bellEnabled, debug)

@@ -5,8 +5,8 @@ import (
 	"time"
 
 	"github.com/guilhermehto/cogitator/internal/harness"
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 func TestRosterToRestored_EmptyRosterYieldsNil(t *testing.T) {
@@ -14,14 +14,14 @@ func TestRosterToRestored_EmptyRosterYieldsNil(t *testing.T) {
 	if got != nil {
 		t.Fatalf("nil roster: expected nil, got %v", got)
 	}
-	got = rosterToRestored(map[string]workspace.RosterEntry{})
+	got = rosterToRestored(map[string]settings.RosterEntry{})
 	if got != nil {
 		t.Fatalf("empty roster: expected nil, got %v", got)
 	}
 }
 
 func TestRosterToRestored_DropsEmptySessionID(t *testing.T) {
-	roster := map[string]workspace.RosterEntry{
+	roster := map[string]settings.RosterEntry{
 		"/repo/a": {Dir: "/repo/a", Harness: "opencode", SessionID: "", Attention: "finished", LastActivity: time.Now()},
 	}
 	got := rosterToRestored(roster)
@@ -32,7 +32,7 @@ func TestRosterToRestored_DropsEmptySessionID(t *testing.T) {
 
 func TestRosterToRestored_DropsNonStickyAttention(t *testing.T) {
 	now := time.Now()
-	roster := map[string]workspace.RosterEntry{
+	roster := map[string]settings.RosterEntry{
 		"/repo/active":   {Dir: "/repo/active", Harness: "opencode", SessionID: "s-active", Attention: "active", LastActivity: now},
 		"/repo/inactive": {Dir: "/repo/inactive", Harness: "opencode", SessionID: "s-inactive", Attention: "inactive", LastActivity: now},
 		"/repo/empty":    {Dir: "/repo/empty", Harness: "opencode", SessionID: "s-empty", Attention: "", LastActivity: now},
@@ -45,7 +45,7 @@ func TestRosterToRestored_DropsNonStickyAttention(t *testing.T) {
 
 func TestRosterToRestored_KeepsStickyAttention(t *testing.T) {
 	now := time.Now()
-	roster := map[string]workspace.RosterEntry{
+	roster := map[string]settings.RosterEntry{
 		"/repo/fin":  {Dir: "/repo/fin", Harness: "opencode", SessionID: "s-fin", Attention: "finished", LastActivity: now},
 		"/repo/err":  {Dir: "/repo/err", Harness: "opencode", SessionID: "s-err", Attention: "errored", LastActivity: now},
 		"/repo/perm": {Dir: "/repo/perm", Harness: "opencode", SessionID: "s-perm", Attention: "permission", LastActivity: now},
@@ -90,7 +90,7 @@ func TestRosterToRestored_HarnessToProviderMapping(t *testing.T) {
 		{"", harness.Kind("opencode")}, // empty defaults to opencode
 	}
 	for _, tc := range cases {
-		roster := map[string]workspace.RosterEntry{
+		roster := map[string]settings.RosterEntry{
 			"/repo/x": {Dir: "/repo/x", Harness: tc.harness, SessionID: "s1", Attention: "finished", LastActivity: now},
 		}
 		got := rosterToRestored(roster)
@@ -106,7 +106,7 @@ func TestRosterToRestored_HarnessToProviderMapping(t *testing.T) {
 
 func TestRosterToRestored_PrefersProviderOverHarness(t *testing.T) {
 	now := time.Now()
-	roster := map[string]workspace.RosterEntry{
+	roster := map[string]settings.RosterEntry{
 		"/repo/x": {
 			Dir:          "/repo/x",
 			Harness:      "opencode",

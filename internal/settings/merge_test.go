@@ -1,4 +1,4 @@
-package workspace_test
+package settings_test
 
 import (
 	"os"
@@ -9,8 +9,8 @@ import (
 	"github.com/guilhermehto/cogitator/internal/git"
 	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 // mustDir creates a temporary subdirectory and returns its canonical path.
@@ -51,8 +51,8 @@ func makeSessionWithProvider(dir, sessionID, title string, src state.Source, act
 }
 
 // makeRosterEntry builds a RosterEntry for testing.
-func makeRosterEntry(dir, harness, sessionID, title string, activity time.Time) workspace.RosterEntry {
-	return workspace.RosterEntry{
+func makeRosterEntry(dir, harness, sessionID, title string, activity time.Time) settings.RosterEntry {
+	return settings.RosterEntry{
 		Dir:          dir,
 		Harness:      harness,
 		SessionID:    sessionID,
@@ -62,7 +62,7 @@ func makeRosterEntry(dir, harness, sessionID, title string, activity time.Time) 
 }
 
 // findRow returns the first Row whose Worktree matches dir, or nil.
-func findRow(rows []workspace.Row, dir string) *workspace.Row {
+func findRow(rows []settings.Row, dir string) *settings.Row {
 	for i := range rows {
 		if rows[i].Worktree == dir {
 			return &rows[i]
@@ -79,24 +79,24 @@ func TestMerge_Running(t *testing.T) {
 	wtDir := mustDir(t, tmp, "wt-running")
 
 	now := time.Now()
-	repos := []workspace.RepoConfig{{Path: repoDir}}
+	repos := []settings.RepoConfig{{Path: repoDir}}
 	worktreesByRepo := map[string][]git.Worktree{
 		repoDir: {{Path: wtDir, Branch: "main"}},
 	}
-	roster := map[string]workspace.RosterEntry{}
+	roster := map[string]settings.RosterEntry{}
 	liveTopLevel := []state.SessionView{
 		makeSession(wtDir, "sess-1", "Running Session", state.SourceLive, now),
 	}
 	liveTopLevel[0].Attention = state.AttnActive
 
-	rows := workspace.Merge(repos, worktreesByRepo, roster, liveTopLevel, nil)
+	rows := settings.Merge(repos, worktreesByRepo, roster, liveTopLevel, nil)
 
 	row := findRow(rows, wtDir)
 	if row == nil {
 		t.Fatalf("no row for worktree %q", wtDir)
 	}
-	if row.State != workspace.StateRunning {
-		t.Errorf("State: got %q, want %q", row.State, workspace.StateRunning)
+	if row.State != settings.StateRunning {
+		t.Errorf("State: got %q, want %q", row.State, settings.StateRunning)
 	}
 	if row.Title != "Running Session" {
 		t.Errorf("Title: got %q, want %q", row.Title, "Running Session")
@@ -117,22 +117,22 @@ func TestMerge_Stopped(t *testing.T) {
 	wtDir := mustDir(t, tmp, "wt-stopped")
 
 	past := time.Now().Add(-10 * time.Minute)
-	repos := []workspace.RepoConfig{{Path: repoDir}}
+	repos := []settings.RepoConfig{{Path: repoDir}}
 	worktreesByRepo := map[string][]git.Worktree{
 		repoDir: {{Path: wtDir, Branch: "feature"}},
 	}
-	roster := map[string]workspace.RosterEntry{
+	roster := map[string]settings.RosterEntry{
 		wtDir: makeRosterEntry(wtDir, "opencode", "sess-old", "Old Session", past),
 	}
 
-	rows := workspace.Merge(repos, worktreesByRepo, roster, nil, nil)
+	rows := settings.Merge(repos, worktreesByRepo, roster, nil, nil)
 
 	row := findRow(rows, wtDir)
 	if row == nil {
 		t.Fatalf("no row for worktree %q", wtDir)
 	}
-	if row.State != workspace.StateStopped {
-		t.Errorf("State: got %q, want %q", row.State, workspace.StateStopped)
+	if row.State != settings.StateStopped {
+		t.Errorf("State: got %q, want %q", row.State, settings.StateStopped)
 	}
 	if row.Title != "Old Session" {
 		t.Errorf("Title: got %q, want %q", row.Title, "Old Session")
@@ -149,19 +149,19 @@ func TestMerge_Empty(t *testing.T) {
 	repoDir := mustDir(t, tmp, "repo")
 	wtDir := mustDir(t, tmp, "wt-empty")
 
-	repos := []workspace.RepoConfig{{Path: repoDir}}
+	repos := []settings.RepoConfig{{Path: repoDir}}
 	worktreesByRepo := map[string][]git.Worktree{
 		repoDir: {{Path: wtDir, Branch: "new-branch"}},
 	}
 
-	rows := workspace.Merge(repos, worktreesByRepo, nil, nil, nil)
+	rows := settings.Merge(repos, worktreesByRepo, nil, nil, nil)
 
 	row := findRow(rows, wtDir)
 	if row == nil {
 		t.Fatalf("no row for worktree %q", wtDir)
 	}
-	if row.State != workspace.StateStopped {
-		t.Errorf("State: got %q, want %q", row.State, workspace.StateStopped)
+	if row.State != settings.StateStopped {
+		t.Errorf("State: got %q, want %q", row.State, settings.StateStopped)
 	}
 }
 
@@ -173,27 +173,27 @@ func TestMerge_Unknown(t *testing.T) {
 	wtDir := mustDir(t, tmp, "wt-unknown")
 
 	past := time.Now().Add(-3 * time.Minute)
-	repos := []workspace.RepoConfig{{Path: repoDir}}
+	repos := []settings.RepoConfig{{Path: repoDir}}
 	worktreesByRepo := map[string][]git.Worktree{
 		repoDir: {{Path: wtDir, Branch: "exp"}},
 	}
 	// Use a harness kind that is genuinely NOT registered in harness.DefaultRegistry
 	// (no LiveStatus). "claude-code" was previously used here but is now a real
 	// registered harness with LiveStatus=true; use an unregistered sentinel instead.
-	roster := map[string]workspace.RosterEntry{
+	roster := map[string]settings.RosterEntry{
 		wtDir: makeRosterEntry(wtDir, "unregistered-kind", "sess-x", "Unknown Session", past),
 	}
 	// Tmux window exists for this dir.
 	tmuxDirs := map[string]bool{wtDir: true}
 
-	rows := workspace.Merge(repos, worktreesByRepo, roster, nil, tmuxDirs)
+	rows := settings.Merge(repos, worktreesByRepo, roster, nil, tmuxDirs)
 
 	row := findRow(rows, wtDir)
 	if row == nil {
 		t.Fatalf("no row for worktree %q", wtDir)
 	}
-	if row.State != workspace.StateUnknown {
-		t.Errorf("State: got %q, want %q", row.State, workspace.StateUnknown)
+	if row.State != settings.StateUnknown {
+		t.Errorf("State: got %q, want %q", row.State, settings.StateUnknown)
 	}
 }
 
@@ -208,7 +208,7 @@ func TestMerge_MultipleSessionsPerDir(t *testing.T) {
 	t1 := time.Now().Add(-20 * time.Second)
 	t2 := time.Now().Add(-5 * time.Second)
 
-	repos := []workspace.RepoConfig{{Path: repoDir}}
+	repos := []settings.RepoConfig{{Path: repoDir}}
 	worktreesByRepo := map[string][]git.Worktree{
 		repoDir: {{Path: wtDir, Branch: "main"}},
 	}
@@ -220,11 +220,11 @@ func TestMerge_MultipleSessionsPerDir(t *testing.T) {
 
 	liveTopLevel := []state.SessionView{sess1, sess2}
 
-	rows := workspace.Merge(repos, worktreesByRepo, nil, liveTopLevel, nil)
+	rows := settings.Merge(repos, worktreesByRepo, nil, liveTopLevel, nil)
 
 	// Count rows for this dir.
 	count := 0
-	var matched *workspace.Row
+	var matched *settings.Row
 	for i := range rows {
 		if rows[i].Worktree == wtDir {
 			count++
@@ -234,8 +234,8 @@ func TestMerge_MultipleSessionsPerDir(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("expected exactly 1 row for %q, got %d", wtDir, count)
 	}
-	if matched.State != workspace.StateRunning {
-		t.Errorf("State: got %q, want %q", matched.State, workspace.StateRunning)
+	if matched.State != settings.StateRunning {
+		t.Errorf("State: got %q, want %q", matched.State, settings.StateRunning)
 	}
 	// The live session (sess-live) should win.
 	if matched.SessionID != "sess-live" {
@@ -256,7 +256,7 @@ func TestMerge_MultipleSessionsPerDir_NewestWins(t *testing.T) {
 	t1 := time.Now().Add(-30 * time.Second)
 	t2 := time.Now().Add(-5 * time.Second)
 
-	repos := []workspace.RepoConfig{{Path: repoDir}}
+	repos := []settings.RepoConfig{{Path: repoDir}}
 	worktreesByRepo := map[string][]git.Worktree{
 		repoDir: {{Path: wtDir, Branch: "main"}},
 	}
@@ -265,10 +265,10 @@ func TestMerge_MultipleSessionsPerDir_NewestWins(t *testing.T) {
 	sess1 := makeSession(wtDir, "sess-old", "Old Live", state.SourceLive, t1)
 	sess2 := makeSession(wtDir, "sess-new", "New Live", state.SourceLive, t2)
 
-	rows := workspace.Merge(repos, worktreesByRepo, nil, []state.SessionView{sess1, sess2}, nil)
+	rows := settings.Merge(repos, worktreesByRepo, nil, []state.SessionView{sess1, sess2}, nil)
 
 	count := 0
-	var matched *workspace.Row
+	var matched *settings.Row
 	for i := range rows {
 		if rows[i].Worktree == wtDir {
 			count++
@@ -294,7 +294,7 @@ func TestMerge_SubagentExcluded(t *testing.T) {
 	wtDir := mustDir(t, tmp, "wt-subagent")
 
 	now := time.Now()
-	repos := []workspace.RepoConfig{{Path: repoDir}}
+	repos := []settings.RepoConfig{{Path: repoDir}}
 	worktreesByRepo := map[string][]git.Worktree{
 		repoDir: {{Path: wtDir, Branch: "main"}},
 	}
@@ -307,7 +307,7 @@ func TestMerge_SubagentExcluded(t *testing.T) {
 	// the caller (internal/ui) has already filtered it out via shouldHideSubagent.
 	liveTopLevel := []state.SessionView{topLevel}
 
-	rows := workspace.Merge(repos, worktreesByRepo, nil, liveTopLevel, nil)
+	rows := settings.Merge(repos, worktreesByRepo, nil, liveTopLevel, nil)
 
 	count := 0
 	for _, r := range rows {
@@ -318,8 +318,8 @@ func TestMerge_SubagentExcluded(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("expected exactly 1 row for %q (subagent excluded by caller), got %d", wtDir, count)
 	}
-	if rows[0].State != workspace.StateRunning {
-		t.Errorf("State: got %q, want %q", rows[0].State, workspace.StateRunning)
+	if rows[0].State != settings.StateRunning {
+		t.Errorf("State: got %q, want %q", rows[0].State, settings.StateRunning)
 	}
 }
 
@@ -330,12 +330,12 @@ func TestMerge_EmptyRepo(t *testing.T) {
 	// mustDir returns the canonical path already.
 	repoDir := mustDir(t, tmp, "repo-empty")
 
-	repos := []workspace.RepoConfig{{Path: repoDir}}
+	repos := []settings.RepoConfig{{Path: repoDir}}
 	worktreesByRepo := map[string][]git.Worktree{
 		repoDir: nil, // no worktrees
 	}
 
-	rows := workspace.Merge(repos, worktreesByRepo, nil, nil, nil)
+	rows := settings.Merge(repos, worktreesByRepo, nil, nil, nil)
 
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 row for empty repo, got %d", len(rows))
@@ -344,8 +344,8 @@ func TestMerge_EmptyRepo(t *testing.T) {
 	if rows[0].Repo != repoDir {
 		t.Errorf("Repo: got %q, want %q", rows[0].Repo, repoDir)
 	}
-	if rows[0].State != workspace.StateStopped {
-		t.Errorf("State: got %q, want %q", rows[0].State, workspace.StateStopped)
+	if rows[0].State != settings.StateStopped {
+		t.Errorf("State: got %q, want %q", rows[0].State, settings.StateStopped)
 	}
 }
 
@@ -364,12 +364,12 @@ func TestMerge_AllDirsCanonical(t *testing.T) {
 	}
 	wtDirSlash := rawWtDir + "/"
 
-	repos := []workspace.RepoConfig{{Path: repoDir}}
+	repos := []settings.RepoConfig{{Path: repoDir}}
 	worktreesByRepo := map[string][]git.Worktree{
 		repoDir: {{Path: wtDirSlash, Branch: "main"}},
 	}
 
-	rows := workspace.Merge(repos, worktreesByRepo, nil, nil, nil)
+	rows := settings.Merge(repos, worktreesByRepo, nil, nil, nil)
 
 	for _, r := range rows {
 		if r.Worktree == "" {
@@ -390,16 +390,16 @@ func TestMerge_ProviderCodexWithRosterEntry(t *testing.T) {
 	wtDir := mustDir(t, tmp, "wt-codex-roster")
 
 	now := time.Now()
-	repos := []workspace.RepoConfig{{Path: repoDir}}
+	repos := []settings.RepoConfig{{Path: repoDir}}
 	worktreesByRepo := map[string][]git.Worktree{
 		repoDir: {{Path: wtDir, Branch: "main"}},
 	}
-	roster := map[string]workspace.RosterEntry{
+	roster := map[string]settings.RosterEntry{
 		wtDir: makeRosterEntry(wtDir, "codex", "sess-codex", "Codex Session", now.Add(-time.Minute)),
 	}
 	sess := makeSessionWithProvider(wtDir, "sess-codex-live", "Codex Live", state.SourceLive, now, harness.Kind("codex"))
 
-	rows := workspace.Merge(repos, worktreesByRepo, roster, []state.SessionView{sess}, nil)
+	rows := settings.Merge(repos, worktreesByRepo, roster, []state.SessionView{sess}, nil)
 
 	row := findRow(rows, wtDir)
 	if row == nil {
@@ -408,7 +408,7 @@ func TestMerge_ProviderCodexWithRosterEntry(t *testing.T) {
 	if row.Harness != "codex" {
 		t.Errorf("Harness: got %q, want %q", row.Harness, "codex")
 	}
-	if row.State != workspace.StateRunning {
-		t.Errorf("State: got %q, want %q", row.State, workspace.StateRunning)
+	if row.State != settings.StateRunning {
+		t.Errorf("State: got %q, want %q", row.State, settings.StateRunning)
 	}
 }
