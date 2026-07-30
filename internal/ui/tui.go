@@ -14,7 +14,6 @@ import (
 	"github.com/guilhermehto/cogitator/internal/singleinstance"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/supervisor"
-	"github.com/guilhermehto/cogitator/internal/taskwarrior"
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
@@ -79,7 +78,7 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 	rec := workspace.NewRecorder()
 	rec.Run(ctx, store.Subscribe())
 
-	m := newModel(store.Subscribe(), cfg, bellEnabled, debug, taskwarrior.NewClient())
+	m := newModel(store.Subscribe(), cfg, bellEnabled, debug)
 	// Wire the recorder's Upserts channel so the model can inject create-time
 	// roster entries (e.g. for Codex worktrees that are never live-discovered).
 	m.rosterUpserts = rec.Upserts

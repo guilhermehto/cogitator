@@ -383,7 +383,7 @@ func TestSnapshotMsgCoalescedBuildUsesLatestSnap(t *testing.T) {
 func TestDemoRendersWorktreeRoster(t *testing.T) {
 	rows := demoWorktrees(fixedNow)
 	ch := make(chan state.Snapshot, 1)
-	m := newModel(ch, config.Default(), false, false, nil) // nil tw → no Tasks pane
+	m := newModel(ch, config.Default(), false, false)
 	m.demo = true
 	m.workspaceRows = rows
 	m.snap = state.Snapshot{Sessions: liveSessionsFor(rows), UpdatedAt: fixedNow}
