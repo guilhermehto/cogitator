@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
@@ -446,6 +447,132 @@ func TestSetDefaultHarness_RoundTrip(t *testing.T) {
 	cfg, _ = settings.LoadConfig()
 	if cfg.DefaultHarness != "" {
 		t.Errorf("DefaultHarness = %q, want empty after clear", cfg.DefaultHarness)
+	}
+}
+
+// TestResolveWorkspaceRoot_DefaultsUnderXDGDataHome verifies that an empty
+// WorkspaceRoot resolves to $XDG_DATA_HOME/cogitator/workspaces.
+func TestResolveWorkspaceRoot_DefaultsUnderXDGDataHome(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+
+	got, err := settings.ResolveWorkspaceRoot(settings.Config{})
+	if err != nil {
+		t.Fatalf("ResolveWorkspaceRoot: %v", err)
+	}
+	want := filepath.Join(dataHome, "cogitator", "workspaces")
+	if got != want {
+		t.Errorf("ResolveWorkspaceRoot default: got %q, want %q", got, want)
+	}
+}
+
+// TestResolveWorkspaceRoot_XDGFallback verifies that when $XDG_DATA_HOME is
+// unset, the default falls back to ~/.local/share/cogitator/workspaces.
+func TestResolveWorkspaceRoot_XDGFallback(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	got, err := settings.ResolveWorkspaceRoot(settings.Config{})
+	if err != nil {
+		t.Fatalf("ResolveWorkspaceRoot: %v", err)
+	}
+	want := filepath.Join(home, ".local", "share", "cogitator", "workspaces")
+	if got != want {
+		t.Errorf("ResolveWorkspaceRoot fallback: got %q, want %q", got, want)
+	}
+}
+
+// TestResolveWorkspaceRoot_ExpandsTilde verifies that a "~/..." WorkspaceRoot
+// resolves to an absolute, canonical path under the user's home directory.
+func TestResolveWorkspaceRoot_ExpandsTilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	got, err := settings.ResolveWorkspaceRoot(settings.Config{WorkspaceRoot: "~/ws"})
+	if err != nil {
+		t.Fatalf("ResolveWorkspaceRoot: %v", err)
+	}
+	want, err := pathnorm.Canonical(filepath.Join(home, "ws"))
+	if err != nil {
+		t.Fatalf("pathnorm.Canonical: %v", err)
+	}
+	if got != want {
+		t.Errorf("ResolveWorkspaceRoot tilde: got %q, want %q", got, want)
+	}
+	if !filepath.IsAbs(got) {
+		t.Errorf("ResolveWorkspaceRoot tilde: expected absolute path, got %q", got)
+	}
+}
+
+// TestResolveWorkspaceRoot_RejectsPathInsideGitWorkTree verifies that a
+// WorkspaceRoot resolving inside an existing git working tree is rejected
+// with an error naming the repository it would nest inside.
+func TestResolveWorkspaceRoot_RejectsPathInsideGitWorkTree(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	nested := filepath.Join(repo, "ws")
+
+	_, err := settings.ResolveWorkspaceRoot(settings.Config{WorkspaceRoot: nested})
+	if err == nil {
+		t.Fatal("ResolveWorkspaceRoot: expected error for path inside a git working tree")
+	}
+	canonicalRepo, canonErr := pathnorm.Canonical(repo)
+	if canonErr != nil {
+		t.Fatalf("pathnorm.Canonical(repo): %v", canonErr)
+	}
+	if !strings.Contains(err.Error(), canonicalRepo) {
+		t.Errorf("error %q does not name the offending repo %q", err.Error(), canonicalRepo)
+	}
+}
+
+// TestResolveWorkspaceRoot_RejectsGitWorkTreeItself verifies that setting
+// WorkspaceRoot to a git working tree's own root (not just a subdirectory) is
+// rejected too.
+func TestResolveWorkspaceRoot_RejectsGitWorkTreeItself(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+
+	if _, err := settings.ResolveWorkspaceRoot(settings.Config{WorkspaceRoot: repo}); err == nil {
+		t.Fatal("ResolveWorkspaceRoot: expected error when workspaceRoot is a repo root")
+	}
+}
+
+// TestSaveConfig_WorkspaceRootRoundTripsAndOmitsWhenEmpty verifies that
+// WorkspaceRoot survives a save/load round trip and is omitted from the JSON
+// on disk when empty.
+func TestSaveConfig_WorkspaceRootRoundTripsAndOmitsWhenEmpty(t *testing.T) {
+	tmp := t.TempDir()
+	withConfigEnv(t, tmp)
+
+	if err := settings.SaveConfig(settings.Config{WorkspaceRoot: "/custom/ws"}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	loaded, err := settings.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if loaded.WorkspaceRoot != "/custom/ws" {
+		t.Errorf("WorkspaceRoot round trip: got %q, want %q", loaded.WorkspaceRoot, "/custom/ws")
+	}
+
+	if err := settings.SaveConfig(settings.Config{}); err != nil {
+		t.Fatalf("SaveConfig empty: %v", err)
+	}
+	path, err := settings.ConfigPath()
+	if err != nil {
+		t.Fatalf("ConfigPath: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if strings.Contains(string(data), "workspaceRoot") {
+		t.Errorf("expected workspaceRoot omitted from JSON when empty, got: %s", data)
 	}
 }
 
