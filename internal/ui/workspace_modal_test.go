@@ -4,9 +4,9 @@ package ui
 // the Workspaces view): the scan/attach/detach Cmds, the combined
 // member+candidate list's pure helpers, the 'e' key + wsModalScanMsg/
 // wsModalActionErrMsg Update wiring, and the AttachRepo/DetachRepo round trip
-// against a real store. membershipChangedMsg is deliberately left unhandled
-// (step 15 is its first consumer); this file only asserts it is emitted with
-// the right shape and that Update currently ignores it.
+// against a real store. membershipChangedMsg's Update handling belongs to
+// step 15 (workspace_backfill_test.go); this file only asserts it is emitted
+// with the right shape (attach vs. detach, workspace, repo).
 
 import (
 	"errors"
@@ -524,7 +524,7 @@ func TestWorkspaceModal_EnterOnMemberDispatchesDetachAndCloses(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// wsModalActionErrMsg / membershipChangedMsg handling
+// wsModalActionErrMsg handling
 // ---------------------------------------------------------------------------
 
 func TestWorkspaceModal_ActionErrMsgSetsHint(t *testing.T) {
@@ -532,18 +532,6 @@ func TestWorkspaceModal_ActionErrMsgSetsHint(t *testing.T) {
 	updated, _ := m.Update(wsModalActionErrMsg{err: errWorkspaceModalTest})
 	if got := updated.(model).wsHint; !strings.Contains(got, "membership change failed") {
 		t.Errorf("hint: got %q, want membership-change-failed", got)
-	}
-}
-
-func TestWorkspaceModal_MembershipChangedMsgUnhandled(t *testing.T) {
-	m := model{width: 120, wsHint: "unchanged"}
-	updated, cmd := m.Update(membershipChangedMsg{workspace: "payments", repo: "/repo/a", attached: true})
-	m2 := updated.(model)
-	if m2.wsHint != "unchanged" {
-		t.Errorf("membershipChangedMsg must not be consumed yet; wsHint changed to %q", m2.wsHint)
-	}
-	if cmd != nil {
-		t.Error("membershipChangedMsg must not dispatch a cmd (nothing consumes it yet)")
 	}
 }
 
