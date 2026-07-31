@@ -41,7 +41,6 @@ export default defineConfig({
           { text: 'Connect your agent', link: '/guide/connect' },
           { text: 'Key bindings', link: '/guide/key-bindings' },
           { text: 'Configuration', link: '/guide/configuration' },
-          { text: 'Taskwarrior', link: '/guide/taskwarrior' },
         ],
       },
       {

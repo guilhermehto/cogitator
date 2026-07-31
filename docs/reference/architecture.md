@@ -8,8 +8,12 @@
   classification, unreachable-instance tracking.
 - `internal/ui`: Bubble Tea model, rendering, status mode, and footer warnings.
 - `internal/config`: single source of timing/threshold defaults.
-- `internal/workspace`, `git`, `harness`, `tmuxctl`, `pathnorm`: the worktree launcher seam
-  (config, roster, merge, git, harness registry, tmux control, canonical paths).
+- `internal/settings`: single-repo config, session roster, merge, repo discovery.
+- `internal/workspace`: multi-repo workspace/session domain — types, mutex-guarded
+  `workspaces.json` store, session path derivation/validation, worktree-bundle
+  assemble/teardown, live status joins.
+- `internal/git`, `harness`, `tmuxctl`, `pathnorm`: git ops, harness registry, tmux control,
+  canonical paths.
 
 ## Development
 
