@@ -15,10 +15,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/guilhermehto/cogitator/internal/config"
+	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
+	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 // ---------------------------------------------------------------------------
@@ -482,5 +484,146 @@ func TestViewFallbackExcludesWorkspaceOwnedSession(t *testing.T) {
 	}
 	if !strings.Contains(got, "1 live") {
 		t.Errorf("header must count only the ordinary session as live, got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// membershipChangedMsg must not clobber an open prompt — review-fix-D,
+// defect 2. handleMembershipChanged (workspace_backfill.go) used to seize
+// m.prompt for promptWorkspaceBackfill unconditionally, discarding whatever
+// prompt was already open; the guard lives in Update's membershipChangedMsg
+// case (model.go) rather than inside handleMembershipChanged itself, mirroring
+// the repoScanMsg/wsModalScanMsg guards.
+// ---------------------------------------------------------------------------
+
+// workspaceWithSessions is a minimal wsStatuses fixture whose workspace has
+// at least one session, so handleMembershipChanged would open the backfill
+// prompt absent the guard under test.
+func workspaceWithSessions(name string, sessionNames ...string) []workspace.WorkspaceStatus {
+	sessions := make([]workspace.Session, len(sessionNames))
+	for i, n := range sessionNames {
+		sessions[i] = workspace.Session{Name: n}
+	}
+	return []workspace.WorkspaceStatus{{Workspace: workspace.Workspace{Name: name, Sessions: sessions}}}
+}
+
+func TestMembershipChangedMsgDoesNotClobberAnOpenPrompt(t *testing.T) {
+	m := model{
+		width:      120,
+		prompt:     promptSettings,
+		wsStatuses: workspaceWithSessions("payments", "session-one"),
+	}
+
+	updated, cmd := m.Update(membershipChangedMsg{workspace: "payments", repo: "/repo/c", attached: true})
+	m2 := updated.(model)
+
+	if m2.prompt != promptSettings {
+		t.Errorf("an open prompt must survive membershipChangedMsg; got %v", m2.prompt)
+	}
+	if !m2.wsBuilding {
+		t.Error("the workspace statuses must still refresh even though the backfill offer was dropped")
+	}
+	if cmd == nil {
+		t.Fatal("expected a reload cmd")
+	}
+}
+
+func TestMembershipChangedMsgStillOpensBackfillWhenIdle(t *testing.T) {
+	m := model{
+		width:      120,
+		prompt:     promptIdle,
+		wsStatuses: workspaceWithSessions("payments", "session-one"),
+	}
+
+	updated, _ := m.Update(membershipChangedMsg{workspace: "payments", repo: "/repo/c", attached: true})
+	m2 := updated.(model)
+
+	if m2.prompt != promptWorkspaceBackfill {
+		t.Errorf("with no prompt open, membershipChangedMsg must still open the backfill prompt; got %v", m2.prompt)
+	}
+}
+
+// TestMembershipChangedMsgCannotStrandWsCreateTargetAcrossViews reproduces
+// the review's worst-case path end to end: an 'e'→enter attach commit is in
+// flight while the user has already moved on to the Workspaces view's 'n'
+// flow (wsCreateTarget captured, promptNewWorkspaceSession open). Before the
+// guard, the async membershipChangedMsg seized the prompt for the backfill
+// picker; esc out of that clobbered prompt left wsCreateTarget stale, so a
+// later, wholly unrelated 'n' in the Sessions view silently created a
+// workspace session instead of the ordinary worktree the user asked for.
+func TestMembershipChangedMsgCannotStrandWsCreateTargetAcrossViews(t *testing.T) {
+	setWsTestXDG(t)
+	tmuxFake := &fakeTmuxOps{available: true, ensureWindowResult: "main:1"}
+	gitFake := &fakeGitOps{addResult: "/r-feat"}
+	harnFake := &fakeHarnessOpsWithKinds{kinds: []harness.Kind{"codex"}}
+
+	m := model{
+		width: 120, height: 40, input: newTestInput(),
+		view:           viewWorkspaces,
+		prompt:         promptNewWorkspaceSession,
+		wsCreateTarget: "payments",
+		tmux:           tmuxFake,
+		gitOp:          gitFake,
+		harnOp:         harnFake,
+		wsStatuses:     workspaceWithSessions("payments", "session-one"),
+	}
+
+	// The async membership-change message lands mid-flow.
+	updated, _ := m.Update(membershipChangedMsg{workspace: "payments", repo: "/repo/c", attached: true})
+	m1 := updated.(model)
+	if m1.prompt != promptNewWorkspaceSession {
+		t.Fatalf("membershipChangedMsg must not clobber the open session-name prompt; got %v", m1.prompt)
+	}
+	if m1.wsCreateTarget != "payments" {
+		t.Fatalf("wsCreateTarget must survive the guarded message; got %q", m1.wsCreateTarget)
+	}
+
+	// esc out of the (undisturbed) session-name prompt.
+	updated2, _ := m1.Update(keyMsg("esc"))
+	m2 := updated2.(model)
+	if m2.prompt != promptIdle || m2.wsCreateTarget != "" {
+		t.Fatalf("esc must return to promptIdle with wsCreateTarget cleared; got prompt=%v wsCreateTarget=%q",
+			m2.prompt, m2.wsCreateTarget)
+	}
+
+	// Tab to Sessions and press 'n' on an ordinary worktree row.
+	updated3, _ := m2.Update(keyMsg("tab"))
+	m3 := updated3.(model)
+	if m3.view != viewSessions {
+		t.Fatalf("tab must switch to the Sessions view; got %v", m3.view)
+	}
+	m3.workspaceRows = []settings.Row{
+		makeRow("/r", "/r/feat", "feat", "codex", settings.StateStopped, state.AttnInactive, fixedNow),
+	}
+	m3.sessionCursor = 0
+
+	updated4, _ := m3.Update(keyMsg("n"))
+	m4 := updated4.(model)
+	if m4.prompt != promptNewWorktree {
+		t.Fatalf("'n' in the Sessions view must open the ordinary new-worktree prompt; got %v", m4.prompt)
+	}
+	m4.input.SetValue("feat")
+
+	updated5, _ := m4.Update(keyMsg("enter"))
+	m5 := updated5.(model)
+	if m5.prompt != promptChooseHarness {
+		t.Fatalf("the branch-name prompt must advance to promptChooseHarness; got %v", m5.prompt)
+	}
+	if m5.wsCreateTarget != "" {
+		t.Fatalf("wsCreateTarget must still be empty at the harness chooser; got %q — a stale value hijacks the dispatch below", m5.wsCreateTarget)
+	}
+
+	updated6, cmd := m5.Update(keyMsg("enter"))
+	m6 := updated6.(model)
+	if m6.wsCreateTarget != "" {
+		t.Error("wsCreateTarget must remain empty after dispatch")
+	}
+	// worktreeCreatedFrom (actions_test.go) fails the test outright if cmd
+	// produced anything other than an ordinary worktreeCreatedMsg — in
+	// particular, it fails if the stale wsCreateTarget had instead dispatched
+	// assembleWorkspaceSessionCmd's wsSessionAssembledMsg.
+	result := worktreeCreatedFrom(t, cmd)
+	if result.repo != "/r" || result.branch != "feat" {
+		t.Errorf("expected an ordinary worktree create for /r@feat, got repo=%q branch=%q", result.repo, result.branch)
 	}
 }

@@ -141,6 +141,134 @@ func TestWorkspaceViewEmptyStateWhenNoWorkspacesConfigured(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// wsHint layout budget and lifetime — review-fix-D, defect 1. wsHint used to
+// be appended to View's output outside paneHeights' budget (rendering
+// m.height+1 lines) and was never cleared on keypress. Every assertion here
+// runs against real rendered output from a model with view == viewWorkspaces
+// and a realistic terminal height, per the review's finding that the old
+// coverage only ever read the unexported field on a viewSessions model.
+// ---------------------------------------------------------------------------
+
+func TestWorkspaceViewHintStaysWithinPaneHeightBudget(t *testing.T) {
+	m := model{
+		width: 80, height: 24,
+		view:   viewWorkspaces,
+		wsHint: `workspace "infra" has no member repos — add one before creating a session`,
+	}
+
+	out := m.View()
+	lines := strings.Split(out, "\n")
+	if len(lines) != m.height {
+		t.Fatalf("View must render exactly m.height (%d) lines with wsHint set; got %d lines:\n%s",
+			m.height, len(lines), out)
+	}
+	if !strings.Contains(out, "has no member repos") {
+		t.Errorf("the hint itself must still be visible in the rendered output; got:\n%s", out)
+	}
+}
+
+func TestWorkspaceViewHintLineCountHoldsAcrossHeights(t *testing.T) {
+	for _, height := range []int{12, 24, 40, 60} {
+		m := model{width: 100, height: height, view: viewWorkspaces, wsHint: "some transient message"}
+		out := m.View()
+		if got := len(strings.Split(out, "\n")); got != height {
+			t.Errorf("height=%d: View must render exactly m.height lines with wsHint set; got %d", height, got)
+		}
+	}
+}
+
+func TestWorkspaceViewNextKeypressClearsHintFromRenderedOutput(t *testing.T) {
+	m := model{
+		width: 80, height: 24,
+		view:   viewWorkspaces,
+		wsHint: `workspace "infra" has no member repos — add one before creating a session`,
+	}
+
+	before := m.View()
+	if !strings.Contains(before, "has no member repos") {
+		t.Fatalf("setup: the hint must render before the next keypress; got:\n%s", before)
+	}
+
+	updated, _ := m.Update(keyMsg("j"))
+	m2 := updated.(model)
+
+	after := m2.View()
+	if strings.Contains(after, "has no member repos") {
+		t.Errorf("the next keypress in the Workspaces view must clear wsHint; got:\n%s", after)
+	}
+	if got := len(strings.Split(after, "\n")); got != m2.height {
+		t.Errorf("once the hint is cleared, the pane must reclaim its row and still total m.height (%d) lines; got %d:\n%s",
+			m2.height, got, after)
+	}
+}
+
+func TestSessionsViewLineCountUnaffectedByWsHintBudgetFix(t *testing.T) {
+	// view is left at its zero value (viewSessions); wsHint is set anyway to
+	// prove paneHeights' new budget line is gated on m.view == viewWorkspaces
+	// and never fires for the Sessions pane.
+	for _, height := range []int{10, 24, 40} {
+		m := model{width: 80, height: height, wsHint: "must not affect the Sessions view"}
+		out := m.View()
+		if got := len(strings.Split(out, "\n")); got != height {
+			t.Errorf("height=%d: Sessions view must render exactly m.height lines regardless of wsHint; got %d:\n%s",
+				height, got, out)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// wsPendingG disarm — review-fix-D, non-blocking finding. A non-navigation
+// key consumed by one of the delegate handlers (updateWorkspaceLifecycle,
+// updateWorkspaceDelete, updateWorkspaceLaunch, updateWorkspaceModal) used to
+// leave a previously-armed wsPendingG untouched, so a much later `g` fired
+// gg's jump-to-top instead of re-arming.
+// ---------------------------------------------------------------------------
+
+func TestWorkspaceViewNonNavigationKeyDisarmsPendingG(t *testing.T) {
+	m := model{
+		width: 120, height: 40, input: newTestInput(),
+		view:       viewWorkspaces,
+		wsStatuses: manyWsStatuses(20),
+	}
+
+	// Move off entry 0 first so a stray jump-to-top is observable.
+	updated, _ := m.Update(keyMsg("j"))
+	m0 := updated.(model)
+	updated, _ = m0.Update(keyMsg("j"))
+	m0 = updated.(model)
+	if m0.wsCursor != 2 {
+		t.Fatalf("setup: two j presses should land on entry 2; got %d", m0.wsCursor)
+	}
+
+	updated1, _ := m0.Update(keyMsg("g"))
+	m1 := updated1.(model)
+	if !m1.wsPendingG {
+		t.Fatal("first g must arm wsPendingG")
+	}
+
+	// 'e' on the workspace header under the cursor opens the membership
+	// modal — a non-navigation key that must disarm the pending gg exactly
+	// as any other key would.
+	updated2, _ := m1.Update(keyMsg("e"))
+	m2 := updated2.(model)
+	if m2.wsPendingG {
+		t.Fatal("a non-navigation key (opening the membership modal) must disarm wsPendingG")
+	}
+
+	updated3, _ := m2.Update(keyMsg("esc"))
+	m3 := updated3.(model)
+
+	updated4, _ := m3.Update(keyMsg("g"))
+	m4 := updated4.(model)
+	if !m4.wsPendingG {
+		t.Error("g after the intervening 'e'/esc must re-arm wsPendingG, not fire an immediate jump to top")
+	}
+	if m4.wsCursor != 2 {
+		t.Errorf("a single g after the disarm must not move the cursor off entry 2; got wsCursor=%d", m4.wsCursor)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Scrolling
 // ---------------------------------------------------------------------------
 

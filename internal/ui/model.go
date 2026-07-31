@@ -1336,6 +1336,13 @@ func (m model) paneHeights() (sessionsOuterH, sessionsInnerH int) {
 	if m.debug && unreachableFooter(m.snap.UnreachableInstances) != "" {
 		extraFooterRows++
 	}
+	// The Workspaces view appends wsHint as its own line below the pane
+	// (View, mirroring the debug footer above) whenever it has something to
+	// say, so it must reserve a row here too — otherwise the pane keeps its
+	// full height and View returns m.height+1 lines while a hint is set.
+	if m.view == viewWorkspaces && m.wsHint != "" {
+		extraFooterRows++
+	}
 
 	// The application header and legend always reserve one row each.
 	sessionsOuterH = max(6, m.height-2-extraFooterRows)
@@ -1818,16 +1825,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// workspace_view.go/workspace_cmd.go) because both of those files are
 		// untouched by this feature.
 		if m.view == viewWorkspaces {
+			// Clear any transient workspace hint on any key press, mirroring
+			// tmuxHint's clear for the Sessions pane below: a hint set by an
+			// async failure (create/delete/backfill) or a lifecycle refusal
+			// (e.g. "no member repos") must not linger past the next keypress.
+			m.wsHint = ""
+			// `gg` jump-to-top is armed only by updateWorkspaceView's own
+			// navigation keys; any key one of the other delegates below
+			// consumes (open a prompt, launch, etc.) must disarm it the same
+			// way an unrelated key disarms pendingG in the Sessions switch —
+			// otherwise a `g` pressed long after, following an intervening
+			// non-navigation key, jumps to the top instead of re-arming.
 			if next, cmd, handled := m.updateWorkspaceLifecycle(msg); handled {
+				next.wsPendingG = false
 				return next, cmd
 			}
 			if next, cmd, handled := m.updateWorkspaceDelete(msg); handled {
+				next.wsPendingG = false
 				return next, cmd
 			}
 			if next, cmd, handled := m.updateWorkspaceLaunch(msg); handled {
+				next.wsPendingG = false
 				return next, cmd
 			}
 			if next, cmd, handled := m.updateWorkspaceModal(msg); handled {
+				next.wsPendingG = false
 				return next, cmd
 			}
 			return m.updateWorkspaceView(msg)
@@ -2230,6 +2252,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// job is to ask which of the workspace's existing sessions (if any)
 		// should receive the change into their own worktree bundle, never
 		// touching a live agent's directory without that choice.
+		//
+		// Guarded here, not inside handleMembershipChanged
+		// (workspace_backfill.go), because opening promptWorkspaceBackfill
+		// must never clobber a prompt the user already has open — mirroring
+		// the repoScanMsg/wsModalScanMsg prompt guards above. When some other
+		// prompt is active, drop the backfill offer but still refresh the
+		// statuses so the already-persisted membership change shows up.
+		if m.prompt != promptIdle {
+			return m.reloadWsStatuses()
+		}
 		return m.handleMembershipChanged(msg)
 
 	case wsBackfillAppliedMsg:
