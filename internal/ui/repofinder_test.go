@@ -25,6 +25,16 @@ var errScanTest = errors.New("boom")
 func initGitRepoForUI(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
+	initGitRepoAt(t, dir)
+	return dir
+}
+
+// initGitRepoAt creates a git repository at dir (which must already exist)
+// with an initial commit on "main". Factored out of initGitRepoForUI so
+// workspace_modal_test.go can build a fixture repo at a caller-chosen path
+// (e.g. one with a hidden basename) rather than a fresh t.TempDir().
+func initGitRepoAt(t *testing.T, dir string) {
+	t.Helper()
 	cmds := [][]string{
 		{"git", "init", "-b", "main"},
 		{"git", "config", "user.email", "test@example.com"},
@@ -38,7 +48,6 @@ func initGitRepoForUI(t *testing.T) string {
 			t.Fatalf("setup %v: %v\n%s", args, err, out)
 		}
 	}
-	return dir
 }
 
 func containsStr(ss []string, want string) bool {
@@ -57,7 +66,7 @@ func containsStr(ss []string, want string) bool {
 func TestFilterConfigured_DropsAlreadyConfigured(t *testing.T) {
 	got := filterConfigured(
 		[]string{"/a", "/b", "/c"},
-		[]settings.RepoConfig{{Path: "/b"}},
+		[]string{"/b"},
 	)
 	want := []string{"/a", "/c"}
 	if len(got) != len(want) || got[0] != "/a" || got[1] != "/c" {
@@ -70,6 +79,16 @@ func TestFilterConfigured_EmptyConfigReturnsAll(t *testing.T) {
 	got := filterConfigured(in, nil)
 	if len(got) != 2 {
 		t.Errorf("empty config should return all; got %v", got)
+	}
+}
+
+func TestFilterConfigured_DropsEveryPathInHaveSet(t *testing.T) {
+	got := filterConfigured(
+		[]string{"/a", "/b", "/c"},
+		[]string{"/a", "/c"},
+	)
+	if len(got) != 1 || got[0] != "/b" {
+		t.Errorf("filterConfigured = %v, want [/b]", got)
 	}
 }
 
