@@ -10,6 +10,7 @@ package ui
 // TeardownMember shell out to the real git binary with no injectable seam.
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +25,39 @@ import (
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// UpdateSessionMembers gives fakeStoreOps (workspace_cmd_test.go) the extra
+// method backfillOneSession's sessionMemberUpdater seam requires, mirroring
+// Store.UpdateSessionMembers's own not-found error wording exactly so the
+// unit tests below see the same errors the real store would return.
+func (f *fakeStoreOps) UpdateSessionMembers(workspaceName, sessionName string, mutate func(*workspace.Session) error) error {
+	wIdx := -1
+	for i, ws := range f.workspaces {
+		if ws.Name == workspaceName {
+			wIdx = i
+			break
+		}
+	}
+	if wIdx < 0 {
+		return fmt.Errorf("workspace %q does not exist", workspaceName)
+	}
+	sIdx := -1
+	for i, sess := range f.workspaces[wIdx].Sessions {
+		if sess.Name == sessionName {
+			sIdx = i
+			break
+		}
+	}
+	if sIdx < 0 {
+		return fmt.Errorf("session %q does not exist in workspace %q", sessionName, workspaceName)
+	}
+	session := f.workspaces[wIdx].Sessions[sIdx]
+	if err := mutate(&session); err != nil {
+		return err
+	}
+	f.workspaces[wIdx].Sessions[sIdx] = session
+	return nil
+}
 
 // backfillAppliedFrom runs cmd and returns the first wsBackfillAppliedMsg
 // produced, mirroring wsSessionAssembledFrom (workspace_cmd_test.go).
