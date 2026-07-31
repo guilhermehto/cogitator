@@ -174,6 +174,14 @@ const (
 	// promptConfirmDeleteWorkspace2 is the SECOND confirmation for a whole
 	// workspace. Default is cancel; only 'y' proceeds.
 	promptConfirmDeleteWorkspace2
+	// promptWorkspaceModal is active while the repo-membership modal ('e' in
+	// the Workspaces view) is open. It scans $HOME for git repositories, like
+	// promptAddRepo, but combines the discovered non-member candidates with
+	// the workspace's current members into one fuzzy-filterable list: enter
+	// on a candidate attaches it, enter on a member detaches it; esc cancels
+	// with no change. Placed last so existing model{} literals keep their
+	// iota values.
+	promptWorkspaceModal
 )
 
 // launchResultMsg is returned by launchCmd / resumeCmd after the tmux
@@ -650,6 +658,26 @@ type model struct {
 	wsDeleteSession   string
 	wsDeleteMembers   []wsDeleteMember
 	wsDeleteMergeInfo map[string]string
+
+	// Repo-membership modal ('e' in the Workspaces view) state, meaningful
+	// only while prompt == promptWorkspaceModal. wsModalWorkspace is the
+	// target workspace's name, captured when the modal opens.
+	// wsModalScanning is true between opening and the scan result arriving.
+	// wsModalEntries is the combined, alphabetically sorted set of the
+	// workspace's current members (offered for removal) and freshly
+	// discovered non-member candidates (offered for addition) — see
+	// wsModalEntry (workspace_modal.go). wsModalMatches is its current
+	// fuzzy-filtered view (what is rendered), indices into wsModalEntries;
+	// wsModalCursor indexes wsModalMatches. wsModalErr holds a scan error to
+	// surface in the modal body (a failed commit is reported via wsHint
+	// instead, since the modal has already closed by then). Zero values are
+	// safe (modal closed).
+	wsModalWorkspace string
+	wsModalScanning  bool
+	wsModalEntries   []wsModalEntry
+	wsModalMatches   []int
+	wsModalCursor    int
+	wsModalErr       string
 
 	// Injectable seams for tmux, git, harness, and workspace-store operations.
 	// Nil values are replaced with the real implementations in newModel (store
@@ -1673,6 +1701,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			case promptSettings:
 				return m.updateSettings(msg)
+
+			case promptWorkspaceModal:
+				return m.updateWorkspaceModalActive(msg)
 			}
 		}
 
@@ -1763,6 +1794,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return next, cmd
 			}
 			if next, cmd, handled := m.updateWorkspaceLaunch(msg); handled {
+				return next, cmd
+			}
+			if next, cmd, handled := m.updateWorkspaceModal(msg); handled {
 				return next, cmd
 			}
 			return m.updateWorkspaceView(msg)
@@ -2130,6 +2164,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tmuxHint = "repo not tracked: " + filepath.Base(msg.repoPath)
 			return m, nil
 		}
+
+	case wsModalScanMsg:
+		// Background repo-membership scan finished. Ignore a stale result if
+		// the modal was closed, or reopened for a different workspace, in
+		// the meantime.
+		if m.prompt != promptWorkspaceModal || msg.workspace != m.wsModalWorkspace {
+			return m, nil
+		}
+		m.wsModalScanning = false
+		if msg.err != nil {
+			m.wsModalErr = fmt.Sprintf("scan failed: %v", msg.err)
+			m.wsModalEntries = nil
+			m.wsModalMatches = nil
+			return m, nil
+		}
+		m.wsModalErr = ""
+		m.wsModalEntries = msg.entries
+		m.wsModalMatches = fuzzyMatchIndices(m.input.Value(), wsModalEntryPaths(m.wsModalEntries))
+		m.wsModalCursor = clampIndex(m.wsModalCursor, len(m.wsModalMatches))
+		return m, nil
+
+	case wsModalActionErrMsg:
+		// A committed attach/detach failed validation or persistence; report
+		// it in wsHint since the modal has already closed by the time this
+		// arrives. membershipChangedMsg (the success case) is deliberately
+		// left unhandled here — step 15 (workspace_backfill.go) is the first
+		// consumer of that message.
+		m.wsHint = fmt.Sprintf("membership change failed: %v", msg.err)
+		return m, nil
 
 	case mergeStatusMsg:
 		// Annotate the active delete confirmation, but only if it still targets
@@ -2702,6 +2765,9 @@ func (m model) View() string {
 	case wsDeletePromptActive(m.prompt):
 		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsDeleteConfirm())
+	case m.prompt == promptWorkspaceModal:
+		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWorkspaceModal(paneW, sessionsInnerH))
 	case m.view == viewWorkspaces:
 		sessionContent = m.renderWorkspacesView(paneW, sessionsInnerH)
 	case len(m.workspaceRows) > 0:
