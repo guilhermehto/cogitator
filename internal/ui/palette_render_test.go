@@ -84,8 +84,8 @@ func TestView_PaletteOverlaysSwitcherBox(t *testing.T) {
 }
 
 func TestView_SearchPaletteUsesCursorOnlyCopy(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 	m.width, m.height = 100, 30
 	m = openSearch(t, m)
