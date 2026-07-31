@@ -156,17 +156,46 @@ func nestedGitWorkTree(candidate string) (string, bool) {
 	}
 }
 
+// canonicalizeWorkspaceRoot makes path absolute and passes it through
+// pathnorm.Canonical, so both the default and configured branches of
+// ResolveWorkspaceRoot return a value in the exact form every other consumer
+// of a workspace root (settings.PathUnderRoot, git worktree paths, tmux/
+// OpenCode session directories) already compares against. label identifies
+// the input for error messages.
+func canonicalizeWorkspaceRoot(path, label string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspaceRoot %q to an absolute path: %w", label, err)
+	}
+
+	canonical, err := pathnorm.Canonical(abs)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize workspaceRoot %q: %w", label, err)
+	}
+	return canonical, nil
+}
+
 // ResolveWorkspaceRoot returns the effective, validated workspace root for
 // cfg. An empty cfg.WorkspaceRoot resolves to the XDG default (see
-// workspaceRootDefault) and is trusted as-is. A non-empty value has its
-// leading "~" expanded, is made absolute, and is canonicalized via
-// pathnorm.Canonical; it is then rejected if it cannot be made absolute or if
-// it resolves inside an existing git working tree, since a workspace root
-// (which itself holds git worktrees) nested inside another working tree would
-// corrupt both.
+// workspaceRootDefault); a non-empty value has its leading "~" expanded
+// first. Either way the result is made absolute and canonicalized via
+// pathnorm.Canonical, so callers can compare it against other canonical paths
+// (e.g. settings.PathUnderRoot) without a caller-side canonicalization step.
+// pathnorm.Canonical tolerates a not-yet-created directory: it resolves the
+// nearest existing ancestor and re-appends the missing suffix, so this never
+// creates the workspace root directory as a side effect.
+//
+// A non-empty cfg.WorkspaceRoot is additionally rejected if it resolves
+// inside an existing git working tree, since a workspace root (which itself
+// holds git worktrees) nested inside another working tree would corrupt
+// both.
 func ResolveWorkspaceRoot(cfg Config) (string, error) {
 	if cfg.WorkspaceRoot == "" {
-		return workspaceRootDefault()
+		defaultRoot, err := workspaceRootDefault()
+		if err != nil {
+			return "", err
+		}
+		return canonicalizeWorkspaceRoot(defaultRoot, defaultRoot)
 	}
 
 	expanded, err := expandHome(cfg.WorkspaceRoot)
@@ -174,14 +203,9 @@ func ResolveWorkspaceRoot(cfg Config) (string, error) {
 		return "", err
 	}
 
-	abs, err := filepath.Abs(expanded)
+	canonical, err := canonicalizeWorkspaceRoot(expanded, cfg.WorkspaceRoot)
 	if err != nil {
-		return "", fmt.Errorf("resolve workspaceRoot %q to an absolute path: %w", cfg.WorkspaceRoot, err)
-	}
-
-	canonical, err := pathnorm.Canonical(abs)
-	if err != nil {
-		return "", fmt.Errorf("canonicalize workspaceRoot %q: %w", cfg.WorkspaceRoot, err)
+		return "", err
 	}
 
 	if repo, nested := nestedGitWorkTree(canonical); nested {
