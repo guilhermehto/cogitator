@@ -159,11 +159,11 @@ type wsBackfillAppliedMsg struct {
 
 // backfillMembershipCmd applies workspaceName's already-committed repo
 // membership change (attach or detach) to each of sessionNames in turn. Every
-// session is processed independently — reloaded fresh from store immediately
-// before its own save — so a failure partway through never rolls back a
-// session already applied, and a session that fails or was never chosen at
-// all is simply left as it was. This is the single tea.Cmd boundary for the
-// whole backfill: no git or store access happens on the UI goroutine.
+// session is processed independently via its own Store.UpdateSessionMembers
+// call, so a failure partway through never rolls back a session already
+// applied, and a session that fails or was never chosen at all is simply left
+// as it was. This is the single tea.Cmd boundary for the whole backfill: no
+// git or store access happens on the UI goroutine.
 func backfillMembershipCmd(store storeOps, workspaceName, repo string, attached bool, sessionNames []string) tea.Cmd {
 	return func() tea.Msg {
 		res := wsBackfillAppliedMsg{workspaceName: workspaceName, repo: repo, attached: attached}
@@ -184,49 +184,50 @@ func backfillMembershipCmd(store storeOps, workspaceName, repo string, attached 
 	}
 }
 
-// backfillOneSession applies the membership change to exactly one session:
-// reload workspaceName fresh, locate sessionName, assemble (attached) or tear
-// down (!attached) the one member via step 8's AssembleMember/TeardownMember
-// — which run their own repo-in-this-session pre-flight (branch free,
-// basename collision) since the new worktree joins the session's existing
-// branch — splice the updated Members slice back into that session alone,
-// and persist the whole reloaded set via SaveWorkspaces. Every other
-// workspace and session in that reload is carried through untouched, so a
-// failure here never disturbs them.
-func backfillOneSession(store storeOps, workspaceName, repo string, attached bool, sessionName string) error {
-	workspaces, err := store.LoadWorkspaces()
-	if err != nil {
-		return err
-	}
-	wIdx := -1
-	for i, ws := range workspaces {
-		if ws.Name == workspaceName {
-			wIdx = i
-			break
-		}
-	}
-	if wIdx < 0 {
-		return fmt.Errorf("workspace %q does not exist", workspaceName)
-	}
-	sIdx := -1
-	for i, sess := range workspaces[wIdx].Sessions {
-		if sess.Name == sessionName {
-			sIdx = i
-			break
-		}
-	}
-	if sIdx < 0 {
-		return fmt.Errorf("session %q does not exist in workspace %q", sessionName, workspaceName)
-	}
-	session := workspaces[wIdx].Sessions[sIdx]
+// sessionMemberUpdater is the narrow seam backfillOneSession asserts store
+// against to reach Store.UpdateSessionMembers without widening storeOps
+// (model.go) itself: storeOps is the injectable seam shared by every other
+// workspace command in this package, and this mutator exists only for the
+// backfill path, so it is declared here instead. realStoreOps and
+// *fakeStoreOps (workspace_cmd_test.go) both implement it — see the
+// realStoreOps method just below and fakeStoreOps's in
+// workspace_backfill_test.go.
+type sessionMemberUpdater interface {
+	UpdateSessionMembers(workspaceName, sessionName string, mutate func(*workspace.Session) error) error
+}
 
-	if attached {
-		member, err := workspace.AssembleMember(session, repo)
-		if err != nil {
-			return err
+// UpdateSessionMembers delegates to the concrete *workspace.Store, giving
+// realStoreOps (model.go) the one extra method the backfill path needs
+// without adding it to the shared storeOps interface.
+func (r realStoreOps) UpdateSessionMembers(workspaceName, sessionName string, mutate func(*workspace.Session) error) error {
+	return r.store.UpdateSessionMembers(workspaceName, sessionName, mutate)
+}
+
+// backfillOneSession applies the membership change to exactly one session:
+// locate sessionName inside workspaceName and, under Store's own mutex via
+// UpdateSessionMembers, assemble (attached) or tear down (!attached) the one
+// member via step 8's AssembleMember/TeardownMember — which run their own
+// repo-in-this-session pre-flight (branch free, basename collision) since the
+// new worktree joins the session's existing branch. The whole
+// read-modify-write happens inside that single store call, so two overlapping
+// backfills of different sessions can never interleave and silently drop one
+// another's update. Every other workspace and session is carried through
+// untouched, so a failure here never disturbs them.
+func backfillOneSession(store storeOps, workspaceName, repo string, attached bool, sessionName string) error {
+	updater, ok := store.(sessionMemberUpdater)
+	if !ok {
+		return fmt.Errorf("workspace store does not support session member updates")
+	}
+	return updater.UpdateSessionMembers(workspaceName, sessionName, func(session *workspace.Session) error {
+		if attached {
+			member, err := workspace.AssembleMember(*session, repo)
+			if err != nil {
+				return err
+			}
+			session.Members = append(append([]workspace.SessionMember{}, session.Members...), member)
+			return nil
 		}
-		session.Members = append(append([]workspace.SessionMember{}, session.Members...), member)
-	} else {
+
 		mIdx := -1
 		for i, mem := range session.Members {
 			if mem.RepoPath == repo {
@@ -241,14 +242,12 @@ func backfillOneSession(store storeOps, workspaceName, repo string, attached boo
 			return nil
 		}
 		member := session.Members[mIdx]
-		if err := workspace.TeardownMember(session, member); err != nil {
+		if err := workspace.TeardownMember(*session, member); err != nil {
 			return err
 		}
 		session.Members = append(session.Members[:mIdx], session.Members[mIdx+1:]...)
-	}
-
-	workspaces[wIdx].Sessions[sIdx] = session
-	return store.SaveWorkspaces(workspaces)
+		return nil
+	})
 }
 
 // renderWorkspaceBackfillPrompt renders the floating multi-select box shown

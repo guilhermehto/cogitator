@@ -287,6 +287,129 @@ func TestStore_ConcurrentAddSession_BothPersist(t *testing.T) {
 	}
 }
 
+// TestStore_ConcurrentUpdateSessionMembers_BothPersist verifies that two
+// goroutines each backfilling a different session of the same workspace via
+// UpdateSessionMembers concurrently both land, and the resulting file still
+// parses — the same single-writer guarantee TestStore_ConcurrentAddSession_
+// BothPersist verifies for AddSession, now for the backfill mutator. Run with
+// -race.
+func TestStore_ConcurrentUpdateSessionMembers_BothPersist(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	store, err := workspace.NewStore()
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if _, err := store.AddWorkspace("demo"); err != nil {
+		t.Fatalf("AddWorkspace: %v", err)
+	}
+	if err := store.AddSession("demo", workspace.Session{Name: "s1", Branch: "s1"}); err != nil {
+		t.Fatalf("AddSession s1: %v", err)
+	}
+	if err := store.AddSession("demo", workspace.Session{Name: "s2", Branch: "s2"}); err != nil {
+		t.Fatalf("AddSession s2: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	sessions := []string{"s1", "s2"}
+	for _, name := range sessions {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			errs <- store.UpdateSessionMembers("demo", name, func(session *workspace.Session) error {
+				session.Members = append(session.Members, workspace.SessionMember{RepoPath: "/repo/" + name})
+				return nil
+			})
+		}(name)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("UpdateSessionMembers: %v", err)
+		}
+	}
+
+	workspaces, err := store.LoadWorkspaces()
+	if err != nil {
+		t.Fatalf("LoadWorkspaces: %v", err)
+	}
+	if len(workspaces) != 1 {
+		t.Fatalf("expected 1 workspace, got %d", len(workspaces))
+	}
+	for _, name := range sessions {
+		idx := -1
+		for i, sess := range workspaces[0].Sessions {
+			if sess.Name == name {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			t.Fatalf("session %q missing after concurrent backfill", name)
+		}
+		if len(workspaces[0].Sessions[idx].Members) != 1 || workspaces[0].Sessions[idx].Members[0].RepoPath != "/repo/"+name {
+			t.Errorf("session %q members = %+v, want exactly one member for /repo/%s", name, workspaces[0].Sessions[idx].Members, name)
+		}
+	}
+
+	data, err := os.ReadFile(workspacesPath(t))
+	if err != nil {
+		t.Fatalf("read workspaces.json: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Errorf("workspaces.json does not parse after concurrent backfills: %v", err)
+	}
+}
+
+// TestUpdateSessionMembers_UnknownWorkspaceOrSessionErrorsAndWritesNothing
+// verifies that UpdateSessionMembers names whichever of the workspace or
+// session is missing, and persists nothing when either is not found.
+func TestUpdateSessionMembers_UnknownWorkspaceOrSessionErrorsAndWritesNothing(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	store, err := workspace.NewStore()
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	called := false
+	err = store.UpdateSessionMembers("ghost", "s1", func(session *workspace.Session) error {
+		called = true
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "ghost") {
+		t.Errorf("expected an error naming the missing workspace, got %v", err)
+	}
+	if called {
+		t.Error("mutate must not run when the workspace does not exist")
+	}
+
+	if _, err := store.AddWorkspace("demo"); err != nil {
+		t.Fatalf("AddWorkspace: %v", err)
+	}
+	err = store.UpdateSessionMembers("demo", "ghost-session", func(session *workspace.Session) error {
+		called = true
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "ghost-session") {
+		t.Errorf("expected an error naming the missing session, got %v", err)
+	}
+	if called {
+		t.Error("mutate must not run when the session does not exist")
+	}
+
+	workspaces, err := store.LoadWorkspaces()
+	if err != nil {
+		t.Fatalf("LoadWorkspaces: %v", err)
+	}
+	if len(workspaces[0].Sessions) != 0 {
+		t.Errorf("expected no sessions written, got %+v", workspaces[0].Sessions)
+	}
+}
+
 // TestSaveWorkspaces_FailedWriteLeavesPreviousFileValid verifies that when a
 // save cannot complete (simulating an interrupted write), the previously
 // saved workspaces.json is untouched and still parses. The temp-file+rename

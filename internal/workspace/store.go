@@ -212,6 +212,41 @@ func (s *Store) DetachRepo(workspaceName, repoPath string) error {
 	return s.save(workspaces)
 }
 
+// UpdateSessionMembers locates the session named sessionName inside the
+// workspace named workspaceName, lets mutate adjust its fields (most notably
+// Members) in place, and persists the whole reloaded set — the entire
+// read-modify-write happens under s.mu, so two callers backfilling different
+// sessions of the same workspace concurrently (e.g. two membershipChangedMsg
+// backfills in flight at once) can never interleave and silently drop one
+// another's update, the same hazard AddSession's own concurrent-write test
+// guards against. It returns an error naming whichever of the workspace or
+// session does not exist, and persists nothing in that case. If mutate itself
+// returns an error, nothing is persisted either, so a failed backfill of one
+// session never disturbs the workspace's membership or any other session.
+func (s *Store) UpdateSessionMembers(workspaceName, sessionName string, mutate func(*Session) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	workspaces, err := s.load()
+	if err != nil {
+		return err
+	}
+	wIdx := findWorkspaceIndex(workspaces, workspaceName)
+	if wIdx < 0 {
+		return fmt.Errorf("workspace %q does not exist", workspaceName)
+	}
+	sIdx := findSessionIndex(workspaces[wIdx].Sessions, sessionName)
+	if sIdx < 0 {
+		return fmt.Errorf("session %q does not exist in workspace %q", sessionName, workspaceName)
+	}
+	session := workspaces[wIdx].Sessions[sIdx]
+	if err := mutate(&session); err != nil {
+		return err
+	}
+	workspaces[wIdx].Sessions[sIdx] = session
+	return s.save(workspaces)
+}
+
 // load reads and parses workspaces.json. Callers must hold s.mu.
 func (s *Store) load() ([]Workspace, error) {
 	data, err := os.ReadFile(s.path)
