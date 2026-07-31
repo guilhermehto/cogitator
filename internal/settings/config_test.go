@@ -2,6 +2,7 @@ package settings_test
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -451,7 +452,10 @@ func TestSetDefaultHarness_RoundTrip(t *testing.T) {
 }
 
 // TestResolveWorkspaceRoot_DefaultsUnderXDGDataHome verifies that an empty
-// WorkspaceRoot resolves to $XDG_DATA_HOME/cogitator/workspaces.
+// WorkspaceRoot resolves to the canonical form of
+// $XDG_DATA_HOME/cogitator/workspaces — the default branch must canonicalize
+// exactly like the configured branch, since consumers (settings.PathUnderRoot)
+// compare it against paths that are themselves already canonical.
 func TestResolveWorkspaceRoot_DefaultsUnderXDGDataHome(t *testing.T) {
 	dataHome := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dataHome)
@@ -460,14 +464,21 @@ func TestResolveWorkspaceRoot_DefaultsUnderXDGDataHome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveWorkspaceRoot: %v", err)
 	}
-	want := filepath.Join(dataHome, "cogitator", "workspaces")
+	want, err := pathnorm.Canonical(filepath.Join(dataHome, "cogitator", "workspaces"))
+	if err != nil {
+		t.Fatalf("pathnorm.Canonical: %v", err)
+	}
 	if got != want {
 		t.Errorf("ResolveWorkspaceRoot default: got %q, want %q", got, want)
+	}
+	if !filepath.IsAbs(got) {
+		t.Errorf("ResolveWorkspaceRoot default: expected absolute path, got %q", got)
 	}
 }
 
 // TestResolveWorkspaceRoot_XDGFallback verifies that when $XDG_DATA_HOME is
-// unset, the default falls back to ~/.local/share/cogitator/workspaces.
+// unset, the default falls back to the canonical form of
+// ~/.local/share/cogitator/workspaces.
 func TestResolveWorkspaceRoot_XDGFallback(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", "")
 	home := t.TempDir()
@@ -477,9 +488,87 @@ func TestResolveWorkspaceRoot_XDGFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveWorkspaceRoot: %v", err)
 	}
-	want := filepath.Join(home, ".local", "share", "cogitator", "workspaces")
+	want, err := pathnorm.Canonical(filepath.Join(home, ".local", "share", "cogitator", "workspaces"))
+	if err != nil {
+		t.Fatalf("pathnorm.Canonical: %v", err)
+	}
 	if got != want {
 		t.Errorf("ResolveWorkspaceRoot fallback: got %q, want %q", got, want)
+	}
+}
+
+// TestResolveWorkspaceRoot_DefaultIsStableAndDoesNotCreateDirectory verifies
+// that resolving the default root twice yields a byte-identical, absolute
+// path, and that ResolveWorkspaceRoot never creates the (not yet existing)
+// workspace directory as a side effect of canonicalizing it.
+func TestResolveWorkspaceRoot_DefaultIsStableAndDoesNotCreateDirectory(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+
+	first, err := settings.ResolveWorkspaceRoot(settings.Config{})
+	if err != nil {
+		t.Fatalf("ResolveWorkspaceRoot (first): %v", err)
+	}
+	second, err := settings.ResolveWorkspaceRoot(settings.Config{})
+	if err != nil {
+		t.Fatalf("ResolveWorkspaceRoot (second): %v", err)
+	}
+	if first != second {
+		t.Errorf("ResolveWorkspaceRoot must be stable across calls: %q != %q", first, second)
+	}
+	if !filepath.IsAbs(first) {
+		t.Errorf("ResolveWorkspaceRoot default: expected absolute path, got %q", first)
+	}
+
+	rawDefault := filepath.Join(dataHome, "cogitator", "workspaces")
+	if _, statErr := os.Stat(rawDefault); statErr == nil {
+		t.Errorf("ResolveWorkspaceRoot must not create the default workspace directory, but %q exists", rawDefault)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("stat %q: %v", rawDefault, statErr)
+	}
+}
+
+// TestResolveWorkspaceRoot_DefaultRootExcludesMemberWorktreeViaPathUnderRoot
+// pins the modal-facing property the review flagged: a candidate repo path
+// discovered under the resolved DEFAULT root (which settings.DiscoverRepos
+// would return in canonical form) must be recognized as under that root by
+// settings.PathUnderRoot. Before the fix, ResolveWorkspaceRoot's default
+// branch returned an uncanonical path, so on a root whose ancestry contains a
+// symlink (e.g. macOS's /var -> /private/var) PathUnderRoot's prefix test
+// failed and the candidate leaked through as an attachable repo in the
+// repo-membership modal.
+func TestResolveWorkspaceRoot_DefaultRootExcludesMemberWorktreeViaPathUnderRoot(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+
+	rawDefault := filepath.Join(dataHome, "cogitator", "workspaces")
+	canonicalDefault, err := pathnorm.Canonical(rawDefault)
+	if err != nil {
+		t.Fatalf("pathnorm.Canonical(rawDefault): %v", err)
+	}
+	if rawDefault == canonicalDefault {
+		t.Fatalf("test setup invariant violated: raw default %q and its canonical form are identical (no symlink in t.TempDir()'s ancestry) — this test would be a no-op on this platform", rawDefault)
+	}
+
+	resolvedRoot, err := settings.ResolveWorkspaceRoot(settings.Config{})
+	if err != nil {
+		t.Fatalf("ResolveWorkspaceRoot: %v", err)
+	}
+
+	// A member repo's own worktree, discovered under the raw (uncanonical)
+	// join and then canonicalized — mirroring settings.DiscoverRepos, which
+	// canonicalizes every path it returns.
+	memberWorktree := filepath.Join(rawDefault, "payments", "feature-x", "app")
+	if err := os.MkdirAll(memberWorktree, 0o755); err != nil {
+		t.Fatalf("mkdir memberWorktree: %v", err)
+	}
+	candidate, err := pathnorm.Canonical(memberWorktree)
+	if err != nil {
+		t.Fatalf("pathnorm.Canonical(memberWorktree): %v", err)
+	}
+
+	if !settings.PathUnderRoot(resolvedRoot, candidate) {
+		t.Errorf("PathUnderRoot(%q, %q) = false, want true: a member worktree under the default root must be excluded", resolvedRoot, candidate)
 	}
 }
 

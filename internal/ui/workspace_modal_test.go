@@ -135,9 +135,12 @@ func TestWorkspaceModal_ScanCmdCombinesMembersAndCandidatesExcludingRoot(t *test
 	if err := os.WriteFile(filepath.Join(sessionWorktree, ".git"), []byte("gitdir: /elsewhere\n"), 0o644); err != nil {
 		t.Fatalf("write .git file: %v", err)
 	}
-	canonWsRoot, err := pathnorm.Canonical(wsRoot)
+	// Resolve through settings.ResolveWorkspaceRoot — the same function
+	// production uses — rather than pre-canonicalizing wsRoot by hand, so this
+	// test exercises what production actually returns.
+	canonWsRoot, err := settings.ResolveWorkspaceRoot(settings.Config{WorkspaceRoot: wsRoot})
 	if err != nil {
-		t.Fatalf("canonical wsRoot: %v", err)
+		t.Fatalf("ResolveWorkspaceRoot: %v", err)
 	}
 
 	msg := scanWorkspaceModalCmd(root, "payments", []string{wantMember}, canonWsRoot)().(wsModalScanMsg)
