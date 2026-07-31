@@ -526,6 +526,17 @@ func TestMembershipChangedMsgDoesNotClobberAnOpenPrompt(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected a reload cmd")
 	}
+	// review-fix-F, defect A: dropping the backfill offer silently leaves the
+	// user with no way to know their existing sessions were not updated.
+	if !strings.Contains(m2.wsHint, "c") || !strings.Contains(m2.wsHint, "payments") {
+		t.Errorf("wsHint must name the repo and workspace when the backfill offer is dropped; got %q", m2.wsHint)
+	}
+	if !strings.Contains(m2.wsHint, "not") {
+		t.Errorf("wsHint must explain the existing sessions were not updated; got %q", m2.wsHint)
+	}
+	if !strings.Contains(m2.wsHint, "re-add") {
+		t.Errorf("wsHint must say re-adding the repo offers the backfill again; got %q", m2.wsHint)
+	}
 }
 
 func TestMembershipChangedMsgStillOpensBackfillWhenIdle(t *testing.T) {
@@ -540,6 +551,11 @@ func TestMembershipChangedMsgStillOpensBackfillWhenIdle(t *testing.T) {
 
 	if m2.prompt != promptWorkspaceBackfill {
 		t.Errorf("with no prompt open, membershipChangedMsg must still open the backfill prompt; got %v", m2.prompt)
+	}
+	// review-fix-F, defect A: the drop-and-hint path must not fire when the
+	// backfill picker actually opens.
+	if m2.wsHint != "" {
+		t.Errorf("wsHint must stay empty when the backfill picker opens normally; got %q", m2.wsHint)
 	}
 }
 

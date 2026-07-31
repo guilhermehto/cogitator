@@ -1786,15 +1786,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (b.2) Help overlay — '?' opens the floating keybinding reference.
 		// Global (works in either pane) and only reachable here when no prompt
 		// is active, since the prompt pre-empt block short-circuits first.
+		// Clears wsHint here (not just on the m.view == viewWorkspaces "any
+		// key" clear below) because dismissing the overlay afterwards returns
+		// through the promptHelp arm of the pre-empt block above, which never
+		// reaches that clear either — so a hint set before '?' would otherwise
+		// survive the whole open/close round trip.
 		if msg.String() == "?" {
+			m.wsHint = ""
 			m.prompt = promptHelp
 			return m, nil
 		}
 
 		// (b.3) Settings overlay — 'S' opens the persistent-settings modal
 		// (default harness, launch mode). Global; only reachable when no prompt
-		// is active, since the pre-empt block above short-circuits first.
+		// is active, since the pre-empt block above short-circuits first. See
+		// the '?' comment above for why wsHint is cleared here rather than
+		// relying on the m.view == viewWorkspaces clear below.
 		if msg.String() == "S" {
+			m.wsHint = ""
 			m.openSettings()
 			return m, nil
 		}
@@ -1803,8 +1812,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Sessions and Workspaces views. Global; only reachable when no prompt
 		// is active, since the pre-empt block above short-circuits first. Each
 		// view keeps its own cursor/scroll state, so swapping never disturbs
-		// the other view's position.
+		// the other view's position. Both hints are cleared here — not just on
+		// the "any key" clears further down — because tab returns before
+		// either of those is reached, so a hint set in one view would
+		// otherwise survive a tab round trip and reappear on return.
 		if msg.String() == "tab" {
+			m.wsHint = ""
+			m.tmuxHint = ""
 			if m.view == viewWorkspaces {
 				m.view = viewSessions
 			} else {
@@ -2258,8 +2272,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// must never clobber a prompt the user already has open — mirroring
 		// the repoScanMsg/wsModalScanMsg prompt guards above. When some other
 		// prompt is active, drop the backfill offer but still refresh the
-		// statuses so the already-persisted membership change shows up.
+		// statuses so the already-persisted membership change shows up. The
+		// user has no way to know the backfill never happened otherwise, so
+		// name the repo and workspace and point at the recovery (re-add the
+		// repo to be offered the backfill again).
 		if m.prompt != promptIdle {
+			m.wsHint = fmt.Sprintf(
+				"%s: existing sessions in %s were not updated — re-add the repo to offer the backfill again",
+				filepath.Base(msg.repo), msg.workspace,
+			)
 			return m.reloadWsStatuses()
 		}
 		return m.handleMembershipChanged(msg)

@@ -202,6 +202,65 @@ func TestWorkspaceViewNextKeypressClearsHintFromRenderedOutput(t *testing.T) {
 	}
 }
 
+// TestWorkspaceViewTabRoundTripClearsHint — review-fix-F, defect B. tab and
+// '?' are handled by early returns in Update, before the m.view ==
+// viewWorkspaces routing block that clears wsHint on "any key". A hint set
+// in the Workspaces view used to survive a tab-out/tab-back round trip.
+func TestWorkspaceViewTabRoundTripClearsHint(t *testing.T) {
+	m := model{
+		width: 80, height: 24,
+		view:   viewWorkspaces,
+		wsHint: `workspace "infra" has no member repos — add one before creating a session`,
+	}
+
+	updated, _ := m.Update(keyMsg("tab"))
+	m2 := updated.(model)
+	if m2.view != viewSessions {
+		t.Fatalf("first tab must switch to the Sessions view; got %v", m2.view)
+	}
+
+	updated2, _ := m2.Update(keyMsg("tab"))
+	m3 := updated2.(model)
+	if m3.view != viewWorkspaces {
+		t.Fatalf("second tab must switch back to the Workspaces view; got %v", m3.view)
+	}
+
+	after := m3.View()
+	if strings.Contains(after, "has no member repos") {
+		t.Errorf("a wsHint set before a tab round trip must not reappear after it; got:\n%s", after)
+	}
+}
+
+// TestWorkspaceViewHelpOverlayRoundTripClearsHint — review-fix-F, defect B.
+// '?' opens promptHelp via the same kind of early return as tab, before
+// wsHint's "any key" clear. Closing the overlay dismisses via the prompt
+// pre-empt block, which also returns before that clear — so the hint must be
+// cleared on '?' itself.
+func TestWorkspaceViewHelpOverlayRoundTripClearsHint(t *testing.T) {
+	m := model{
+		width: 80, height: 24,
+		view:   viewWorkspaces,
+		wsHint: `workspace "infra" has no member repos — add one before creating a session`,
+	}
+
+	updated, _ := m.Update(keyMsg("?"))
+	m2 := updated.(model)
+	if m2.prompt != promptHelp {
+		t.Fatalf("'?' must open the help overlay; got prompt=%v", m2.prompt)
+	}
+
+	updated2, _ := m2.Update(keyMsg("enter"))
+	m3 := updated2.(model)
+	if m3.prompt != promptIdle {
+		t.Fatalf("any key must dismiss the help overlay; got prompt=%v", m3.prompt)
+	}
+
+	after := m3.View()
+	if strings.Contains(after, "has no member repos") {
+		t.Errorf("a wsHint set before opening the help overlay must not reappear after closing it; got:\n%s", after)
+	}
+}
+
 func TestSessionsViewLineCountUnaffectedByWsHintBudgetFix(t *testing.T) {
 	// view is left at its zero value (viewSessions); wsHint is set anyway to
 	// prove paneHeights' new budget line is gated on m.view == viewWorkspaces
