@@ -135,6 +135,21 @@ const (
 	// immediately. Placed last so existing model{} literals keep their iota
 	// values.
 	promptSettings
+	// promptNewWorkspace is active while the user types a name for 'N' (new,
+	// empty workspace) from the Workspaces view. On enter, the name is
+	// dispatched to createWorkspaceCmd; on esc, cancelled without creating
+	// anything. Placed last so existing model{} literals keep their iota
+	// values.
+	promptNewWorkspace
+	// promptNewWorkspaceSession is active while the user types a session name
+	// for 'n' (new session) from the Workspaces view, for the workspace under
+	// the cursor (captured in wsCreateTarget). On enter, a valid name advances
+	// to promptChooseHarness (shared with the Sessions pane's 'n'/'F' flow;
+	// wsCreateTarget non-empty is what tells that shared handler to dispatch
+	// assembleWorkspaceSessionCmd instead of newWorktreeCmd); an invalid or
+	// duplicate name is refused with wsHint and the prompt stays open. Placed
+	// last so existing model{} literals keep their iota values.
+	promptNewWorkspaceSession
 )
 
 // launchResultMsg is returned by launchCmd / resumeCmd after the tmux
@@ -564,6 +579,28 @@ type model struct {
 	// collapses into a single follow-up load using the latest snapshot.
 	wsBuilding bool
 	wsDirty    bool
+	// wsHint is a transient one-line message shown in the Workspaces view
+	// (e.g. "add a repo first", a failed create's error), mirroring tmuxHint's
+	// role for the Sessions pane. Kept separate from tmuxHint so a message
+	// raised in one view can never bleed into the other's rendering after Tab.
+	wsHint string
+	// wsCreateTarget is the workspace name captured when 'n' opens
+	// promptNewWorkspaceSession, carried forward through promptChooseHarness
+	// (shared with the Sessions pane's 'n'/'F' flow) so its enter-handler
+	// knows to dispatch assembleWorkspaceSessionCmd rather than
+	// newWorktreeCmd. Empty whenever no workspace-session create is in
+	// progress.
+	wsCreateTarget string
+	// wsCreateSessionName is the session name typed in promptNewWorkspaceSession,
+	// carried forward to promptChooseHarness exactly as newWorktreeBranch carries
+	// the Sessions pane's branch name.
+	wsCreateSessionName string
+	// wsPendingSessions tracks workspace sessions being assembled ('n' in the
+	// Workspaces view), keyed by wsSessionKey(workspace, session). Each is
+	// rendered as an optimistic, animated placeholder row (injectPendingWsSessions)
+	// until assembleWorkspaceSessionCmd reports completion, mirroring
+	// pendingCreates for the Sessions pane.
+	wsPendingSessions map[string]pendingWsSession
 
 	// Injectable seams for tmux, git, harness, and workspace-store operations.
 	// Nil values are replaced with the real implementations in newModel (store
@@ -1211,11 +1248,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			case promptChooseHarness:
 				// Harness chooser: up/down moves the cursor; enter confirms and
-				// dispatches newWorktreeCmd; esc cancels the whole flow.
+				// dispatches newWorktreeCmd — or, when this chooser was opened by
+				// the Workspaces view's 'n' (wsCreateTarget set),
+				// assembleWorkspaceSessionCmd instead; esc cancels the whole flow.
 				switch msg.String() {
 				case "enter":
-					branch := m.newWorktreeBranch
-					repoPath := m.newWorktreeRepo
 					var chosenKind string
 					if len(m.harnessChooserKinds) > 0 {
 						idx := clampIndex(m.harnessChooserCursor, len(m.harnessChooserKinds))
@@ -1224,6 +1261,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if chosenKind == "" {
 						chosenKind = string(harness.KindOpenCode)
 					}
+					if m.wsCreateTarget != "" {
+						return m.startWorkspaceSessionCreate(m.wsCreateTarget, m.wsCreateSessionName, chosenKind)
+					}
+					branch := m.newWorktreeBranch
+					repoPath := m.newWorktreeRepo
 					return m.startNewWorktree(repoPath, branch, chosenKind, m.worktreeFromRemote)
 
 				case "esc":
@@ -1231,6 +1273,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.newWorktreeRepo = ""
 					m.newWorktreeBranch = ""
 					m.worktreeFromRemote = false
+					m.wsCreateTarget = ""
+					m.wsCreateSessionName = ""
 					m.harnessChooserKinds = nil
 					m.harnessChooserCursor = 0
 					return m, nil
@@ -1244,6 +1288,82 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				return m, nil
+
+			case promptNewWorkspace:
+				// Name prompt for 'N' (new, empty workspace). On enter, a
+				// non-empty name is dispatched to createWorkspaceCmd; esc or an
+				// empty name cancels without creating anything.
+				switch msg.String() {
+				case "enter":
+					name := strings.TrimSpace(m.input.Value())
+					_, inputCmd := m.input.Update(msg)
+					m.prompt = promptIdle
+					m.input.Blur()
+					m.input.SetValue("")
+					if name == "" {
+						return m, inputCmd
+					}
+					return m, tea.Batch(inputCmd, createWorkspaceCmd(m.store, name))
+
+				case "esc":
+					m.prompt = promptIdle
+					m.input.Blur()
+					m.input.SetValue("")
+					return m, nil
+
+				default:
+					var cmd tea.Cmd
+					m.input, cmd = m.input.Update(msg)
+					return m, cmd
+				}
+
+			case promptNewWorkspaceSession:
+				// Name prompt for 'n' (new session) in the workspace captured in
+				// wsCreateTarget. On enter, a valid name advances to the shared
+				// promptChooseHarness; an invalid or duplicate name is refused via
+				// wsHint and the prompt stays open so the user can retype. esc or
+				// an empty name cancels the whole flow.
+				switch msg.String() {
+				case "enter":
+					name := strings.TrimSpace(m.input.Value())
+					target := m.wsCreateTarget
+					_, inputCmd := m.input.Update(msg)
+					if name == "" {
+						m.prompt = promptIdle
+						m.input.Blur()
+						m.input.SetValue("")
+						m.wsCreateTarget = ""
+						return m, inputCmd
+					}
+					if err := m.validateNewWsSessionName(target, name); err != nil {
+						m.wsHint = err.Error()
+						return m, inputCmd
+					}
+					m.wsCreateSessionName = name
+					m.wsHint = ""
+					m.input.Blur()
+					m.input.SetValue("")
+					if dk := resolvedDefaultHarness(m.harnOp); dk != "" {
+						return m.startWorkspaceSessionCreate(target, name, dk)
+					}
+					m.prompt = promptChooseHarness
+					m.harnessChooserKinds = harnessChooserKinds(m.harnOp)
+					m.harnessChooserCursor = defaultHarnessIndex(m.harnessChooserKinds)
+					return m, inputCmd
+
+				case "esc":
+					m.prompt = promptIdle
+					m.input.Blur()
+					m.input.SetValue("")
+					m.wsCreateTarget = ""
+					m.wsCreateSessionName = ""
+					return m, nil
+
+				default:
+					var cmd tea.Cmd
+					m.input, cmd = m.input.Update(msg)
+					return m, cmd
+				}
 
 			case promptAddRepo:
 				// Embedded repo finder. Enter adds the highlighted repo; the
@@ -1458,10 +1578,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// Workspaces-view keys route through their own method rather than
+		// Workspaces-view keys route through their own methods rather than
 		// adding arms here, following updateSettings's precedent — this
-		// switch already exceeds the configured gocyclo minimum.
+		// switch already exceeds the configured gocyclo minimum. Lifecycle
+		// keys (create workspace/session) are tried first, since they open a
+		// prompt or dispatch a Cmd rather than moving the cursor; anything
+		// else falls through to the pure-navigation handler in
+		// workspace_view.go.
 		if m.view == viewWorkspaces {
+			if next, cmd, handled := m.updateWorkspaceLifecycle(msg); handled {
+				return next, cmd
+			}
 			return m.updateWorkspaceView(msg)
 		}
 
@@ -1945,14 +2072,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case wsStatusMsg:
-		m.wsStatuses = msg.statuses
-		// Clamp the Workspaces-view cursor so it never points past the end of
-		// the new entry list (workspace headers + session rows).
-		if n := wsEntryCount(m.wsStatuses); n == 0 {
-			m.wsCursor = 0
-		} else if m.wsCursor >= n {
-			m.wsCursor = n - 1
-		}
+		// msg.statuses is always freshly merged (never carries a placeholder),
+		// so re-inject any in-flight session creates before storing it —
+		// otherwise a snapshot-driven reload while 'n' is assembling would drop
+		// the spinner row until assembleWorkspaceSessionCmd completes.
+		m.wsStatuses = injectPendingWsSessions(msg.statuses, m.wsPendingSessions, m.spinnerFrame)
+		m.clampWsCursor()
 		m.wsBuilding = false
 		if m.wsDirty {
 			m.wsDirty = false
@@ -1961,6 +2086,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case wsWorkspaceCreatedMsg:
+		// Outcome of createWorkspaceCmd ('N'). On success, refresh from the
+		// store so the new workspace appears without waiting for the next
+		// snapshot, mirroring repoAddMsg's immediate rebuild for the Sessions
+		// pane; coalesce with an in-flight load exactly as snapshotMsg does.
+		if msg.err != nil {
+			m.wsHint = fmt.Sprintf("create workspace %q failed: %v", msg.name, msg.err)
+			return m, nil
+		}
+		m.wsHint = ""
+		if m.wsBuilding {
+			m.wsDirty = true
+			return m, nil
+		}
+		m.wsBuilding = true
+		return m, loadWorkspaceStatusCmd(m.store, m.snap)
+
+	case wsSessionAssembledMsg:
+		// Outcome of assembleWorkspaceSessionCmd ('n' in the Workspaces view).
+		// Clear the optimistic spinner row first regardless of outcome: on
+		// success the real session arrives via the reload dispatched below; on
+		// failure nothing was persisted (assembleWorkspaceSessionCmd rolls back
+		// its own partial work).
+		m.clearPendingWsSession(msg.workspaceName, msg.sessionName)
+		if msg.err != nil {
+			m.wsHint = fmt.Sprintf("create session %q failed: %v", msg.sessionName, msg.err)
+			return m, nil
+		}
+		m.wsHint = ""
+		if m.wsBuilding {
+			m.wsDirty = true
+			return m, nil
+		}
+		m.wsBuilding = true
+		return m, loadWorkspaceStatusCmd(m.store, m.snap)
+
 	case tickMsg:
 		// Re-arm the ticker and record the current time so View() can render
 		// fresh relative timestamps without calling time.Now() on every frame.
@@ -1968,15 +2129,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickCmd()
 
 	case spinnerTickMsg:
-		// Advance the spinner shared by pending creates and in-flight pulls. Stop
-		// re-arming once neither remains so the ticker costs nothing when idle;
-		// reset the frame so the next operation starts from the first glyph.
-		if len(m.pendingCreates) == 0 && len(m.pulling) == 0 {
+		// Advance the spinner shared by pending creates, in-flight pulls, and
+		// pending workspace-session creates. Stop re-arming once none remain
+		// so the ticker costs nothing when idle; reset the frame so the next
+		// operation starts from the first glyph.
+		if len(m.pendingCreates) == 0 && len(m.pulling) == 0 && len(m.wsPendingSessions) == 0 {
 			m.spinnerActive = false
 			m.spinnerFrame = 0
 			return m, nil
 		}
 		m.spinnerFrame++
+		if len(m.wsPendingSessions) > 0 {
+			// Unlike the Sessions pane's formatCreatingRow (a model method
+			// that reads m.spinnerFrame at render time), formatWsSessionRow
+			// (workspace_view.go) is a pure function of workspace.SessionStatus
+			// alone, so the animated glyph must be baked into the placeholder's
+			// data on every tick rather than read live at render time.
+			m.wsStatuses = injectPendingWsSessions(stripPendingWsSessions(m.wsStatuses), m.wsPendingSessions, m.spinnerFrame)
+		}
 		return m, spinnerTickCmd()
 	}
 	return m, nil
@@ -2108,7 +2278,11 @@ func sessionPaletteLabel(row settings.Row) string {
 func (m model) renderHarnessChooser(width, height int) string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Choose harness") + "\n")
-	b.WriteString(dimStyle.Render(fmt.Sprintf("new worktree: %s / %s", filepath.Base(m.newWorktreeRepo), m.newWorktreeBranch)) + "\n")
+	if m.wsCreateTarget != "" {
+		b.WriteString(dimStyle.Render(fmt.Sprintf("new session: %s / %s", m.wsCreateTarget, m.wsCreateSessionName)) + "\n")
+	} else {
+		b.WriteString(dimStyle.Render(fmt.Sprintf("new worktree: %s / %s", filepath.Base(m.newWorktreeRepo), m.newWorktreeBranch)) + "\n")
+	}
 
 	if len(m.harnessChooserKinds) == 0 {
 		b.WriteString(dimStyle.Render("(no harnesses registered)"))
@@ -2237,6 +2411,12 @@ func (m model) View() string {
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderSettings(paneW))
 	case m.prompt == promptChooseHarness:
 		sessionContent = m.renderHarnessChooser(paneW, sessionsInnerH)
+	case m.prompt == promptNewWorkspace:
+		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsNamePrompt("New workspace", "workspace name: "))
+	case m.prompt == promptNewWorkspaceSession:
+		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsNamePrompt("New session", "session name: "))
 	case m.view == viewWorkspaces:
 		sessionContent = m.renderWorkspacesView(paneW, sessionsInnerH)
 	case len(m.workspaceRows) > 0:
@@ -2251,6 +2431,13 @@ func (m model) View() string {
 	sessionsPane := sessionsStyle.Width(paneW).Height(sessionsInnerH).Render(sessionContent)
 
 	parts := []string{header, sessionsPane, legend}
+	// The Workspaces view's own renderer (workspace_view.go) has no pinned
+	// footer line to grow into (unlike renderWorkspaceRowsViewport's tmuxHint),
+	// so wsHint is appended here instead — below the pane, same as the debug
+	// footer — whenever the Workspaces view is active and has something to say.
+	if m.view == viewWorkspaces && m.wsHint != "" {
+		parts = append(parts, wtHintStyle.Render(m.wsHint))
+	}
 	if footer != "" {
 		parts = append(parts, footer)
 	}
@@ -2273,15 +2460,16 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 	// on the first tea.WindowSizeMsg so it tracks the actual terminal width.
 
 	return model{
-		snaps:           snaps,
-		recentCollapsed: true,
-		bellEnabled:     bellEnabled,
-		debug:           debug,
-		bellSent:        map[rowKey]state.Attention{},
-		pendingDeletes:  map[string]settings.Row{},
-		pendingCreates:  map[string]pendingCreate{},
-		pulling:         map[string]bool{},
-		cfg:             cfg,
+		snaps:             snaps,
+		recentCollapsed:   true,
+		bellEnabled:       bellEnabled,
+		debug:             debug,
+		bellSent:          map[rowKey]state.Attention{},
+		pendingDeletes:    map[string]settings.Row{},
+		pendingCreates:    map[string]pendingCreate{},
+		wsPendingSessions: map[string]pendingWsSession{},
+		pulling:           map[string]bool{},
+		cfg:               cfg,
 
 		// Init always attempts an initial Workspaces-view load (skipped only
 		// under --demo). Starting wsBuilding true means a snapshot arriving
