@@ -572,6 +572,128 @@ func TestTeardownSession_LockedWorktreeReportsFailureButRemovesOthers(t *testing
 	}
 }
 
+// TestTeardownSession_UnregisteredMemberBranchStillDeleted verifies that when
+// one member's worktree was removed by hand (e.g. `git worktree remove` run
+// directly, leaving the branch behind since that bypasses cogitator's
+// RemoveWorktree), TeardownSession still deletes that member's branch, still
+// removes the other member normally, still removes the session directory,
+// and still reports success — so a session of the same name can be
+// reassembled afterwards instead of failing forever on "branch already
+// exists".
+func TestTeardownSession_UnregisteredMemberBranchStillDeleted(t *testing.T) {
+	repoA := newAssembleTestRepo(t, "repo-a")
+	repoB := newAssembleTestRepo(t, "repo-b")
+	root := t.TempDir()
+
+	ws := workspace.Workspace{
+		Name: "Payments",
+		Members: []workspace.MemberRepo{
+			{Path: repoA},
+			{Path: repoB},
+		},
+	}
+	session, err := workspace.AssembleSession(ws, root, "Feature X", "opencode")
+	if err != nil {
+		t.Fatalf("AssembleSession: %v", err)
+	}
+
+	var repoBMember workspace.SessionMember
+	for _, m := range session.Members {
+		if m.RepoPath == repoB {
+			repoBMember = m
+		}
+	}
+
+	// Simulate the user removing repoB's worktree by hand: git leaves the
+	// branch behind because this bypasses git.RemoveWorktree entirely.
+	rmCmd := exec.Command("git", "worktree", "remove", repoBMember.WorktreePath)
+	rmCmd.Dir = repoB
+	if out, err := rmCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree remove (by hand): %v\n%s", err, out)
+	}
+	if !git.BranchExists(repoB, session.Branch) {
+		t.Fatalf("precondition failed: branch %q missing from repoB right after manual worktree remove", session.Branch)
+	}
+
+	if err := workspace.TeardownSession(session); err != nil {
+		t.Fatalf("TeardownSession: %v", err)
+	}
+
+	if git.BranchExists(repoB, session.Branch) {
+		t.Errorf("branch %q still exists in repoB after teardown of the unregistered member", session.Branch)
+	}
+	if git.BranchExists(repoA, session.Branch) {
+		t.Errorf("branch %q still exists in repoA after teardown", session.Branch)
+	}
+	wtsA, err := git.ListWorktrees(repoA)
+	if err != nil {
+		t.Fatalf("ListWorktrees(repoA): %v", err)
+	}
+	if len(wtsA) != 1 {
+		t.Errorf("repoA was not torn down: %v", wtsA)
+	}
+	if _, statErr := os.Stat(session.Dir); statErr == nil {
+		t.Errorf("session directory %q still exists after teardown", session.Dir)
+	}
+}
+
+// TestTeardownSession_UnregisteredMemberBranchAlreadyGone_StillSucceeds
+// verifies that when a member's worktree AND branch were both removed by
+// hand (or by a prior TeardownSession call), a missing branch is not treated
+// as an error: teardown still succeeds and removes everything else, which is
+// what lets a retry after a partial failure converge.
+func TestTeardownSession_UnregisteredMemberBranchAlreadyGone_StillSucceeds(t *testing.T) {
+	repoA := newAssembleTestRepo(t, "repo-a")
+	repoB := newAssembleTestRepo(t, "repo-b")
+	root := t.TempDir()
+
+	ws := workspace.Workspace{
+		Name: "Payments",
+		Members: []workspace.MemberRepo{
+			{Path: repoA},
+			{Path: repoB},
+		},
+	}
+	session, err := workspace.AssembleSession(ws, root, "Feature X", "opencode")
+	if err != nil {
+		t.Fatalf("AssembleSession: %v", err)
+	}
+
+	var repoBMember workspace.SessionMember
+	for _, m := range session.Members {
+		if m.RepoPath == repoB {
+			repoBMember = m
+		}
+	}
+
+	rmCmd := exec.Command("git", "worktree", "remove", repoBMember.WorktreePath)
+	rmCmd.Dir = repoB
+	if out, err := rmCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree remove (by hand): %v\n%s", err, out)
+	}
+	if err := git.DeleteBranch(repoB, session.Branch, true); err != nil {
+		t.Fatalf("DeleteBranch (by hand): %v", err)
+	}
+
+	if err := workspace.TeardownSession(session); err != nil {
+		t.Fatalf("TeardownSession: %v", err)
+	}
+
+	if git.BranchExists(repoA, session.Branch) {
+		t.Errorf("branch %q still exists in repoA after teardown", session.Branch)
+	}
+	wtsA, err := git.ListWorktrees(repoA)
+	if err != nil {
+		t.Fatalf("ListWorktrees(repoA): %v", err)
+	}
+	if len(wtsA) != 1 {
+		t.Errorf("repoA was not torn down: %v", wtsA)
+	}
+	if _, statErr := os.Stat(session.Dir); statErr == nil {
+		t.Errorf("session directory %q still exists after teardown", session.Dir)
+	}
+}
+
 // TestAssembleMember_AddsOneWorktreeOnExistingBranch_LeavesOthersUntouched
 // verifies that assembling a single newly-attached member into an existing
 // session adds exactly one worktree on the session's branch, without

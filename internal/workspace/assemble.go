@@ -157,6 +157,22 @@ func rollbackAssembly(created []SessionMember, branch, sessionDir string) {
 // already removed it) is skipped rather than re-attempted, which is what
 // makes a retry after a partial failure converge instead of erroring on the
 // members that already succeeded.
+//
+// A member that is no longer registered still gets a best-effort
+// git.DeleteBranch call for session.Branch in that repo. RemoveWorktree
+// normally couples worktree removal with branch deletion (see
+// internal/git/worktree.go), so a member removed out-of-band (e.g. the user
+// ran `git worktree remove` by hand) skips that coupling and would otherwise
+// leave the branch behind — permanently blocking a session of the same name
+// from ever being reassembled, since AssembleSession's pre-flight refuses to
+// reuse an existing branch. The branch is only gone in the common case (the
+// prior removal already deleted it, or a previous TeardownSession retry
+// already did), and that must stay a silent success, so git.BranchExists is
+// checked first and DeleteBranch is only invoked when the branch is actually
+// present. A DeleteBranch failure at that point is collected as a per-repo
+// failure like every other failure in this loop, rather than swallowed: it
+// means the branch is still there and blocking reuse, which is exactly the
+// kind of state a caller must be told about rather than a false success.
 func TeardownSession(session Session) error {
 	var errs []error
 	failed := false
@@ -168,6 +184,12 @@ func TeardownSession(session Session) error {
 			continue
 		}
 		if !registered {
+			if git.BranchExists(m.RepoPath, session.Branch) {
+				if err := git.DeleteBranch(m.RepoPath, session.Branch, true); err != nil {
+					errs = append(errs, fmt.Errorf("%s: %w", m.RepoPath, err))
+					failed = true
+				}
+			}
 			continue
 		}
 		if err := git.RemoveWorktree(m.RepoPath, m.WorktreePath, session.Branch, true); err != nil {
