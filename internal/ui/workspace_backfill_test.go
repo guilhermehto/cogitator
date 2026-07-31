@@ -19,6 +19,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/guilhermehto/cogitator/internal/git"
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
@@ -548,6 +550,93 @@ func TestWorkspaceBackfill_EndToEnd_DetachRemovesWorktreeAndLeavesOthers(t *test
 		if _, statErr := os.Stat(mem.WorktreePath); statErr != nil {
 			t.Errorf("member %s's worktree must still exist: %v", path, statErr)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// review-fix-B: persist failure after AssembleMember already succeeded
+// ---------------------------------------------------------------------------
+
+// TestWorkspaceBackfill_PersistFailureTearsDownOrphanedMember verifies the
+// review-fix-B fix: when AssembleMember has already created a real worktree
+// and branch for the chosen session but UpdateSessionMembers' own persist
+// step then fails — simulated here with a read-only config directory,
+// mirroring internal/workspace/store_test.go's
+// TestSaveWorkspaces_FailedWriteLeavesPreviousFileValid — backfillOneSession
+// tears that worktree and branch back down rather than leaving them an
+// invisible orphan, and the returned error names both the session and the
+// repo.
+func TestWorkspaceBackfill_PersistFailureTearsDownOrphanedMember(t *testing.T) {
+	setWsTestXDG(t)
+
+	repoA := newWsCmdTestRepo(t, "repo-a")
+	repoC := newWsCmdTestRepo(t, "repo-c")
+
+	store, err := workspace.NewStore()
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if _, err := store.AddWorkspace("payments"); err != nil {
+		t.Fatalf("AddWorkspace: %v", err)
+	}
+	if err := store.AttachRepo("payments", repoA); err != nil {
+		t.Fatalf("AttachRepo repoA: %v", err)
+	}
+
+	ws, _ := findWorkspaceByName(mustLoad(t, store), "payments")
+	root := mustResolveTestRoot(t)
+	sess, err := workspace.AssembleSession(ws, root, "Feature X", "opencode")
+	if err != nil {
+		t.Fatalf("AssembleSession: %v", err)
+	}
+	if err := store.AddSession("payments", sess); err != nil {
+		t.Fatalf("AddSession: %v", err)
+	}
+
+	// Commit the membership change (mirrors what the modal already did).
+	if err := store.AttachRepo("payments", repoC); err != nil {
+		t.Fatalf("AttachRepo repoC: %v", err)
+	}
+
+	configPath, err := settings.ConfigPath()
+	if err != nil {
+		t.Fatalf("ConfigPath: %v", err)
+	}
+	cfgDir := filepath.Dir(configPath)
+	if err := os.Chmod(cfgDir, 0o555); err != nil {
+		t.Fatalf("chmod config dir read-only: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(cfgDir, 0o755) })
+
+	storeOps := realStoreOps{store: store}
+	backfillErr := backfillOneSession(storeOps, "payments", repoC, true, "Feature X")
+
+	if err := os.Chmod(cfgDir, 0o755); err != nil {
+		t.Fatalf("restore config dir permissions: %v", err)
+	}
+
+	if backfillErr == nil {
+		t.Fatal("expected an error when persisting the backfill fails")
+	}
+	if !strings.Contains(backfillErr.Error(), "Feature X") {
+		t.Errorf("error must name the session, got %v", backfillErr)
+	}
+	if !strings.Contains(backfillErr.Error(), repoC) {
+		t.Errorf("error must name the repo, got %v", backfillErr)
+	}
+
+	if git.BranchExists(repoC, sess.Branch) {
+		t.Errorf("branch %q must be torn down in repoC after a persist failure", sess.Branch)
+	}
+
+	loaded := mustLoad(t, store)
+	loadedWs, _ := findWorkspaceByName(loaded, "payments")
+	loadedSess, ok := findSessionByName(loadedWs.Sessions, "Feature X")
+	if !ok {
+		t.Fatal("Feature X missing after failed backfill")
+	}
+	if hasSessionMember(loadedSess.Members, repoC) {
+		t.Errorf("session must not record repoC as a member after a persist failure, got %+v", loadedSess.Members)
 	}
 }
 
