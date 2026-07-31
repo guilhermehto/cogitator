@@ -223,6 +223,25 @@ func (s *Store) DetachRepo(workspaceName, repoPath string) error {
 // session does not exist, and persists nothing in that case. If mutate itself
 // returns an error, nothing is persisted either, so a failed backfill of one
 // session never disturbs the workspace's membership or any other session.
+//
+// mutate runs with s.mu held, which has two consequences callers must respect:
+// (1) mutate must never call back into Store — s.mu is a plain sync.Mutex,
+// not reentrant, so a mutate that re-enters any Store method deadlocks the
+// whole caller (in this codebase, the whole TUI); (2) mutate may do arbitrarily
+// slow work (the UI's own mutate shells out to git via AssembleMember/
+// TeardownMember), but every other Store mutation — from any goroutine — is
+// blocked for that entire duration, so callers should keep mutate no slower
+// than the work actually requires and only ever invoke UpdateSessionMembers
+// from a tea.Cmd, never the UI goroutine.
+//
+// If mutate performs an effect outside the Session it's handed — e.g.
+// creating a worktree on disk — and this method's own persist step then
+// fails, that effect is NOT rolled back here: only the in-memory Session
+// mutation is discarded along with the rest of the reloaded set. A mutate
+// with such side effects must compensate for a non-nil return from this
+// method itself, not just from mutate's own body (see backfillOneSession in
+// internal/ui/workspace_backfill.go, which tears the worktree back down when
+// UpdateSessionMembers fails after its mutate already succeeded).
 func (s *Store) UpdateSessionMembers(workspaceName, sessionName string, mutate func(*Session) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

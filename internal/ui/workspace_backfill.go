@@ -213,17 +213,36 @@ func (r realStoreOps) UpdateSessionMembers(workspaceName, sessionName string, mu
 // backfills of different sessions can never interleave and silently drop one
 // another's update. Every other workspace and session is carried through
 // untouched, so a failure here never disturbs them.
+//
+// AssembleMember's worktree and branch are real, on-disk git side effects,
+// and — per UpdateSessionMembers' own documented contract — it does not roll
+// those back if its persist step fails after mutate has already returned
+// successfully. So when attached, this function tracks the just-assembled
+// member itself and, if the overall UpdateSessionMembers call still comes
+// back with an error, tears that member back down with
+// workspace.TeardownMember before returning: mutate having succeeded means
+// the error can only be the persist step, otherwise the worktree and branch
+// would be an invisible orphan — no session ever records them, and
+// settings.Merge's workspace-root filter would hide them from the Sessions
+// view too. This mirrors assembleWorkspaceSessionCmd's own
+// TeardownSession-on-AddSession-failure compensation (workspace_cmd.go).
 func backfillOneSession(store storeOps, workspaceName, repo string, attached bool, sessionName string) error {
 	updater, ok := store.(sessionMemberUpdater)
 	if !ok {
 		return fmt.Errorf("workspace store does not support session member updates")
 	}
-	return updater.UpdateSessionMembers(workspaceName, sessionName, func(session *workspace.Session) error {
+
+	var assembledSession workspace.Session
+	var assembledMember *workspace.SessionMember
+
+	err := updater.UpdateSessionMembers(workspaceName, sessionName, func(session *workspace.Session) error {
 		if attached {
 			member, err := workspace.AssembleMember(*session, repo)
 			if err != nil {
 				return err
 			}
+			assembledSession = *session
+			assembledMember = &member
 			session.Members = append(append([]workspace.SessionMember{}, session.Members...), member)
 			return nil
 		}
@@ -248,6 +267,18 @@ func backfillOneSession(store storeOps, workspaceName, repo string, attached boo
 		session.Members = append(session.Members[:mIdx], session.Members[mIdx+1:]...)
 		return nil
 	})
+	if err == nil || assembledMember == nil {
+		return err
+	}
+
+	// mutate above already returned nil (assembledMember is only set on
+	// AssembleMember's own success path), so this err is UpdateSessionMembers'
+	// persist step failing after the fact. Undo the worktree it just created
+	// rather than leave it an orphan.
+	if tdErr := workspace.TeardownMember(assembledSession, *assembledMember); tdErr != nil {
+		return fmt.Errorf("session %q: persist member %q failed (%v) and cleanup also failed: %w", sessionName, repo, err, tdErr)
+	}
+	return fmt.Errorf("session %q: persist member %q: %w", sessionName, repo, err)
 }
 
 // renderWorkspaceBackfillPrompt renders the floating multi-select box shown
