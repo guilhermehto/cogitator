@@ -43,18 +43,38 @@ func newAssembleTestRepo(t *testing.T, name string) string {
 	return canonical
 }
 
-// breakHEAD points repo's HEAD at a ref that does not exist, which
-// `git rev-parse --show-toplevel` and `git rev-parse --verify` both tolerate
-// but `git worktree add -b <branch>` refuses ("fatal: invalid reference:
-// HEAD"). This gives AssembleSession's pre-flight (git.RepoRoot,
-// git.BranchExists) nothing to reject while still forcing git.AddWorktree to
-// fail, the only way to deterministically exercise the mid-assembly rollback
-// path without a real race.
-func breakHEAD(t *testing.T, repo string) {
+// breakSmudgeFilterCheckout configures repo with a required smudge filter
+// that always fails, so any future checkout in repo — including the one
+// `git worktree add -b <branch>` performs — fails after git has already
+// created the branch and registered the worktree. This is the same failure
+// shape as a missing git-lfs/git-crypt binary or a non-zero core.hooksPath
+// post-checkout hook (lefthook/husky), and unlike a HEAD pointed at a
+// nonexistent ref, it fails at checkout time rather than at start-point
+// resolution, so the branch and worktree registration are both left behind
+// for the rollback to clean up. Passes AssembleSession's pre-flight
+// (git.RepoRoot, git.BranchExists) untouched.
+func breakSmudgeFilterCheckout(t *testing.T, repo string) {
 	t.Helper()
-	headPath := filepath.Join(repo, ".git", "HEAD")
-	if err := os.WriteFile(headPath, []byte("ref: refs/heads/does-not-exist\n"), 0o644); err != nil {
-		t.Fatalf("corrupt HEAD in %s: %v", repo, err)
+
+	tracked := filepath.Join(repo, "tracked.txt")
+	if err := os.WriteFile(tracked, []byte("content\n"), 0o644); err != nil {
+		t.Fatalf("write tracked file in %s: %v", repo, err)
+	}
+	attrs := filepath.Join(repo, ".gitattributes")
+	if err := os.WriteFile(attrs, []byte("tracked.txt filter=boom\n"), 0o644); err != nil {
+		t.Fatalf("write .gitattributes in %s: %v", repo, err)
+	}
+	for _, args := range [][]string{
+		{"git", "add", "tracked.txt", ".gitattributes"},
+		{"git", "commit", "-q", "-m", "add filtered file"},
+		{"git", "config", "filter.boom.smudge", "false"},
+		{"git", "config", "filter.boom.required", "true"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("setup %v in %s: %v\n%s", args, repo, err, out)
+		}
 	}
 }
 
@@ -295,13 +315,16 @@ func newAssembleTestRepoAt(t *testing.T, dir string) string {
 }
 
 // TestAssembleSession_RollsBackPartiallyCreatedWorktrees verifies that when
-// the second member's worktree add fails after the first succeeded, the
-// first member's worktree and branch are removed and the session directory
-// is deleted — nothing is left half-assembled.
+// the second member's worktree add fails AFTER git has already created its
+// branch and registered its worktree (a required smudge filter, the same
+// shape as a missing git-lfs binary or a failing post-checkout hook), that
+// second repo is rolled back too — not only the first repo that fully
+// succeeded — and the session directory is deleted: nothing is left
+// half-assembled anywhere.
 func TestAssembleSession_RollsBackPartiallyCreatedWorktrees(t *testing.T) {
 	repoA := newAssembleTestRepo(t, "repo-a")
 	repoB := newAssembleTestRepo(t, "repo-b")
-	breakHEAD(t, repoB) // passes pre-flight, fails at git.AddWorktree time
+	breakSmudgeFilterCheckout(t, repoB) // passes pre-flight, fails at git.AddWorktree's checkout step
 	root := t.TempDir()
 
 	ws := workspace.Workspace{
@@ -341,6 +364,22 @@ func TestAssembleSession_RollsBackPartiallyCreatedWorktrees(t *testing.T) {
 	}
 	if len(wts) != 1 {
 		t.Errorf("repoA still has an extra worktree after rollback: %v", wts)
+	}
+
+	// repoB is the repo whose AddWorktree call actually failed. Before the
+	// fix, rollbackAssembly only iterated members already appended to the
+	// slice, and the append happened AFTER the error check — so repoB's
+	// branch and worktree registration, both created by git before the
+	// checkout failed, survived every rollback.
+	if git.BranchExists(repoB, branch) {
+		t.Errorf("branch %q still exists in repoB (the failing repo) after rollback", branch)
+	}
+	wtsB, err := git.ListWorktrees(repoB)
+	if err != nil {
+		t.Fatalf("ListWorktrees(repoB): %v", err)
+	}
+	if len(wtsB) != 1 {
+		t.Errorf("repoB (the failing repo) still has a stale worktree registration after rollback: %v", wtsB)
 	}
 }
 
@@ -422,8 +461,12 @@ func TestTeardownSession_DirDeletedByHand_StillSucceeds(t *testing.T) {
 
 // TestTeardownSession_LockedWorktreeReportsFailureButRemovesOthers verifies
 // that a locked worktree in one member repo does not stop TeardownSession
-// from removing the other members, and that the locked repo's failure is
-// reported rather than swallowed into an overall success.
+// from removing the other members, that the locked repo's failure is
+// reported rather than swallowed into an overall success, that the lock's
+// whole purpose — protecting uncommitted work — is honoured (the file must
+// still be readable on disk afterwards, not merely "some worktree still
+// registered"), and that the session directory survives so a retry after the
+// lock is released can still complete.
 func TestTeardownSession_LockedWorktreeReportsFailureButRemovesOthers(t *testing.T) {
 	repoA := newAssembleTestRepo(t, "repo-a")
 	repoB := newAssembleTestRepo(t, "repo-b")
@@ -447,6 +490,13 @@ func TestTeardownSession_LockedWorktreeReportsFailureButRemovesOthers(t *testing
 			lockedMember = m
 		}
 	}
+
+	const uncommittedContent = "work in progress\n"
+	uncommitted := filepath.Join(lockedMember.WorktreePath, "unsaved.txt")
+	if err := os.WriteFile(uncommitted, []byte(uncommittedContent), 0o644); err != nil {
+		t.Fatalf("write uncommitted file: %v", err)
+	}
+
 	lockCmd := exec.Command("git", "worktree", "lock", lockedMember.WorktreePath)
 	lockCmd.Dir = repoB
 	if out, err := lockCmd.CombinedOutput(); err != nil {
@@ -472,12 +522,53 @@ func TestTeardownSession_LockedWorktreeReportsFailureButRemovesOthers(t *testing
 		t.Errorf("repoA was not torn down despite repoB being locked: %v", wtsA)
 	}
 
+	// The lock exists to protect this file. A worktree registration
+	// surviving `git worktree list` proves nothing about the file itself —
+	// RemoveWorktree can fail on the lock and a caller could still wipe the
+	// directory out from under it, which is exactly the defect this guards.
+	gotInfo, statErr := os.Stat(uncommitted)
+	if statErr != nil {
+		t.Fatalf("uncommitted file %q did not survive the failed teardown: %v", uncommitted, statErr)
+	}
+	if gotInfo.IsDir() {
+		t.Fatalf("uncommitted file %q became a directory", uncommitted)
+	}
+	gotContent, err := os.ReadFile(uncommitted)
+	if err != nil {
+		t.Fatalf("read uncommitted file %q: %v", uncommitted, err)
+	}
+	if string(gotContent) != uncommittedContent {
+		t.Errorf("uncommitted file content = %q, want %q", gotContent, uncommittedContent)
+	}
+	if _, err := os.Stat(session.Dir); err != nil {
+		t.Errorf("session directory %q was removed despite repoB's failed teardown: %v", session.Dir, err)
+	}
+
+	// Release the lock and retry with the same session: the member that
+	// already succeeded must not be re-attempted (it is no longer a
+	// registered worktree at all), the previously-locked member must now be
+	// removed cleanly, and the session directory reclaimed.
+	unlockCmd := exec.Command("git", "worktree", "unlock", lockedMember.WorktreePath)
+	unlockCmd.Dir = repoB
+	if out, err := unlockCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree unlock: %v\n%s", err, out)
+	}
+
+	if err := workspace.TeardownSession(session); err != nil {
+		t.Fatalf("TeardownSession after releasing the lock: %v", err)
+	}
+	if _, err := os.Stat(session.Dir); err == nil {
+		t.Errorf("session directory %q still exists after the successful retry", session.Dir)
+	}
+	if git.BranchExists(repoB, session.Branch) {
+		t.Errorf("branch %q still exists in repoB after the successful retry", session.Branch)
+	}
 	wtsB, err := git.ListWorktrees(repoB)
 	if err != nil {
 		t.Fatalf("ListWorktrees(repoB): %v", err)
 	}
-	if len(wtsB) != 2 {
-		t.Errorf("repoB's locked worktree should survive the failed teardown, got: %v", wtsB)
+	if len(wtsB) != 1 {
+		t.Errorf("repoB was not torn down after the successful retry: %v", wtsB)
 	}
 }
 
