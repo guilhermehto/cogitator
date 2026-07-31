@@ -150,6 +150,30 @@ const (
 	// duplicate name is refused with wsHint and the prompt stays open. Placed
 	// last so existing model{} literals keep their iota values.
 	promptNewWorkspaceSession
+	// promptConfirmDeleteWsSession is the FIRST of two confirmations for
+	// deleting a single workspace session ('D' with the cursor on a session
+	// row in the Workspaces view). Mirrors promptConfirmDeleteWorktree's
+	// y/any-key gate, but the bundle being deleted has one member repo per
+	// SessionMember rather than one branch, so the confirm renders one
+	// merge-status line per member (wsDeleteMembers) instead of a single
+	// branch/merge-status pair. Placed last so existing model{} literals keep
+	// their iota values.
+	promptConfirmDeleteWsSession
+	// promptConfirmDeleteWsSession2 is the SECOND confirmation for a single
+	// workspace session. Default is cancel: only an explicit 'y' proceeds;
+	// every other key (including esc/enter) aborts, mirroring
+	// promptConfirmDeleteWorktree2's last-gate contract.
+	promptConfirmDeleteWsSession2
+	// promptConfirmDeleteWorkspace is the FIRST of two confirmations for
+	// deleting an entire workspace ('D' with the cursor on a workspace's
+	// header or empty-sessions hint row). Every session in the workspace is
+	// listed (via wsDeleteMembers, spanning all of them) and torn down the
+	// same way a single session is; the workspace itself is removed from the
+	// store only once every session has succeeded.
+	promptConfirmDeleteWorkspace
+	// promptConfirmDeleteWorkspace2 is the SECOND confirmation for a whole
+	// workspace. Default is cancel; only 'y' proceeds.
+	promptConfirmDeleteWorkspace2
 )
 
 // launchResultMsg is returned by launchCmd / resumeCmd after the tmux
@@ -608,6 +632,25 @@ type model struct {
 	// pendingCreates for the Sessions pane.
 	wsPendingSessions map[string]pendingWsSession
 
+	// Workspace/session delete confirmation ('D' in the Workspaces view)
+	// state, meaningful only while prompt is one of the four
+	// promptConfirmDelete{WsSession,Workspace}[2] modes. wsDeleteWorkspace is
+	// the target workspace's name; wsDeleteSession is the target session's
+	// name for a single-session delete, empty when the whole workspace (every
+	// session) is the target. wsDeleteMembers is the flat, session-tagged list
+	// of member rows the confirm renders and probes — captured once when 'D'
+	// opens the flow so the confirm dialog and the eventual teardown act on
+	// the same snapshot regardless of store changes in between.
+	// wsDeleteMergeInfo holds each member's human-readable merge status,
+	// keyed by its worktree path, filled in as the concurrent per-member
+	// probes (wsMergeStatusCmd) return; a member with no entry yet renders as
+	// "checking…", mirroring deleteMergeInfo's role for the single-worktree
+	// flow. Zero values are safe (no delete in progress).
+	wsDeleteWorkspace string
+	wsDeleteSession   string
+	wsDeleteMembers   []wsDeleteMember
+	wsDeleteMergeInfo map[string]string
+
 	// Injectable seams for tmux, git, harness, and workspace-store operations.
 	// Nil values are replaced with the real implementations in newModel (store
 	// is wired separately by RunTUI after newModel returns, like viewMarker
@@ -925,15 +968,7 @@ func deleteWorktreeCmd(ops tmuxOps, gitOp gitOps, repo, path, branch string, mod
 
 		// Best-effort cleanup of the worktree's tmux attachment. Failures here
 		// do not undo the successful removal — the directory is already gone.
-		if ops != nil && ops.Available() {
-			if target, err := ops.FindWindowByDir(path); err == nil {
-				if mode == tmuxctl.ModeSession {
-					_ = ops.KillSession(target)
-				} else {
-					_ = ops.KillWindow(target)
-				}
-			}
-		}
+		killTmuxTargetForDir(ops, path, mode)
 		return worktreeDeletedMsg{path: path}
 	}
 }
@@ -1509,6 +1544,50 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.deleteMergeInfo = ""
 				return m, nil
 
+			case promptConfirmDeleteWsSession:
+				// First confirmation for a single workspace session. 'y'
+				// advances to the second prompt; any other key (including
+				// esc) cancels.
+				if msg.String() == "y" || msg.String() == "Y" {
+					m.prompt = promptConfirmDeleteWsSession2
+					return m, nil
+				}
+				m.clearWsDeleteTarget()
+				return m, nil
+
+			case promptConfirmDeleteWsSession2:
+				// Second (last) confirmation. Default is cancel: only an
+				// explicit 'y' proceeds; every other key (including
+				// esc/enter) aborts.
+				if msg.String() == "y" || msg.String() == "Y" {
+					wsName, sessName := m.wsDeleteWorkspace, m.wsDeleteSession
+					m.clearWsDeleteTarget()
+					return m, deleteWsSessionCmd(m.store, m.tmux, wsName, sessName, m.launchMode)
+				}
+				m.clearWsDeleteTarget()
+				return m, nil
+
+			case promptConfirmDeleteWorkspace:
+				// First confirmation for an entire workspace (every session).
+				// 'y' advances to the second prompt; any other key cancels.
+				if msg.String() == "y" || msg.String() == "Y" {
+					m.prompt = promptConfirmDeleteWorkspace2
+					return m, nil
+				}
+				m.clearWsDeleteTarget()
+				return m, nil
+
+			case promptConfirmDeleteWorkspace2:
+				// Second (last) confirmation. Default is cancel: only an
+				// explicit 'y' proceeds.
+				if msg.String() == "y" || msg.String() == "Y" {
+					wsName := m.wsDeleteWorkspace
+					m.clearWsDeleteTarget()
+					return m, deleteWorkspaceCmd(m.store, m.tmux, wsName, m.launchMode)
+				}
+				m.clearWsDeleteTarget()
+				return m, nil
+
 			case promptConfirmRemoveRepo:
 				// Single confirmation. 'y' untracks the repo; any other key
 				// (including esc) cancels. Non-destructive: the repo stays on
@@ -1669,14 +1748,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// adding arms here, following updateSettings's precedent — this
 		// switch already exceeds the configured gocyclo minimum. Lifecycle
 		// keys (create workspace/session) are tried first, since they open a
-		// prompt or dispatch a Cmd rather than moving the cursor; launch
-		// ('enter' on a session row) is tried next; anything else falls
-		// through to the pure-navigation handler in workspace_view.go.
-		// updateWorkspaceLaunch lives here (not workspace_view.go/
-		// workspace_cmd.go) because both of those files are untouched by
-		// this feature.
+		// prompt or dispatch a Cmd rather than moving the cursor; delete
+		// ('D', opening the merge-status confirm) is tried next; launch
+		// ('enter' on a session row) after that; anything else falls through
+		// to the pure-navigation handler in workspace_view.go.
+		// updateWorkspaceDelete/updateWorkspaceLaunch live here (not
+		// workspace_view.go/workspace_cmd.go) because both of those files are
+		// untouched by this feature.
 		if m.view == viewWorkspaces {
 			if next, cmd, handled := m.updateWorkspaceLifecycle(msg); handled {
+				return next, cmd
+			}
+			if next, cmd, handled := m.updateWorkspaceDelete(msg); handled {
 				return next, cmd
 			}
 			if next, cmd, handled := m.updateWorkspaceLaunch(msg); handled {
@@ -2056,6 +2139,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.path == m.deleteTarget.Worktree {
 			m.deleteMergeInfo = mergeInfoText(msg.state, msg.base)
 		}
+		// Same guard for the workspace/session delete confirm, but against the
+		// snapshotted wsDeleteMembers list (a bundle probes one path per
+		// member, not a single deleteTarget) — a probe whose path is not
+		// among the current members is a stale result from a cancelled or
+		// since-retargeted confirm and is dropped.
+		if wsDeletePromptActive(m.prompt) {
+			for _, mem := range m.wsDeleteMembers {
+				if mem.worktreePath == msg.path {
+					if m.wsDeleteMergeInfo == nil {
+						m.wsDeleteMergeInfo = map[string]string{}
+					}
+					m.wsDeleteMergeInfo[msg.path] = mergeInfoText(msg.state, msg.base)
+					break
+				}
+			}
+		}
 		return m, nil
 
 	case worktreeDeletedMsg:
@@ -2206,6 +2305,43 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clearPendingWsSession(msg.workspaceName, msg.sessionName)
 		if msg.err != nil {
 			m.wsHint = fmt.Sprintf("create session %q failed: %v", msg.sessionName, msg.err)
+			return m, nil
+		}
+		m.wsHint = ""
+		if m.wsBuilding {
+			m.wsDirty = true
+			return m, nil
+		}
+		m.wsBuilding = true
+		return m, loadWorkspaceStatusCmd(m.store, m.snap)
+
+	case wsSessionDeletedMsg:
+		// Outcome of deleteWsSessionCmd ('D', both confirms, on a session
+		// row). On success, refresh from the store so the removed session
+		// disappears without waiting for the next snapshot; on failure
+		// nothing was dropped (deleteWsSessionCmd only calls RemoveSession
+		// once TeardownSession reports no per-repo failures), so the row
+		// stays exactly as it was and the error is surfaced instead.
+		if msg.err != nil {
+			m.wsHint = fmt.Sprintf("delete session %q failed: %v", msg.sessionName, msg.err)
+			return m, nil
+		}
+		m.wsHint = ""
+		if m.wsBuilding {
+			m.wsDirty = true
+			return m, nil
+		}
+		m.wsBuilding = true
+		return m, loadWorkspaceStatusCmd(m.store, m.snap)
+
+	case wsWorkspaceDeletedMsg:
+		// Outcome of deleteWorkspaceCmd ('D', both confirms, on a workspace
+		// header/hint row). Mirrors wsSessionDeletedMsg: refresh on success,
+		// surface the error on failure (the workspace and every session —
+		// torn down or not — are left in the store when any session's
+		// teardown failed).
+		if msg.err != nil {
+			m.wsHint = fmt.Sprintf("delete workspace %q failed: %v", msg.workspaceName, msg.err)
 			return m, nil
 		}
 		m.wsHint = ""
@@ -2563,6 +2699,9 @@ func (m model) View() string {
 	case m.prompt == promptNewWorkspaceSession:
 		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsNamePrompt("New session", "session name: "))
+	case wsDeletePromptActive(m.prompt):
+		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsDeleteConfirm())
 	case m.view == viewWorkspaces:
 		sessionContent = m.renderWorkspacesView(paneW, sessionsInnerH)
 	case len(m.workspaceRows) > 0:
