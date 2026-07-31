@@ -947,6 +947,14 @@ var helpSections = []helpSection{
 		{"A", "add repo"},
 		{"R", "remove (untrack) repo"},
 	}},
+	{"Workspaces", [][2]string{
+		{"tab", "switch sessions / workspaces"},
+		{"N", "new workspace"},
+		{"n", "new session in workspace"},
+		{"e", "edit repo membership"},
+		{"D", "delete session / workspace"},
+		{"enter", "launch session"},
+	}},
 	{"General", [][2]string{
 		{"?", "toggle this help"},
 		{"S", "settings"},
@@ -985,15 +993,15 @@ func renderHelp(fieldW int) string {
 		contentW = max(1, fieldW-4)
 	}
 
-	// Split the sections across two columns: Sessions alone on the left,
-	// Worktrees+General on the right. This is the most balanced whole-section
-	// split for three sections of uneven length. The columns are rendered
+	// Split the sections across two columns: Sessions+Worktrees on the left,
+	// Workspaces+General on the right. This is the most balanced whole-section
+	// split for four sections of uneven length. The columns are rendered
 	// independently then zipped row-for-row so the box reads top-to-bottom in
 	// two streams.
 	const gap = 3
 	colW := max(1, (contentW-gap)/2)
-	left := helpColumn(helpSections[:1], keyW, colW)
-	right := helpColumn(helpSections[1:], keyW, colW)
+	left := helpColumn(helpSections[:2], keyW, colW)
+	right := helpColumn(helpSections[2:], keyW, colW)
 
 	var lines []string
 	lines = append(lines, padToWidth(" "+headerStyle.Render("Keybindings"), contentW))
