@@ -182,6 +182,16 @@ const (
 	// with no change. Placed last so existing model{} literals keep their
 	// iota values.
 	promptWorkspaceModal
+	// promptWorkspaceBackfill is active while the membership-backfill
+	// multi-select (workspace_backfill.go) is open: it follows a committed
+	// attach/detach (membershipChangedMsg) for a workspace that has one or
+	// more existing sessions, and lets the user choose which of them receive
+	// the change — never touching a live agent's directory without that
+	// choice. Up/down moves the cursor, space toggles the highlighted
+	// session, enter applies the choice (zero chosen is a valid no-op), esc
+	// skips entirely. Placed last so existing model{} literals keep their
+	// iota values.
+	promptWorkspaceBackfill
 )
 
 // launchResultMsg is returned by launchCmd / resumeCmd after the tmux
@@ -678,6 +688,24 @@ type model struct {
 	wsModalMatches   []int
 	wsModalCursor    int
 	wsModalErr       string
+
+	// Membership-backfill prompt ('promptWorkspaceBackfill') state, opened
+	// when a membershipChangedMsg lands for a workspace that has at least one
+	// existing session (workspace_backfill.go). wsBackfillWorkspace/
+	// wsBackfillRepo/wsBackfillAttached capture what changed and are
+	// stamped on the eventual backfillMembershipCmd dispatch.
+	// wsBackfillSessions is the session-name list offered, captured once when
+	// the prompt opens so the choice acts on the same snapshot regardless of
+	// store changes in between, mirroring wsDeleteMembers.
+	// wsBackfillSelected tracks which are currently checked, keyed by session
+	// name; wsBackfillCursor indexes wsBackfillSessions. Zero values are safe
+	// (no backfill prompt in progress).
+	wsBackfillWorkspace string
+	wsBackfillRepo      string
+	wsBackfillAttached  bool
+	wsBackfillSessions  []string
+	wsBackfillSelected  map[string]bool
+	wsBackfillCursor    int
 
 	// Injectable seams for tmux, git, harness, and workspace-store operations.
 	// Nil values are replaced with the real implementations in newModel (store
@@ -1704,6 +1732,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			case promptWorkspaceModal:
 				return m.updateWorkspaceModalActive(msg)
+
+			case promptWorkspaceBackfill:
+				return m.updateWorkspaceBackfillActive(msg)
 			}
 		}
 
@@ -2188,11 +2219,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case wsModalActionErrMsg:
 		// A committed attach/detach failed validation or persistence; report
 		// it in wsHint since the modal has already closed by the time this
-		// arrives. membershipChangedMsg (the success case) is deliberately
-		// left unhandled here — step 15 (workspace_backfill.go) is the first
-		// consumer of that message.
+		// arrives. membershipChangedMsg (the success case) is handled below,
+		// by workspace_backfill.go's handleMembershipChanged.
 		m.wsHint = fmt.Sprintf("membership change failed: %v", msg.err)
 		return m, nil
+
+	case membershipChangedMsg:
+		// A committed attach/detach (workspace_modal.go) landed. The
+		// membership record itself is already persisted; this handler's only
+		// job is to ask which of the workspace's existing sessions (if any)
+		// should receive the change into their own worktree bundle, never
+		// touching a live agent's directory without that choice.
+		return m.handleMembershipChanged(msg)
+
+	case wsBackfillAppliedMsg:
+		// Outcome of backfillMembershipCmd (workspace_backfill.go), dispatched
+		// once the multi-select prompt's choice is applied. A session in
+		// msg.failures could not be backfilled — named alongside the repo in
+		// its own error — but every other chosen session was, so the reload
+		// below always runs to pick up whichever succeeded.
+		if len(msg.failures) > 0 {
+			parts := make([]string, len(msg.failures))
+			for i, f := range msg.failures {
+				parts[i] = fmt.Sprintf("%q: %v", f.session, f.err)
+			}
+			m.wsHint = fmt.Sprintf("backfill %s into %s failed for %s",
+				filepath.Base(msg.repo), msg.workspaceName, strings.Join(parts, "; "))
+		} else {
+			m.wsHint = ""
+		}
+		if m.wsBuilding {
+			m.wsDirty = true
+			return m, nil
+		}
+		m.wsBuilding = true
+		return m, loadWorkspaceStatusCmd(m.store, m.snap)
 
 	case mergeStatusMsg:
 		// Annotate the active delete confirmation, but only if it still targets
@@ -2768,6 +2829,9 @@ func (m model) View() string {
 	case m.prompt == promptWorkspaceModal:
 		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWorkspaceModal(paneW, sessionsInnerH))
+	case m.prompt == promptWorkspaceBackfill:
+		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWorkspaceBackfillPrompt())
 	case m.view == viewWorkspaces:
 		sessionContent = m.renderWorkspacesView(paneW, sessionsInnerH)
 	case len(m.workspaceRows) > 0:
