@@ -7,10 +7,13 @@ sessions and lets you manage git worktrees:
   (permission requests, pending questions, errors).
 - **Create git worktrees**: spin up a new worktree for a branch, or fetch, pull, and delete
   existing ones, straight from the roster.
+- **Bundle multi-repo workspaces**: group several repos into a workspace and create a session
+  that checks out one new branch across every member repo at once; `Tab` swaps between the
+  Sessions and Workspaces panes. See [Configuration](/guide/configuration#workspaces) for
+  disk-cost and layout details.
 - **Navigate into them**: jump to a running agent or resume a stopped one in a tmux session
   (or window) with a single keystroke.
-- **Works across harnesses**: opencode, Claude Code, Codex, and omp, with an optional
-  [Taskwarrior](https://taskwarrior.org) pane for your task list.
+- **Works across harnesses**: opencode, Claude Code, Codex, and omp.
 
 ## Requirements
 
