@@ -541,22 +541,28 @@ type model struct {
 
 	// Session switcher (ctrl+P) state, meaningful only while
 	// prompt == promptSwitchSession. sessionPaletteRows is a snapshot of the
-	// candidate worktree rows captured when the palette opens; sessionPaletteLabels
-	// is the parallel "repo branch" match text for each row; sessionPaletteMatches
+	// candidate rows (worktree rows and workspace sessions alike, via
+	// sessionCandidate) captured when the palette opens, used only for
+	// rendering (renderPaletteRow, render.go); sessionPaletteTargets is the
+	// parallel launch identity dispatched on enter; sessionPaletteLabels is
+	// the parallel match text ("repo branch" for a worktree row,
+	// "<workspace>/<session>" for a workspace session); sessionPaletteMatches
 	// indexes those slices, holding the current fuzzy-filtered view ordered
-	// best-first; sessionPaletteCursor indexes sessionPaletteMatches. Zero values
-	// are safe (palette closed).
+	// best-first; sessionPaletteCursor indexes sessionPaletteMatches. Zero
+	// values are safe (palette closed).
 	sessionPaletteRows    []settings.Row
+	sessionPaletteTargets []launchTarget
 	sessionPaletteLabels  []string
 	sessionPaletteMatches []int
 	sessionPaletteCursor  int
 
 	// switchOrder records the monotonically increasing sequence in which
-	// worktrees were last jumped to or resumed, keyed by worktree path; switchSeq
-	// is the next sequence to hand out. It seeds the ctrl+P palette's
-	// most-recently-used ordering so pressing ctrl+P then enter returns to the
-	// previous session. In-memory only — it resets on restart, falling back to
-	// the alphabetical row order.
+	// targets (worktrees or workspace sessions) were last jumped to or
+	// resumed, keyed by the target's launch directory (launchTarget.dir);
+	// switchSeq is the next sequence to hand out. It seeds the ctrl+P
+	// palette's most-recently-used ordering so pressing ctrl+P then enter
+	// returns to the previous session. In-memory only — it resets on restart,
+	// falling back to the alphabetical row order.
 	switchOrder map[string]int
 	switchSeq   int
 
@@ -619,7 +625,86 @@ type model struct {
 	input  textinput.Model
 }
 
-// launchCmd performs the jump/resume tmux operations for the given row and
+// launchTarget is the neutral tmux-launch identity consumed by launchCmd,
+// launchArgv, and launchInner. It is the seam that lets both the Sessions
+// pane (rowLaunchTarget, from a settings.Row) and the Workspaces view
+// (wsSessionLaunchTarget, from a workspace session) share one launch path
+// without either function being keyed on settings.Row.
+type launchTarget struct {
+	// dir is the canonical directory tmux selects/creates a window or session
+	// for, and the harness's working directory. For a workspace session this
+	// is the session directory, not any single member repo's worktree — the
+	// harness launched there can read every member through its subdirectories.
+	dir string
+	// name is the tmux window/session name used only when EnsureWindowMode
+	// must create a brand-new target (no existing window is found for dir).
+	name string
+	// harness is the recorded harness kind ("" falls back to opencode).
+	harness string
+	// harnessAuthoritative is true when harness must NOT be overridden by a
+	// configured default harness. Set for workspace sessions, whose harness
+	// was chosen explicitly at create time and recorded on the Session;
+	// false for Sessions-pane rows, which keep the pre-existing
+	// default-overrides-row behaviour.
+	harnessAuthoritative bool
+	// resumeToken is passed to the harness's LaunchArgv to resume a specific
+	// session; empty lets the harness resume its own most-recent session for
+	// dir (or launch fresh).
+	resumeToken string
+	// provider and sessionID identify the session that was selected so the
+	// Update handler can mark it viewed (clearing any AttnFinished badge).
+	// Empty when the target has no associated session.
+	provider  string
+	sessionID string
+}
+
+// fallbackProvider returns provider unless it is empty, in which case it
+// falls back to harnessKind — the same "stale roster metadata" tolerance
+// settings.Row.Provider documents, reused here so workspace sessions get the
+// identical fallback for the live-store attention clear.
+func fallbackProvider(provider, harnessKind string) string {
+	if provider == "" {
+		return harnessKind
+	}
+	return provider
+}
+
+// rowLaunchTarget builds the launchTarget for a Sessions-pane worktree row,
+// preserving the window-naming and provider-fallback behaviour launchCmd and
+// launchInner had inline before the seam was extracted.
+func rowLaunchTarget(row settings.Row) launchTarget {
+	name := filepath.Base(row.Worktree)
+	if row.Branch != "" {
+		name = filepath.Base(row.Repo) + "/" + row.Branch
+	}
+	return launchTarget{
+		dir:         row.Worktree,
+		name:        name,
+		harness:     row.Harness,
+		resumeToken: row.SessionID,
+		provider:    fallbackProvider(row.Provider, row.Harness),
+		sessionID:   row.SessionID,
+	}
+}
+
+// wsSessionLaunchTarget builds the launchTarget for a workspace session:
+// name identifies both the workspace and the session so the tmux
+// window/session title distinguishes it from every other target, and
+// harnessAuthoritative is set so the session's own recorded harness is never
+// second-guessed by a configured default.
+func wsSessionLaunchTarget(workspaceName string, sess workspace.SessionStatus) launchTarget {
+	return launchTarget{
+		dir:                  sess.Session.Dir,
+		name:                 workspaceName + "/" + sess.Session.Name,
+		harness:              sess.Session.Harness,
+		harnessAuthoritative: true,
+		resumeToken:          sess.SessionID,
+		provider:             fallbackProvider(sess.Provider, sess.Session.Harness),
+		sessionID:            sess.SessionID,
+	}
+}
+
+// launchCmd performs the jump/resume tmux operations for the given target and
 // returns a launchResultMsg. It selects the correct tmux action based on
 // window existence and pane liveness:
 //
@@ -628,103 +713,98 @@ type model struct {
 //   - no window: EnsureWindow → Select
 //
 // The function is a tea.Cmd (runs off the UI goroutine).
-func launchCmd(ops tmuxOps, row settings.Row, harnOp harnessOps, mode tmuxctl.LaunchMode, defaultKind string) tea.Cmd {
-	inner := launchInner(ops, row, harnOp, mode, defaultKind)
+func launchCmd(ops tmuxOps, target launchTarget, harnOp harnessOps, mode tmuxctl.LaunchMode, defaultKind string) tea.Cmd {
+	inner := launchInner(ops, target, harnOp, mode, defaultKind)
 	return func() tea.Msg {
 		res := inner()
 		// Stamp the session identity so the Update handler can mark it viewed
 		// (clearing AttnFinished) when the select succeeds.
-		res.provider = row.Provider
-		if res.provider == "" {
-			res.provider = row.Harness
-		}
-		res.sessionID = row.SessionID
+		res.provider = target.provider
+		res.sessionID = target.sessionID
 		return res
 	}
 }
 
-// launchArgv resolves the harness launch argv for row. A configured,
-// already-validated default kind overrides the row's recorded harness;
-// overrideKind is the new kind when an override happened and empty otherwise,
-// so callers upsert the roster only on a real switch. Falls back to opencode
-// when the harness cannot be resolved.
-func launchArgv(row settings.Row, harnOp harnessOps, defaultKind string) (argv []string, overrideKind harness.Kind) {
-	kind := harness.Kind(row.Harness)
+// launchArgv resolves the harness launch argv for target. A configured,
+// already-validated default kind overrides the target's recorded harness
+// unless harnessAuthoritative is set; overrideKind is the new kind when an
+// override happened and empty otherwise, so callers upsert the roster only on
+// a real switch. Falls back to opencode when the harness cannot be resolved.
+func launchArgv(target launchTarget, harnOp harnessOps, defaultKind string) (argv []string, overrideKind harness.Kind) {
+	kind := harness.Kind(target.harness)
 	if kind == "" {
 		kind = harness.KindOpenCode
 	}
-	if defaultKind != "" && harness.Kind(defaultKind) != kind {
+	if !target.harnessAuthoritative && defaultKind != "" && harness.Kind(defaultKind) != kind {
 		kind = harness.Kind(defaultKind)
 		overrideKind = kind
 	}
 	if harnOp != nil {
 		if h, err := harnOp.Get(kind); err == nil {
-			// On an override the row's SessionID belongs to the previous
+			// On an override the target's resumeToken belongs to the previous
 			// harness and is invalid for the new one; start a fresh session.
-			token := row.SessionID
+			token := target.resumeToken
 			if overrideKind != "" {
 				token = ""
 			}
-			argv = h.LaunchArgv(row.Worktree, token)
+			argv = h.LaunchArgv(target.dir, token)
 		}
 	}
 	if len(argv) == 0 {
-		argv = []string{"opencode", "--mdns", row.Worktree}
+		argv = []string{"opencode", "--mdns", target.dir}
 	}
 	return argv, overrideKind
 }
 
-func launchInner(ops tmuxOps, row settings.Row, harnOp harnessOps, mode tmuxctl.LaunchMode, defaultKind string) func() launchResultMsg {
+func launchInner(ops tmuxOps, target launchTarget, harnOp harnessOps, mode tmuxctl.LaunchMode, defaultKind string) func() launchResultMsg {
 	return func() launchResultMsg {
 		if ops == nil || !ops.Available() {
-			return launchResultMsg{dir: row.Worktree, err: tmuxctl.ErrNotAvailable}
+			return launchResultMsg{dir: target.dir, err: tmuxctl.ErrNotAvailable}
 		}
 
-		dir := row.Worktree
+		dir := target.dir
 
-		// Resolve the harness argv; a configured default overrides the row's
-		// recorded harness on a cold (re)launch (overrideKind set only then).
-		argv, overrideKind := launchArgv(row, harnOp, defaultKind)
+		// Resolve the harness argv; a configured default overrides the
+		// target's recorded harness on a cold (re)launch (overrideKind set
+		// only then, and never when harnessAuthoritative is set).
+		argv, overrideKind := launchArgv(target, harnOp, defaultKind)
 
-		// selectTarget moves the client to target. In session mode it switches
-		// to the session and lets tmux restore its last-active window (so you
-		// land where you left off, not always the worktree's first window).
-		// In window mode it focuses the exact tagged window.
-		selectTarget := func(target tmuxctl.Target) error {
+		// selectTarget moves the client to tmuxTarget. In session mode it
+		// switches to the session and lets tmux restore its last-active
+		// window (so you land where you left off, not always the first
+		// window). In window mode it focuses the exact tagged window.
+		selectTarget := func(tmuxTarget tmuxctl.Target) error {
 			if mode == tmuxctl.ModeSession {
-				return ops.SelectSession(target)
+				return ops.SelectSession(tmuxTarget)
 			}
-			return ops.Select(target)
+			return ops.Select(tmuxTarget)
 		}
 
-		// Check tmux directly instead of trusting the row state. A running row can
-		// be stale if the opencode process or tmux target died before the next
-		// discovery update, so use the same recovery path for all resumable rows.
-		target, findErr := ops.FindWindowByDir(dir)
+		// Check tmux directly instead of trusting the caller's cached state.
+		// A running target can be stale if its process or tmux window died
+		// before the next discovery update, so use the same recovery path for
+		// every resumable target.
+		tmuxTarget, findErr := ops.FindWindowByDir(dir)
 		if findErr == nil {
 			// Window exists — check if the process is alive.
-			alive, aliveErr := ops.WindowProcessAlive(target)
+			alive, aliveErr := ops.WindowProcessAlive(tmuxTarget)
 			if aliveErr != nil {
 				// Cannot determine liveness — try to select anyway.
-				return launchResultMsg{dir: dir, err: selectTarget(target)}
+				return launchResultMsg{dir: dir, err: selectTarget(tmuxTarget)}
 			}
 			if alive {
 				// Process is alive — just select.
-				return launchResultMsg{dir: dir, err: selectTarget(target)}
+				return launchResultMsg{dir: dir, err: selectTarget(tmuxTarget)}
 			}
 			// Process is dead — relaunch then select.
-			if err := ops.RelaunchInWindow(target, argv); err != nil {
+			if err := ops.RelaunchInWindow(tmuxTarget, argv); err != nil {
 				return launchResultMsg{dir: dir, err: err}
 			}
-			return launchResultMsg{dir: dir, launched: true, harnessKind: string(overrideKind), err: selectTarget(target)}
+			return launchResultMsg{dir: dir, launched: true, harnessKind: string(overrideKind), err: selectTarget(tmuxTarget)}
 		}
 
 		// No window exists — create one and select it.
-		windowName := filepath.Base(dir)
-		if row.Branch != "" {
-			windowName = filepath.Base(row.Repo) + "/" + row.Branch
-		}
-		newTarget, err := ops.EnsureWindowMode(dir, windowName, argv, mode)
+		newTarget, err := ops.EnsureWindowMode(dir, target.name, argv, mode)
 		if err != nil {
 			return launchResultMsg{dir: dir, err: err}
 		}
@@ -1455,8 +1535,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if len(m.sessionPaletteMatches) == 0 {
 						return m, nil
 					}
-					sel := clampIndex(m.sessionPaletteCursor, len(m.sessionPaletteMatches))
-					row := m.sessionPaletteRows[m.sessionPaletteMatches[sel]]
+					idx := m.sessionPaletteMatches[clampIndex(m.sessionPaletteCursor, len(m.sessionPaletteMatches))]
+					row := m.sessionPaletteRows[idx]
+					target := m.sessionPaletteTargets[idx]
 					m.closeSessionPalette()
 					// Apply the same guards as the sessions-pane Enter handler.
 					tmuxAvail := m.tmux != nil && m.tmux.Available()
@@ -1473,15 +1554,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 					// Sync the sessions-pane cursor to the chosen row so the
-					// highlight reflects where the jump landed.
+					// highlight reflects where the jump landed. A workspace
+					// session's target dir has no matching entry in
+					// m.workspaceRows, so this is a harmless no-op for those.
 					for i, r := range m.workspaceRows {
-						if r.Worktree == row.Worktree {
+						if r.Worktree == target.dir {
 							m.sessionCursor = i
 							break
 						}
 					}
-					m.recordSessionSwitch(row)
-					return m, launchCmd(m.tmux, row, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
+					m.recordSessionSwitch(target.dir)
+					return m, launchCmd(m.tmux, target, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
 				case "up", "ctrl+p":
 					m.sessionPaletteCursor = clampIndex(m.sessionPaletteCursor-1, len(m.sessionPaletteMatches))
 					return m, nil
@@ -1521,19 +1604,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// (b.1) Session switcher — ctrl+P opens the fuzzy "go to session"
-		// palette over the worktree rows. Global (works regardless of which
-		// pane is focused) and only reachable here when no prompt is active,
-		// since the prompt pre-empt block above short-circuits first.
+		// palette over every worktree row and workspace session. Global
+		// (works regardless of which pane is focused) and only reachable
+		// here when no prompt is active, since the prompt pre-empt block
+		// above short-circuits first.
 		if msg.String() == "ctrl+p" {
-			if len(m.workspaceRows) == 0 {
+			candidates, startOnPrevious := m.orderedSessionCandidates()
+			if len(candidates) == 0 {
 				m.tmuxHint = "no sessions to switch to"
 				return m, nil
 			}
-			rows, startOnPrevious := m.orderedSessionRows()
-			m.sessionPaletteRows = rows
-			m.sessionPaletteLabels = make([]string, len(m.sessionPaletteRows))
-			for i, row := range m.sessionPaletteRows {
-				m.sessionPaletteLabels[i] = sessionPaletteLabel(row)
+			m.sessionPaletteRows = make([]settings.Row, len(candidates))
+			m.sessionPaletteTargets = make([]launchTarget, len(candidates))
+			m.sessionPaletteLabels = make([]string, len(candidates))
+			for i, c := range candidates {
+				m.sessionPaletteRows[i] = c.row
+				m.sessionPaletteTargets[i] = c.target
+				m.sessionPaletteLabels[i] = c.label
 			}
 			m.sessionPaletteMatches = fuzzyMatchIndices("", m.sessionPaletteLabels)
 			// Seed the cursor on the previous session (row 1) so ctrl+P then enter
@@ -1582,11 +1669,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// adding arms here, following updateSettings's precedent — this
 		// switch already exceeds the configured gocyclo minimum. Lifecycle
 		// keys (create workspace/session) are tried first, since they open a
-		// prompt or dispatch a Cmd rather than moving the cursor; anything
-		// else falls through to the pure-navigation handler in
-		// workspace_view.go.
+		// prompt or dispatch a Cmd rather than moving the cursor; launch
+		// ('enter' on a session row) is tried next; anything else falls
+		// through to the pure-navigation handler in workspace_view.go.
+		// updateWorkspaceLaunch lives here (not workspace_view.go/
+		// workspace_cmd.go) because both of those files are untouched by
+		// this feature.
 		if m.view == viewWorkspaces {
 			if next, cmd, handled := m.updateWorkspaceLifecycle(msg); handled {
+				return next, cmd
+			}
+			if next, cmd, handled := m.updateWorkspaceLaunch(msg); handled {
 				return next, cmd
 			}
 			return m.updateWorkspaceView(msg)
@@ -1663,8 +1756,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-			m.recordSessionSwitch(row)
-			return m, launchCmd(m.tmux, row, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
+			target := rowLaunchTarget(row)
+			m.recordSessionSwitch(target.dir)
+			return m, launchCmd(m.tmux, target, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
 
 		case "n":
 			// New worktree: collect a branch name via prompt.
@@ -2207,52 +2301,30 @@ func (m *model) closeSessionPalette() {
 	m.input.Blur()
 	m.input.SetValue("")
 	m.sessionPaletteRows = nil
+	m.sessionPaletteTargets = nil
 	m.sessionPaletteLabels = nil
 	m.sessionPaletteMatches = nil
 	m.sessionPaletteCursor = 0
 }
 
-// recordSessionSwitch marks a worktree as the most recently jumped to or
-// resumed, so the ctrl+P switcher can order rows most-recently-used first.
-// Rows with no worktree path (nothing to key on) are ignored.
-func (m *model) recordSessionSwitch(row settings.Row) {
-	if row.Worktree == "" {
+// recordSessionSwitch marks dir (a launchTarget.dir — a worktree path or a
+// workspace session directory) as the most recently jumped to or resumed, so
+// the ctrl+P switcher can order candidates most-recently-used first. An empty
+// dir (nothing to key on) is ignored.
+func (m *model) recordSessionSwitch(dir string) {
+	if dir == "" {
 		return
 	}
 	if m.switchOrder == nil {
 		m.switchOrder = make(map[string]int)
 	}
 	m.switchSeq++
-	m.switchOrder[row.Worktree] = m.switchSeq
+	m.switchOrder[dir] = m.switchSeq
 }
 
-// orderedSessionRows returns a copy of workspaceRows ordered most-recently
-// switched-to first (per switchOrder), preserving the existing alphabetical
-// order for worktrees never jumped to this run. startOnPrevious is true when
-// both of the top two rows have a recorded switch — i.e. a genuine "previous"
-// session exists — so the palette cursor should start on row 1.
-func (m model) orderedSessionRows() (rows []settings.Row, startOnPrevious bool) {
-	rows = append([]settings.Row(nil), m.workspaceRows...)
-	sort.SliceStable(rows, func(i, j int) bool {
-		si, oi := m.switchOrder[rows[i].Worktree]
-		sj, oj := m.switchOrder[rows[j].Worktree]
-		if oi != oj {
-			return oi // switched rows sort ahead of never-switched ones
-		}
-		if oi && oj {
-			return si > sj // more recently switched first
-		}
-		return false // both unswitched: stable sort keeps alphabetical order
-	})
-	startOnPrevious = len(rows) >= 2 &&
-		m.hasSwitchRecord(rows[0]) && m.hasSwitchRecord(rows[1])
-	return rows, startOnPrevious
-}
-
-// hasSwitchRecord reports whether the row's worktree has been jumped to or
-// resumed this run.
-func (m model) hasSwitchRecord(row settings.Row) bool {
-	_, ok := m.switchOrder[row.Worktree]
+// hasSwitchRecord reports whether dir has been jumped to or resumed this run.
+func (m model) hasSwitchRecord(dir string) bool {
+	_, ok := m.switchOrder[dir]
 	return ok
 }
 
@@ -2270,6 +2342,80 @@ func sessionPaletteLabel(row settings.Row) string {
 		label += " " + row.Branch
 	}
 	return label
+}
+
+// sessionCandidate is one entry the ctrl+P switcher can jump to: row is the
+// render-only settings.Row shim renderPaletteRow (render.go) needs for its
+// status glyph and branch styling; target is the neutral launch identity
+// dispatched on enter; label is the fuzzy-match text.
+type sessionCandidate struct {
+	row    settings.Row
+	target launchTarget
+	label  string
+}
+
+// sessionSwitchCandidates collects every target the ctrl+P switcher offers:
+// every Sessions-pane worktree row (m.workspaceRows) plus every assembled
+// workspace session across m.wsStatuses. A workspace session still being
+// assembled has Session.Dir == "" (the same pending-create discriminator
+// stripPendingWsSessions documents, workspace_cmd.go) and is excluded,
+// mirroring how a Sessions-pane creating row has no equivalent exclusion
+// needed here (it is still keyed on a real, if not-yet-existing, worktree
+// path).
+func (m model) sessionSwitchCandidates() []sessionCandidate {
+	out := make([]sessionCandidate, 0, len(m.workspaceRows))
+	for _, row := range m.workspaceRows {
+		out = append(out, sessionCandidate{
+			row:    row,
+			target: rowLaunchTarget(row),
+			label:  sessionPaletteLabel(row),
+		})
+	}
+	for _, ws := range m.wsStatuses {
+		for _, sess := range ws.Sessions {
+			if sess.Session.Dir == "" {
+				continue
+			}
+			out = append(out, sessionCandidate{
+				row: settings.Row{
+					Worktree:  sess.Session.Dir,
+					Branch:    sess.Session.Branch,
+					Harness:   sess.Session.Harness,
+					Provider:  sess.Provider,
+					SessionID: sess.SessionID,
+					State:     sess.State,
+					Attention: sess.Attention,
+				},
+				target: wsSessionLaunchTarget(ws.Workspace.Name, sess),
+				label:  ws.Workspace.Name + "/" + sess.Session.Name,
+			})
+		}
+	}
+	return out
+}
+
+// orderedSessionCandidates returns sessionSwitchCandidates ordered
+// most-recently switched-to first (per switchOrder, keyed by each
+// candidate's target directory), preserving the existing alphabetical order
+// for candidates never switched to this run. startOnPrevious is true when
+// both of the top two candidates have a recorded switch — i.e. a genuine
+// "previous" session exists — so the palette cursor should start on row 1.
+func (m model) orderedSessionCandidates() (candidates []sessionCandidate, startOnPrevious bool) {
+	candidates = m.sessionSwitchCandidates()
+	sort.SliceStable(candidates, func(i, j int) bool {
+		si, oi := m.switchOrder[candidates[i].target.dir]
+		sj, oj := m.switchOrder[candidates[j].target.dir]
+		if oi != oj {
+			return oi // switched candidates sort ahead of never-switched ones
+		}
+		if oi && oj {
+			return si > sj // more recently switched first
+		}
+		return false // both unswitched: stable sort keeps alphabetical order
+	})
+	startOnPrevious = len(candidates) >= 2 &&
+		m.hasSwitchRecord(candidates[0].target.dir) && m.hasSwitchRecord(candidates[1].target.dir)
+	return candidates, startOnPrevious
 }
 
 // renderHarnessChooser renders the harness-selection list shown in the sessions
@@ -2692,6 +2838,64 @@ func excludeWorkspaceOwnedSessions(sessions []state.SessionView, workspaceRoot s
 		out = append(out, sv)
 	}
 	return out
+}
+
+// wsSessionUnderCursor returns the WorkspaceStatus and SessionStatus the
+// Workspaces-view cursor currently targets, and false when the cursor sits on
+// a workspace header line, an empty-workspace hint line, or there are no
+// workspaces at all. It mirrors wsUnderCursor (workspace_cmd.go) but resolves
+// all the way to the session row, which that helper does not need for its own
+// (workspace-only) callers.
+func (m model) wsSessionUnderCursor() (workspace.WorkspaceStatus, workspace.SessionStatus, bool) {
+	for _, dl := range wsDisplayLines(m.wsStatuses) {
+		if dl.entry != m.wsCursor {
+			continue
+		}
+		if dl.kind != wsLineSession {
+			return workspace.WorkspaceStatus{}, workspace.SessionStatus{}, false
+		}
+		ws := m.wsStatuses[dl.wsIndex]
+		return ws, ws.Sessions[dl.sessIndex], true
+	}
+	return workspace.WorkspaceStatus{}, workspace.SessionStatus{}, false
+}
+
+// updateWorkspaceLaunch handles 'enter' on a workspace session row in the
+// Workspaces view: it launches (or jumps/resumes) exactly like the Sessions
+// pane's own 'enter' (same tmux guards, same StateMissing/StateCreating
+// guards), but keyed on the workspace session's own directory and named
+// "<workspace>/<session>" via wsSessionLaunchTarget. Defined here rather than
+// in workspace_view.go/workspace_cmd.go, both untouched by this feature, per
+// the phase convention that every workspace mode routes its key handling
+// through a dedicated method. Returns handled=false for any other key, or
+// when the cursor is not on a session row, so the caller falls through to
+// updateWorkspaceLifecycle and then updateWorkspaceView.
+func (m model) updateWorkspaceLaunch(msg tea.KeyMsg) (model, tea.Cmd, bool) {
+	if msg.String() != "enter" {
+		return m, nil, false
+	}
+	ws, sess, ok := m.wsSessionUnderCursor()
+	if !ok {
+		return m, nil, false
+	}
+
+	tmuxAvail := m.tmux != nil && m.tmux.Available()
+	if !tmuxAvail {
+		m.wsHint = "tmux not available — start cogitator inside a tmux session to use jump/resume"
+		return m, nil, true
+	}
+	if sess.State == settings.StateMissing {
+		m.wsHint = "session directory is missing — cannot resume"
+		return m, nil, true
+	}
+	if sess.State == settings.StateCreating {
+		m.wsHint = "session is still being created…"
+		return m, nil, true
+	}
+
+	target := wsSessionLaunchTarget(ws.Workspace.Name, sess)
+	m.recordSessionSwitch(target.dir)
+	return m, launchCmd(m.tmux, target, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp)), true
 }
 
 // resolvedDefaultHarness returns the configured default harness kind when one

@@ -20,6 +20,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
+	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 // TestLaunchModeForDefaultsToSession locks the default launch mode: an unset
@@ -1596,5 +1597,205 @@ func TestRenderWorktreeDeletePromptShowsCheckingBeforeProbe(t *testing.T) {
 	got := m.renderWorkspaceRows(200, []settings.Row{base}, 0, fixedNow)
 	if !strings.Contains(got, "checking merge status") {
 		t.Fatalf("pre-probe prompt must show 'checking merge status…', got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Workspaces view 'enter': launch a workspace session (step 12)
+// ---------------------------------------------------------------------------
+
+// wsSession builds a workspace.SessionStatus with every field
+// updateWorkspaceLaunch/wsSessionLaunchTarget need (Dir, Harness, State),
+// unlike workspace_view_test.go's makeSessionStatus, which has no way to set
+// them.
+func wsSession(name, branch, dir, harnessKind string, st settings.RowState) workspace.SessionStatus {
+	return workspace.SessionStatus{
+		Session: workspace.Session{Name: name, Branch: branch, Dir: dir, Harness: harnessKind},
+		State:   st,
+	}
+}
+
+// wsStatusWithSession wraps a single session in its own named
+// workspace.WorkspaceStatus, for tests that need exactly one session under
+// the Workspaces-view cursor.
+func wsStatusWithSession(workspaceName string, sess workspace.SessionStatus) workspace.WorkspaceStatus {
+	return workspace.WorkspaceStatus{
+		Workspace: workspace.Workspace{Name: workspaceName, Sessions: []workspace.Session{sess.Session}},
+		Sessions:  []workspace.SessionStatus{sess},
+	}
+}
+
+func TestWorkspaceLaunch_EnterOnSessionRowOpensSessionDirNamedForWorkspace(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{
+		available:          true,
+		findWindowErr:      tmuxctl.ErrWindowNotFound,
+		ensureWindowResult: "payments/Feature X:0",
+	}
+	sess := wsSession("Feature X", "feature-x", "/root/payments/feature-x", "fake", settings.StateStopped)
+	m := model{
+		width: 120, height: 40, view: viewWorkspaces, input: newTestInput(),
+		tmux: tmuxFake, harnOp: &fakeHarnessOps{argv: []string{"fake", "/root/payments/feature-x"}},
+		wsStatuses: []workspace.WorkspaceStatus{wsStatusWithSession("payments", sess)},
+		wsCursor:   1, // the session row (0 is the workspace header)
+	}
+
+	_, cmd := m.Update(keyMsg("enter"))
+	if cmd == nil {
+		t.Fatal("enter on a workspace session row must dispatch a launch cmd")
+	}
+	result, ok := runCmd(cmd).(launchResultMsg)
+	if !ok {
+		t.Fatal("expected launchResultMsg")
+	}
+	if result.err != nil {
+		t.Fatalf("unexpected error: %v", result.err)
+	}
+	if len(tmuxFake.ensureWindowCalls) != 1 {
+		t.Fatalf("expected 1 EnsureWindowMode call, got %d", len(tmuxFake.ensureWindowCalls))
+	}
+	ensure := tmuxFake.ensureWindowCalls[0]
+	if ensure.dir != "/root/payments/feature-x" {
+		t.Errorf("EnsureWindowMode dir = %q, want the session directory", ensure.dir)
+	}
+	if ensure.name != "payments/Feature X" {
+		t.Errorf("EnsureWindowMode name = %q, want %q", ensure.name, "payments/Feature X")
+	}
+}
+
+func TestWorkspaceLaunch_AlreadyOpenSelectsExistingTargetInstead(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{
+		available:        true,
+		findWindowResult: "payments/Feature X:1",
+		processAlive:     true,
+	}
+	sess := wsSession("Feature X", "feature-x", "/root/payments/feature-x", "fake", settings.StateRunning)
+	m := model{
+		width: 120, height: 40, view: viewWorkspaces, input: newTestInput(),
+		tmux: tmuxFake, harnOp: &fakeHarnessOps{},
+		wsStatuses: []workspace.WorkspaceStatus{wsStatusWithSession("payments", sess)},
+		wsCursor:   1,
+	}
+
+	_, cmd := m.Update(keyMsg("enter"))
+	if _, ok := runCmd(cmd).(launchResultMsg); !ok {
+		t.Fatal("expected launchResultMsg")
+	}
+	if len(tmuxFake.selectCalls) != 1 || tmuxFake.selectCalls[0] != "payments/Feature X:1" {
+		t.Errorf("expected Select(payments/Feature X:1), got %v", tmuxFake.selectCalls)
+	}
+	if len(tmuxFake.ensureWindowCalls) != 0 {
+		t.Error("a workspace session already open in tmux must not create a second target")
+	}
+}
+
+func TestWorkspaceLaunch_DefaultHarnessDoesNotOverrideSessionHarness(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := settings.SetDefaultHarness("opencode"); err != nil {
+		t.Fatalf("set default: %v", err)
+	}
+	tmuxFake := &fakeTmuxOps{
+		available:          true,
+		findWindowErr:      tmuxctl.ErrWindowNotFound,
+		ensureWindowResult: "payments/Feature X:0",
+	}
+	sess := wsSession("Feature X", "feature-x", "/root/payments/feature-x", "codex", settings.StateStopped)
+	m := model{
+		width: 120, height: 40, view: viewWorkspaces, input: newTestInput(),
+		tmux: tmuxFake, harnOp: &fakeHarnessOpsWithKinds{kinds: []harness.Kind{"codex", "opencode"}},
+		wsStatuses: []workspace.WorkspaceStatus{wsStatusWithSession("payments", sess)},
+		wsCursor:   1,
+	}
+
+	_, cmd := m.Update(keyMsg("enter"))
+	result, ok := runCmd(cmd).(launchResultMsg)
+	if !ok {
+		t.Fatal("expected launchResultMsg")
+	}
+	if result.harnessKind != "" {
+		t.Errorf("a workspace session's own harness must not be overridden by the configured default, got override %q", result.harnessKind)
+	}
+}
+
+func TestWorkspaceLaunch_TmuxUnavailableSetsWsHint(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{available: false}
+	sess := wsSession("Feature X", "feature-x", "/root/payments/feature-x", "opencode", settings.StateStopped)
+	m := model{
+		width: 120, height: 40, view: viewWorkspaces, input: newTestInput(),
+		tmux:       tmuxFake,
+		wsStatuses: []workspace.WorkspaceStatus{wsStatusWithSession("payments", sess)},
+		wsCursor:   1,
+	}
+
+	updated, cmd := m.Update(keyMsg("enter"))
+	m2 := updated.(model)
+
+	if cmd != nil {
+		t.Error("enter with tmux unavailable must return nil cmd")
+	}
+	if !strings.Contains(m2.wsHint, "tmux") {
+		t.Errorf("wsHint must mention tmux, got %q", m2.wsHint)
+	}
+}
+
+func TestWorkspaceLaunch_MissingSessionSetsWsHintAndLaunchesNothing(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{available: true}
+	sess := wsSession("Feature X", "feature-x", "/root/payments/feature-x", "opencode", settings.StateMissing)
+	m := model{
+		width: 120, height: 40, view: viewWorkspaces, input: newTestInput(),
+		tmux:       tmuxFake,
+		wsStatuses: []workspace.WorkspaceStatus{wsStatusWithSession("payments", sess)},
+		wsCursor:   1,
+	}
+
+	updated, cmd := m.Update(keyMsg("enter"))
+	m2 := updated.(model)
+
+	if cmd != nil {
+		t.Error("enter on a missing session must return nil cmd")
+	}
+	if !strings.Contains(m2.wsHint, "missing") {
+		t.Errorf("wsHint must mention missing, got %q", m2.wsHint)
+	}
+	if len(tmuxFake.findWindowCalls) != 0 {
+		t.Errorf("a missing session must never touch tmux, got %v", tmuxFake.findWindowCalls)
+	}
+}
+
+func TestWorkspaceLaunch_CreatingSessionSetsWsHint(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{available: true}
+	sess := wsSession("Feature X", "", "", "", settings.StateCreating)
+	m := model{
+		width: 120, height: 40, view: viewWorkspaces, input: newTestInput(),
+		tmux:       tmuxFake,
+		wsStatuses: []workspace.WorkspaceStatus{wsStatusWithSession("payments", sess)},
+		wsCursor:   1,
+	}
+
+	updated, cmd := m.Update(keyMsg("enter"))
+	m2 := updated.(model)
+
+	if cmd != nil {
+		t.Error("enter on a creating session must return nil cmd")
+	}
+	if m2.wsHint == "" {
+		t.Error("enter on a creating session must set a wsHint")
+	}
+}
+
+func TestWorkspaceLaunch_EnterOnHeaderRowIsNoop(t *testing.T) {
+	m := model{
+		width: 120, height: 40, view: viewWorkspaces, input: newTestInput(),
+		wsStatuses: []workspace.WorkspaceStatus{wsMemberWorkspace("payments")},
+		wsCursor:   0, // the workspace header, not a session row
+	}
+
+	updated, cmd := m.Update(keyMsg("enter"))
+	m2 := updated.(model)
+
+	if cmd != nil {
+		t.Error("enter on a workspace header must not dispatch a launch")
+	}
+	if m2.wsHint != "" {
+		t.Errorf("enter on a workspace header must not set a launch hint, got %q", m2.wsHint)
 	}
 }

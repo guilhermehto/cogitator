@@ -65,7 +65,7 @@ func TestLaunchInner_DefaultOverridesRecordedHarness(t *testing.T) {
 	tmux := &fakeTmuxOps{available: true, findWindowErr: errors.New("no window"), ensureWindowResult: "s:1"}
 	row := settings.Row{Repo: "/r", Worktree: "/r/a", Branch: "feat", Harness: "codex"}
 
-	res := launchInner(tmux, row, &fakeHarnessOps{}, tmuxctl.ModeSession, "opencode")()
+	res := launchInner(tmux, rowLaunchTarget(row), &fakeHarnessOps{}, tmuxctl.ModeSession, "opencode")()
 
 	if res.err != nil {
 		t.Fatalf("unexpected err: %v", res.err)
@@ -81,11 +81,12 @@ func TestLaunchInner_DefaultOverridesRecordedHarness(t *testing.T) {
 func TestLaunchInner_NoOverrideWhenDefaultEmptyOrMatches(t *testing.T) {
 	tmux := &fakeTmuxOps{available: true, findWindowErr: errors.New("no window"), ensureWindowResult: "s:1"}
 	row := settings.Row{Repo: "/r", Worktree: "/r/a", Harness: "codex"}
+	target := rowLaunchTarget(row)
 
-	if res := launchInner(tmux, row, &fakeHarnessOps{}, tmuxctl.ModeSession, "")(); res.harnessKind != "" {
+	if res := launchInner(tmux, target, &fakeHarnessOps{}, tmuxctl.ModeSession, "")(); res.harnessKind != "" {
 		t.Errorf("empty default: harnessKind = %q, want empty (no override)", res.harnessKind)
 	}
-	if res := launchInner(tmux, row, &fakeHarnessOps{}, tmuxctl.ModeSession, "codex")(); res.harnessKind != "" {
+	if res := launchInner(tmux, target, &fakeHarnessOps{}, tmuxctl.ModeSession, "codex")(); res.harnessKind != "" {
 		t.Errorf("matching default: harnessKind = %q, want empty (no override)", res.harnessKind)
 	}
 }
@@ -211,10 +212,11 @@ func TestLaunchArgv_OverrideBlanksStaleSessionToken(t *testing.T) {
 	rec := &tokenRecordingHarness{}
 	ops := &recordingHarnessOps{h: rec}
 	row := settings.Row{Worktree: "/r/a", Harness: "codex", SessionID: "codex-123"}
+	target := rowLaunchTarget(row)
 
 	// Override (default differs from the recorded harness): the stale token
 	// belongs to the old harness and must not flow to the new one.
-	if _, override := launchArgv(row, ops, "opencode"); override == "" {
+	if _, override := launchArgv(target, ops, "opencode"); override == "" {
 		t.Fatal("expected an override when default differs from recorded harness")
 	}
 	if rec.gotToken != "" {
@@ -223,7 +225,7 @@ func TestLaunchArgv_OverrideBlanksStaleSessionToken(t *testing.T) {
 
 	// No override: the recorded token passes through for a normal resume.
 	rec.gotToken = "sentinel"
-	if _, override := launchArgv(row, ops, ""); override != "" {
+	if _, override := launchArgv(target, ops, ""); override != "" {
 		t.Errorf("empty default must not override, got %q", override)
 	}
 	if rec.gotToken != "codex-123" {
