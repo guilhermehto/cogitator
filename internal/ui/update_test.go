@@ -7,12 +7,17 @@ package ui
 // git, or opencode binary is required.
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/guilhermehto/cogitator/internal/config"
+	"github.com/guilhermehto/cogitator/internal/harness"
+	"github.com/guilhermehto/cogitator/internal/pathnorm"
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 	"github.com/guilhermehto/cogitator/internal/workspace"
@@ -95,8 +100,8 @@ func TestSnapshotMsgDoesNotBuildRowsInline(t *testing.T) {
 	ch := make(chan state.Snapshot, 1)
 	m := snapshotModel(ch)
 	// Pre-populate rows so we can detect if they were cleared or rebuilt.
-	m.workspaceRows = []workspace.Row{
-		makeRow("/r", "/r/a", "main", "existing", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m.workspaceRows = []settings.Row{
+		makeRow("/r", "/r/a", "main", "existing", settings.StateStopped, state.AttnInactive, fixedNow),
 	}
 
 	snap := state.Snapshot{Sessions: []state.SessionView{{SessionID: "s1"}}}
@@ -131,8 +136,8 @@ func TestSnapshotMsgDemoSuppressesBuild(t *testing.T) {
 	ch := make(chan state.Snapshot, 1)
 	m := snapshotModel(ch)
 	m.demo = true
-	m.workspaceRows = []workspace.Row{
-		makeRow("/r", "/r/a", "main", "curated", workspace.StateRunning, state.AttnActive, fixedNow),
+	m.workspaceRows = []settings.Row{
+		makeRow("/r", "/r/a", "main", "curated", settings.StateRunning, state.AttnActive, fixedNow),
 	}
 
 	snap := state.Snapshot{Sessions: []state.SessionView{{SessionID: "s1"}}}
@@ -154,7 +159,7 @@ func TestLiveSessionsForMatchesRunningRows(t *testing.T) {
 	rows := demoWorktrees(fixedNow)
 	want := 0
 	for _, r := range rows {
-		if r.State == workspace.StateRunning {
+		if r.State == settings.StateRunning {
 			want++
 		}
 	}
@@ -195,8 +200,8 @@ func TestWorkspaceRowsMsgAppliesRows(t *testing.T) {
 	m := snapshotModel(ch)
 	m.rowsBuilding = true
 
-	rows := []workspace.Row{
-		makeRow("/r", "/r/a", "main", "built", workspace.StateRunning, state.AttnActive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/r", "/r/a", "main", "built", settings.StateRunning, state.AttnActive, fixedNow),
 	}
 	msg := workspaceRowsMsg{rows: rows, launchMode: tmuxctl.ModeSession}
 	updated, _ := m.Update(msg)
@@ -207,6 +212,23 @@ func TestWorkspaceRowsMsgAppliesRows(t *testing.T) {
 	}
 	if m2.launchMode != tmuxctl.ModeSession {
 		t.Errorf("launchMode not applied; got %v", m2.launchMode)
+	}
+}
+
+// TestWorkspaceRowsMsgAppliesRoot asserts that workspaceRowsMsg's root is
+// applied to the model, including when rows is empty (the zero-repos case,
+// which is exactly when View's fallback branch needs a resolved root to
+// exclude workspace-owned sessions).
+func TestWorkspaceRowsMsgAppliesRoot(t *testing.T) {
+	ch := make(chan state.Snapshot, 1)
+	m := snapshotModel(ch)
+	m.rowsBuilding = true
+
+	updated, _ := m.Update(workspaceRowsMsg{rows: nil, root: "/some/workspace/root"})
+	m2 := updated.(model)
+
+	if m2.workspaceRoot != "/some/workspace/root" {
+		t.Errorf("workspaceRoot not applied; got %q", m2.workspaceRoot)
 	}
 }
 
@@ -233,8 +255,8 @@ func TestWorkspaceRowsMsgClampsSessionCursor(t *testing.T) {
 	m.rowsBuilding = true
 	m.sessionCursor = 5 // beyond any row list
 
-	rows := []workspace.Row{
-		makeRow("/r", "/r/a", "main", "only", workspace.StateStopped, state.AttnInactive, fixedNow),
+	rows := []settings.Row{
+		makeRow("/r", "/r/a", "main", "only", settings.StateStopped, state.AttnInactive, fixedNow),
 	}
 	updated, _ := m.Update(workspaceRowsMsg{rows: rows})
 	m2 := updated.(model)
@@ -383,7 +405,7 @@ func TestSnapshotMsgCoalescedBuildUsesLatestSnap(t *testing.T) {
 func TestDemoRendersWorktreeRoster(t *testing.T) {
 	rows := demoWorktrees(fixedNow)
 	ch := make(chan state.Snapshot, 1)
-	m := newModel(ch, config.Default(), false, false, nil) // nil tw → no Tasks pane
+	m := newModel(ch, config.Default(), false, false)
 	m.demo = true
 	m.workspaceRows = rows
 	m.snap = state.Snapshot{Sessions: liveSessionsFor(rows), UpdatedAt: fixedNow}
@@ -397,5 +419,227 @@ func TestDemoRendersWorktreeRoster(t *testing.T) {
 	}
 	if strings.Contains(out, "no live or recent sessions") {
 		t.Error("demo must render the worktree roster, not the live-session fallback")
+	}
+}
+
+// TestViewFallbackExcludesWorkspaceOwnedSession verifies that when no repos
+// are configured — exactly the case where View renders the live-only
+// fallback via renderAllSessions — a live session whose Directory lies under
+// the resolved workspace root is excluded from both the fallback listing and
+// the header's live/recent counts. Without this, an install with zero
+// configured repos would surface a workspace session's per-repo checkout as
+// an ordinary live session.
+func TestViewFallbackExcludesWorkspaceOwnedSession(t *testing.T) {
+	root := t.TempDir()
+	memberDir := filepath.Join(root, "session-1", "repo")
+	if err := os.MkdirAll(memberDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", memberDir, err)
+	}
+	canonRoot, err := pathnorm.Canonical(root)
+	if err != nil {
+		t.Fatalf("Canonical(%q): %v", root, err)
+	}
+	canonMember, err := pathnorm.Canonical(memberDir)
+	if err != nil {
+		t.Fatalf("Canonical(%q): %v", memberDir, err)
+	}
+
+	m := model{
+		width:         120,
+		workspaceRoot: canonRoot,
+		snap: state.Snapshot{
+			UpdatedAt: fixedNow,
+			Sessions: []state.SessionView{
+				{
+					InstanceID:   "i1",
+					InstanceName: "inst-1",
+					SessionID:    "workspace-owned",
+					Title:        "workspace-owned-title",
+					Directory:    canonMember,
+					StatusType:   "busy",
+					Attention:    state.AttnActive,
+					Source:       state.SourceLive,
+				},
+				{
+					InstanceID:   "i2",
+					InstanceName: "inst-2",
+					SessionID:    "ordinary",
+					Title:        "ordinary-title",
+					Directory:    t.TempDir(),
+					StatusType:   "busy",
+					Attention:    state.AttnActive,
+					Source:       state.SourceLive,
+				},
+			},
+		},
+		// workspaceRows is nil — no repos configured; the fallback branch renders.
+	}
+
+	got := m.View()
+	if strings.Contains(got, "workspace-owned-title") {
+		t.Errorf("fallback view must exclude the workspace-owned session, got %q", got)
+	}
+	if !strings.Contains(got, "ordinary-title") {
+		t.Errorf("fallback view must still render the ordinary session, got %q", got)
+	}
+	if !strings.Contains(got, "1 live") {
+		t.Errorf("header must count only the ordinary session as live, got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// membershipChangedMsg must not clobber an open prompt — review-fix-D,
+// defect 2. handleMembershipChanged (workspace_backfill.go) used to seize
+// m.prompt for promptWorkspaceBackfill unconditionally, discarding whatever
+// prompt was already open; the guard lives in Update's membershipChangedMsg
+// case (model.go) rather than inside handleMembershipChanged itself, mirroring
+// the repoScanMsg/wsModalScanMsg guards.
+// ---------------------------------------------------------------------------
+
+// workspaceWithSessions is a minimal wsStatuses fixture whose workspace has
+// at least one session, so handleMembershipChanged would open the backfill
+// prompt absent the guard under test.
+func workspaceWithSessions(name string, sessionNames ...string) []workspace.WorkspaceStatus {
+	sessions := make([]workspace.Session, len(sessionNames))
+	for i, n := range sessionNames {
+		sessions[i] = workspace.Session{Name: n}
+	}
+	return []workspace.WorkspaceStatus{{Workspace: workspace.Workspace{Name: name, Sessions: sessions}}}
+}
+
+func TestMembershipChangedMsgDoesNotClobberAnOpenPrompt(t *testing.T) {
+	m := model{
+		width:      120,
+		prompt:     promptSettings,
+		wsStatuses: workspaceWithSessions("payments", "session-one"),
+	}
+
+	updated, cmd := m.Update(membershipChangedMsg{workspace: "payments", repo: "/repo/c", attached: true})
+	m2 := updated.(model)
+
+	if m2.prompt != promptSettings {
+		t.Errorf("an open prompt must survive membershipChangedMsg; got %v", m2.prompt)
+	}
+	if !m2.wsBuilding {
+		t.Error("the workspace statuses must still refresh even though the backfill offer was dropped")
+	}
+	if cmd == nil {
+		t.Fatal("expected a reload cmd")
+	}
+	// review-fix-F, defect A: dropping the backfill offer silently leaves the
+	// user with no way to know their existing sessions were not updated.
+	if !strings.Contains(m2.wsHint, "c") || !strings.Contains(m2.wsHint, "payments") {
+		t.Errorf("wsHint must name the repo and workspace when the backfill offer is dropped; got %q", m2.wsHint)
+	}
+	if !strings.Contains(m2.wsHint, "not") {
+		t.Errorf("wsHint must explain the existing sessions were not updated; got %q", m2.wsHint)
+	}
+	if !strings.Contains(m2.wsHint, "re-add") {
+		t.Errorf("wsHint must say re-adding the repo offers the backfill again; got %q", m2.wsHint)
+	}
+}
+
+func TestMembershipChangedMsgStillOpensBackfillWhenIdle(t *testing.T) {
+	m := model{
+		width:      120,
+		prompt:     promptIdle,
+		wsStatuses: workspaceWithSessions("payments", "session-one"),
+	}
+
+	updated, _ := m.Update(membershipChangedMsg{workspace: "payments", repo: "/repo/c", attached: true})
+	m2 := updated.(model)
+
+	if m2.prompt != promptWorkspaceBackfill {
+		t.Errorf("with no prompt open, membershipChangedMsg must still open the backfill prompt; got %v", m2.prompt)
+	}
+	// review-fix-F, defect A: the drop-and-hint path must not fire when the
+	// backfill picker actually opens.
+	if m2.wsHint != "" {
+		t.Errorf("wsHint must stay empty when the backfill picker opens normally; got %q", m2.wsHint)
+	}
+}
+
+// TestMembershipChangedMsgCannotStrandWsCreateTargetAcrossViews reproduces
+// the review's worst-case path end to end: an 'e'→enter attach commit is in
+// flight while the user has already moved on to the Workspaces view's 'n'
+// flow (wsCreateTarget captured, promptNewWorkspaceSession open). Before the
+// guard, the async membershipChangedMsg seized the prompt for the backfill
+// picker; esc out of that clobbered prompt left wsCreateTarget stale, so a
+// later, wholly unrelated 'n' in the Sessions view silently created a
+// workspace session instead of the ordinary worktree the user asked for.
+func TestMembershipChangedMsgCannotStrandWsCreateTargetAcrossViews(t *testing.T) {
+	setWsTestXDG(t)
+	tmuxFake := &fakeTmuxOps{available: true, ensureWindowResult: "main:1"}
+	gitFake := &fakeGitOps{addResult: "/r-feat"}
+	harnFake := &fakeHarnessOpsWithKinds{kinds: []harness.Kind{"codex"}}
+
+	m := model{
+		width: 120, height: 40, input: newTestInput(),
+		view:           viewWorkspaces,
+		prompt:         promptNewWorkspaceSession,
+		wsCreateTarget: "payments",
+		tmux:           tmuxFake,
+		gitOp:          gitFake,
+		harnOp:         harnFake,
+		wsStatuses:     workspaceWithSessions("payments", "session-one"),
+	}
+
+	// The async membership-change message lands mid-flow.
+	updated, _ := m.Update(membershipChangedMsg{workspace: "payments", repo: "/repo/c", attached: true})
+	m1 := updated.(model)
+	if m1.prompt != promptNewWorkspaceSession {
+		t.Fatalf("membershipChangedMsg must not clobber the open session-name prompt; got %v", m1.prompt)
+	}
+	if m1.wsCreateTarget != "payments" {
+		t.Fatalf("wsCreateTarget must survive the guarded message; got %q", m1.wsCreateTarget)
+	}
+
+	// esc out of the (undisturbed) session-name prompt.
+	updated2, _ := m1.Update(keyMsg("esc"))
+	m2 := updated2.(model)
+	if m2.prompt != promptIdle || m2.wsCreateTarget != "" {
+		t.Fatalf("esc must return to promptIdle with wsCreateTarget cleared; got prompt=%v wsCreateTarget=%q",
+			m2.prompt, m2.wsCreateTarget)
+	}
+
+	// Tab to Sessions and press 'n' on an ordinary worktree row.
+	updated3, _ := m2.Update(keyMsg("tab"))
+	m3 := updated3.(model)
+	if m3.view != viewSessions {
+		t.Fatalf("tab must switch to the Sessions view; got %v", m3.view)
+	}
+	m3.workspaceRows = []settings.Row{
+		makeRow("/r", "/r/feat", "feat", "codex", settings.StateStopped, state.AttnInactive, fixedNow),
+	}
+	m3.sessionCursor = 0
+
+	updated4, _ := m3.Update(keyMsg("n"))
+	m4 := updated4.(model)
+	if m4.prompt != promptNewWorktree {
+		t.Fatalf("'n' in the Sessions view must open the ordinary new-worktree prompt; got %v", m4.prompt)
+	}
+	m4.input.SetValue("feat")
+
+	updated5, _ := m4.Update(keyMsg("enter"))
+	m5 := updated5.(model)
+	if m5.prompt != promptChooseHarness {
+		t.Fatalf("the branch-name prompt must advance to promptChooseHarness; got %v", m5.prompt)
+	}
+	if m5.wsCreateTarget != "" {
+		t.Fatalf("wsCreateTarget must still be empty at the harness chooser; got %q — a stale value hijacks the dispatch below", m5.wsCreateTarget)
+	}
+
+	updated6, cmd := m5.Update(keyMsg("enter"))
+	m6 := updated6.(model)
+	if m6.wsCreateTarget != "" {
+		t.Error("wsCreateTarget must remain empty after dispatch")
+	}
+	// worktreeCreatedFrom (actions_test.go) fails the test outright if cmd
+	// produced anything other than an ordinary worktreeCreatedMsg — in
+	// particular, it fails if the stale wsCreateTarget had instead dispatched
+	// assembleWorkspaceSessionCmd's wsSessionAssembledMsg.
+	result := worktreeCreatedFrom(t, cmd)
+	if result.repo != "/r" || result.branch != "feat" {
+		t.Errorf("expected an ordinary worktree create for /r@feat, got repo=%q branch=%q", result.repo, result.branch)
 	}
 }

@@ -11,8 +11,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 var (
@@ -36,11 +36,6 @@ var (
 	// providerStyle renders the provider badge (e.g. "[opencode]") in a muted
 	// colour so it is visible but does not compete with the session title.
 	providerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
-
-	// taskActiveStyle highlights a running Taskwarrior task. Bold + green so
-	// the running row is distinguishable from the cursor (reverse-video) and
-	// from the priority glyph palette.
-	taskActiveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Bold(true)
 
 	cellLineBreakReplacer = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ")
 )
@@ -70,9 +65,6 @@ const (
 	glyphPermission = "\U000f033e" // 󰌾
 	glyphError      = "\U000f0026" // 󰀦
 	glyphFinished   = "\U000f012c" // 󰄬 check — agent finished, awaiting your return
-	// glyphTaskActive marks a running Taskwarrior task in the ST column.
-	// When active, it replaces the priority glyph for that row.
-	glyphTaskActive = "\U000f040a" // 󰐊 play
 
 	// Workspace / worktree row glyphs.
 	glyphWtStopped = "\U000f0766" // 󰝦 same as glyphInactive — agent stopped
@@ -126,14 +118,6 @@ var (
 // pending-create row to signal an in-flight worktree create/fetch.
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-// taskPriorityGlyph maps Taskwarrior priority codes to display glyphs.
-// No entry means the cell is left blank (normal priority).
-var taskPriorityGlyph = map[string]string{
-	"H": "\U000f0071", // 󰁱 high
-	"M": "●",          // medium
-	"L": "·",          // low
-}
-
 const (
 	colStateW    = 5
 	colStatusW   = 10
@@ -144,16 +128,6 @@ const (
 	// branch on a worktree row. The branch leads (it is what you navigate by),
 	// so the title is de-emphasised and longer titles are truncated with "…".
 	maxSessionTitleW = 48
-)
-
-// Task pane column widths. DESC takes the remainder after all fixed columns
-// and gaps are subtracted from the available inner width.
-const (
-	colTaskStateW   = 3
-	colTaskIDW      = 5
-	colTaskProjectW = 14
-	colTaskTagsW    = 16
-	colTaskDueW     = 10
 )
 
 func attnLabel(a state.Attention, source state.Source) string {
@@ -204,10 +178,9 @@ func styledStatus(s string) string {
 	}
 }
 
-// legendLine renders the status-icon legend, optionally appending task-priority
-// glyphs. If the combined line would exceed width, the task glyphs are omitted
-// so the legend never wraps on narrow terminals.
-func legendLine(width int, includeTasks bool) string {
+// legendLine renders the status-icon legend for the sessions pane's attention
+// glyphs.
+func legendLine() string {
 	sessionParts := []string{
 		dimStyle.Render("legend:"),
 		attnActiveStyle.Render(glyphActive) + " " + dimStyle.Render("active"),
@@ -218,24 +191,7 @@ func legendLine(width int, includeTasks bool) string {
 		attnPermStyle.Render(glyphPermission) + " " + dimStyle.Render("permission"),
 		attnErrStyle.Render(glyphError) + " " + dimStyle.Render("error"),
 	}
-	sessionLegend := strings.Join(sessionParts, "  ")
-	if !includeTasks {
-		return sessionLegend
-	}
-
-	taskParts := []string{
-		taskActiveStyle.Render(glyphTaskActive) + " " + dimStyle.Render("running"),
-		taskPriorityGlyph["H"] + " " + dimStyle.Render("high"),
-		"● " + dimStyle.Render("medium"),
-		"· " + dimStyle.Render("low"),
-	}
-	taskLegend := strings.Join(taskParts, " · ")
-
-	combined := sessionLegend + "    " + taskLegend
-	if width > 0 && lipgloss.Width(combined) > width {
-		return sessionLegend
-	}
-	return combined
+	return strings.Join(sessionParts, "  ")
 }
 
 func (m model) renderAllSessions(width int, rows []state.SessionView, recentByInstance map[string]int) string {
@@ -464,7 +420,7 @@ type workspaceDisplayLine struct {
 
 // workspaceDisplayLines expands the flat worktree slice into the visual order
 // used by the sessions pane, inserting one header before each repo group.
-func workspaceDisplayLines(rows []workspace.Row) []workspaceDisplayLine {
+func workspaceDisplayLines(rows []settings.Row) []workspaceDisplayLine {
 	type repoGroup struct {
 		repo string
 		rows []int
@@ -549,14 +505,14 @@ func (m model) workspaceFooterLineCount() int {
 
 // renderWorkspaceRows renders the complete merged worktree list grouped by
 // repo. It remains the unbounded helper used by focused rendering tests.
-func (m model) renderWorkspaceRows(width int, rows []workspace.Row, cursor int, now time.Time) string {
+func (m model) renderWorkspaceRows(width int, rows []settings.Row, cursor int, now time.Time) string {
 	return m.renderWorkspaceRowsViewport(width, 0, rows, cursor, now)
 }
 
 // renderWorkspaceRowsViewport renders the merged worktree list within height
 // rows. The Sessions title and active hint/prompt lines are pinned; only the
 // grouped repo/worktree lines scroll.
-func (m model) renderWorkspaceRowsViewport(width, height int, rows []workspace.Row, cursor int, now time.Time) string {
+func (m model) renderWorkspaceRowsViewport(width, height int, rows []settings.Row, cursor int, now time.Time) string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Sessions") + "\n")
 	if len(rows) == 0 {
@@ -595,7 +551,7 @@ func (m model) renderWorkspaceRowsViewport(width, height int, rows []workspace.R
 		row := rows[i]
 		var line string
 		switch {
-		case row.State == workspace.StateCreating:
+		case row.State == settings.StateCreating:
 			line = m.formatCreatingRow(row, width-2)
 		case m.pulling[row.Worktree]:
 			line = m.formatSpinnerRow(row, width-2, "pulling")
@@ -620,9 +576,8 @@ func (m model) renderWorkspaceRowsViewport(width, height int, rows []workspace.R
 	}
 
 	// Render branch-name prompt when the user pressed 'n' (new worktree) or 'F'
-	// (fetch from origin). This must render regardless of m.twAvail — the
-	// sessions pane is independent of taskwarrior. Placed after the hint so it is
-	// always the last visible line.
+	// (fetch from origin). Placed after the hint so it is always the last
+	// visible line.
 	if m.prompt == promptNewWorktree || m.prompt == promptFetchBranch {
 		b.WriteString(m.worktreePromptLine() + "\n")
 	}
@@ -846,7 +801,7 @@ func (m model) renderSessionPalette(fieldW, fieldH int) string {
 // state-coloured branch — so the switcher reads the same as the pane it jumps
 // into. width is the row's cell budget; the line is ellipsis-truncated to fit.
 // The selection band is applied by the caller.
-func (m model) renderPaletteRow(row workspace.Row, label, query string, width int) string {
+func (m model) renderPaletteRow(row settings.Row, label, query string, width int) string {
 	positions, _ := fuzzyMatchPositions(query, label)
 	matched := make(map[int]bool, len(positions))
 	for _, p := range positions {
@@ -872,13 +827,13 @@ func (m model) renderPaletteRow(row workspace.Row, label, query string, width in
 // mirroring how the session list styles a branch by run-state: running branches
 // read in the default foreground, stopped are dimmed, missing/unknown carry
 // their warning colours.
-func paletteBranchStyle(s workspace.RowState) lipgloss.Style {
+func paletteBranchStyle(s settings.RowState) lipgloss.Style {
 	switch s {
-	case workspace.StateRunning:
+	case settings.StateRunning:
 		return lipgloss.NewStyle()
-	case workspace.StateMissing:
+	case settings.StateMissing:
 		return wtMissingStyle
-	case workspace.StateUnknown:
+	case settings.StateUnknown:
 		return wtUnknownStyle
 	default:
 		return wtStoppedStyle
@@ -992,15 +947,13 @@ var helpSections = []helpSection{
 		{"A", "add repo"},
 		{"R", "remove (untrack) repo"},
 	}},
-	{"Tasks", [][2]string{
-		{"T", "show / hide tasks pane"},
-		{"tab", "switch focus (sessions / tasks)"},
-		{"a", "add task"},
-		{"e", "edit task"},
-		{"s", "start / stop task"},
-		{"d", "mark done"},
-		{"D", "delete task"},
-		{"U", "undo"},
+	{"Workspaces", [][2]string{
+		{"tab", "switch sessions / workspaces"},
+		{"N", "new workspace"},
+		{"n", "new session in workspace"},
+		{"e", "edit repo membership"},
+		{"D", "delete session / workspace"},
+		{"enter", "launch session"},
 	}},
 	{"General", [][2]string{
 		{"?", "toggle this help"},
@@ -1040,9 +993,11 @@ func renderHelp(fieldW int) string {
 		contentW = max(1, fieldW-4)
 	}
 
-	// Split the sections across two columns. Sessions+Worktrees lead the left
-	// column; Tasks+General the right. The columns are rendered independently
-	// then zipped row-for-row so the box reads top-to-bottom in two streams.
+	// Split the sections across two columns: Sessions+Worktrees on the left,
+	// Workspaces+General on the right. This is the most balanced whole-section
+	// split for four sections of uneven length. The columns are rendered
+	// independently then zipped row-for-row so the box reads top-to-bottom in
+	// two streams.
 	const gap = 3
 	colW := max(1, (contentW-gap)/2)
 	left := helpColumn(helpSections[:2], keyW, colW)
@@ -1132,7 +1087,7 @@ func worktreeSessionWidth(width int) int {
 // branchLabel returns the worktree's branch — the primary, navigable identity
 // for a row — falling back to the worktree directory's base name when the
 // branch is unknown.
-func branchLabel(row workspace.Row) string {
+func branchLabel(row settings.Row) string {
 	if row.Branch != "" {
 		return row.Branch
 	}
@@ -1155,20 +1110,20 @@ func sessionTitleSuffix(title string) string {
 // (stopped / missing / unknown) otherwise. Shared by the session list and the
 // ctrl+P switcher so both speak the same status vocabulary. The returned cell
 // is glyph + trailing space (two cells wide for single-width glyphs).
-func worktreeStatusCell(row workspace.Row) string {
-	if row.State == workspace.StateRunning {
+func worktreeStatusCell(row settings.Row) string {
+	if row.State == settings.StateRunning {
 		return attnLabel(row.Attention, state.SourceLive)
 	}
 	var glyph string
 	var glyphStyle lipgloss.Style
 	switch row.State {
-	case workspace.StateStopped:
+	case settings.StateStopped:
 		glyph = glyphWtStopped
 		glyphStyle = wtStoppedStyle
-	case workspace.StateMissing:
+	case settings.StateMissing:
 		glyph = glyphWtMissing
 		glyphStyle = wtMissingStyle
-	case workspace.StateUnknown:
+	case settings.StateUnknown:
 		glyph = glyphWtUnknown
 		glyphStyle = wtUnknownStyle
 	default:
@@ -1178,14 +1133,14 @@ func worktreeStatusCell(row workspace.Row) string {
 	return glyphStyle.Render(glyph) + " "
 }
 
-// formatWorktreeRow renders a single workspace.Row as a fixed-width line.
+// formatWorktreeRow renders a single settings.Row as a fixed-width line.
 //
 // Columns are status | session | activity. The status column is left-most so
 // the session's status reads first: running rows show the live attention badge
 // (active / permission / question / error), and non-running rows show the
 // worktree run-state glyph (stopped / empty / missing / unknown). This keeps
 // the status in the same place the cursor highlight starts.
-func formatWorktreeRow(now time.Time, row workspace.Row, width int) string {
+func formatWorktreeRow(now time.Time, row settings.Row, width int) string {
 	sessionW := worktreeSessionWidth(width)
 
 	statusCell := worktreeStatusCell(row)
@@ -1194,7 +1149,7 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int) string {
 	// navigate by); the session title trails as muted, truncated text.
 	var titleStr string
 	switch row.State {
-	case workspace.StateRunning:
+	case settings.StateRunning:
 		// Running: branch leads, session title trails muted. When the branch is
 		// unknown, fall back to the title (or worktree dir) as the lead.
 		if row.Branch != "" {
@@ -1204,7 +1159,7 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int) string {
 		} else {
 			titleStr = filepath.Base(row.Worktree)
 		}
-	case workspace.StateStopped:
+	case settings.StateStopped:
 		// Stopped: same layout, dimmed lead.
 		if row.Branch != "" {
 			titleStr = wtStoppedStyle.Render(row.Branch) + sessionTitleSuffix(row.Title)
@@ -1215,9 +1170,9 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int) string {
 			}
 			titleStr = wtStoppedStyle.Render(lead)
 		}
-	case workspace.StateMissing:
+	case settings.StateMissing:
 		titleStr = wtMissingStyle.Render(branchLabel(row) + " (missing)")
-	case workspace.StateUnknown:
+	case settings.StateUnknown:
 		titleStr = wtUnknownStyle.Render(branchLabel(row)) + "  " + wtPathStyle.Render("status unknown")
 	default:
 		titleStr = dimStyle.Render(branchLabel(row))
@@ -1229,7 +1184,7 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int) string {
 
 	// Activity column: relative last-activity for stopped/unknown rows.
 	var activityStr string
-	if !row.LastActivity.IsZero() && (row.State == workspace.StateStopped || row.State == workspace.StateUnknown) {
+	if !row.LastActivity.IsZero() && (row.State == settings.StateStopped || row.State == settings.StateUnknown) {
 		activityStr = dimStyle.Render(formatRelative(now, row.LastActivity))
 	}
 
@@ -1245,7 +1200,7 @@ func formatWorktreeRow(now time.Time, row workspace.Row, width int) string {
 // with an animated spinner in the status column. The verb reflects the flow
 // ("fetching…" for 'F', "creating…" for 'n'), looked up from pendingCreates so
 // the synthetic Row needs no extra field.
-func (m model) formatCreatingRow(row workspace.Row, width int) string {
+func (m model) formatCreatingRow(row settings.Row, width int) string {
 	verb := "creating"
 	if pc, ok := m.pendingCreates[createKey(row.Repo, row.Branch)]; ok && pc.fromRemote {
 		verb = "fetching"
@@ -1257,7 +1212,7 @@ func (m model) formatCreatingRow(row workspace.Row, width int) string {
 // status column and a "(<verb>…)" suffix, signalling an in-flight git operation
 // (creating/fetching a worktree, or pulling its branch). The frame index comes
 // from the model so successive spinnerTickMsgs animate it.
-func (m model) formatSpinnerRow(row workspace.Row, width int, verb string) string {
+func (m model) formatSpinnerRow(row settings.Row, width int, verb string) string {
 	sessionW := worktreeSessionWidth(width)
 
 	glyph := "⠋"

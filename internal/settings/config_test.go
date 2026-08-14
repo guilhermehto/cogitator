@@ -1,13 +1,15 @@
-package workspace_test
+package settings_test
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
-	"github.com/guilhermehto/cogitator/internal/workspace"
+	"github.com/guilhermehto/cogitator/internal/settings"
 )
 
 // withConfigEnv sets XDG_CONFIG_HOME to dir for the duration of the test and
@@ -33,7 +35,7 @@ func TestLoadConfig_NoFile(t *testing.T) {
 	tmp := t.TempDir()
 	withConfigEnv(t, tmp)
 
-	cfg, err := workspace.LoadConfig()
+	cfg, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig with no file: %v", err)
 	}
@@ -45,11 +47,11 @@ func TestLoadConfig_NoFile(t *testing.T) {
 	}
 
 	// Saving should create the file.
-	if err := workspace.SaveConfig(cfg); err != nil {
+	if err := settings.SaveConfig(cfg); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}
 
-	path, err := workspace.ConfigPath()
+	path, err := settings.ConfigPath()
 	if err != nil {
 		t.Fatalf("ConfigPath: %v", err)
 	}
@@ -87,7 +89,7 @@ func TestLoadConfig_WithReposAndHarness(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	cfg, err := workspace.LoadConfig()
+	cfg, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -126,7 +128,7 @@ func TestLoadConfig_MissingRepoPaths(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	cfg, err := workspace.LoadConfig()
+	cfg, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig with absent repo: %v", err)
 	}
@@ -160,7 +162,7 @@ func TestLoadConfig_XDGFallback(t *testing.T) {
 	}
 	expected := filepath.Join(home, ".config", "cogitator", "config.json")
 
-	got, err := workspace.ConfigPath()
+	got, err := settings.ConfigPath()
 	if err != nil {
 		t.Fatalf("ConfigPath: %v", err)
 	}
@@ -184,20 +186,20 @@ func TestSaveConfig_RoundTrip(t *testing.T) {
 		}
 	}
 
-	original := workspace.Config{
-		Repos: []workspace.RepoConfig{
+	original := settings.Config{
+		Repos: []settings.RepoConfig{
 			{Path: repo1},
 			{Path: repo2},
 		},
 		DefaultHarness: "opencode",
-		LaunchMode:     workspace.LaunchSession,
+		LaunchMode:     settings.LaunchSession,
 	}
 
-	if err := workspace.SaveConfig(original); err != nil {
+	if err := settings.SaveConfig(original); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}
 
-	loaded, err := workspace.LoadConfig()
+	loaded, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig after save: %v", err)
 	}
@@ -208,8 +210,8 @@ func TestSaveConfig_RoundTrip(t *testing.T) {
 	if loaded.DefaultHarness != "opencode" {
 		t.Errorf("DefaultHarness: got %q, want %q", loaded.DefaultHarness, "opencode")
 	}
-	if loaded.LaunchMode != workspace.LaunchSession {
-		t.Errorf("LaunchMode: got %q, want %q", loaded.LaunchMode, workspace.LaunchSession)
+	if loaded.LaunchMode != settings.LaunchSession {
+		t.Errorf("LaunchMode: got %q, want %q", loaded.LaunchMode, settings.LaunchSession)
 	}
 	for i, r := range loaded.Repos {
 		if r.Missing {
@@ -229,7 +231,7 @@ func TestAddRepo_AppendsAndDedups(t *testing.T) {
 		t.Fatalf("mkdir repo: %v", err)
 	}
 
-	added, err := workspace.AddRepo(repo)
+	added, err := settings.AddRepo(repo)
 	if err != nil {
 		t.Fatalf("AddRepo: %v", err)
 	}
@@ -238,7 +240,7 @@ func TestAddRepo_AppendsAndDedups(t *testing.T) {
 	}
 
 	// Second add of the same path is a no-op duplicate.
-	added, err = workspace.AddRepo(repo)
+	added, err = settings.AddRepo(repo)
 	if err != nil {
 		t.Fatalf("AddRepo (dup): %v", err)
 	}
@@ -246,7 +248,7 @@ func TestAddRepo_AppendsAndDedups(t *testing.T) {
 		t.Fatalf("AddRepo: expected added=false on duplicate")
 	}
 
-	loaded, err := workspace.LoadConfig()
+	loaded, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -276,14 +278,14 @@ func TestAddRepo_PreservesExisting(t *testing.T) {
 		}
 	}
 
-	if _, err := workspace.AddRepo(first); err != nil {
+	if _, err := settings.AddRepo(first); err != nil {
 		t.Fatalf("AddRepo first: %v", err)
 	}
-	if _, err := workspace.AddRepo(second); err != nil {
+	if _, err := settings.AddRepo(second); err != nil {
 		t.Fatalf("AddRepo second: %v", err)
 	}
 
-	loaded, err := workspace.LoadConfig()
+	loaded, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -305,12 +307,12 @@ func TestRemoveRepo_DropsAndReportsMissing(t *testing.T) {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", d, err)
 		}
-		if _, err := workspace.AddRepo(d); err != nil {
+		if _, err := settings.AddRepo(d); err != nil {
 			t.Fatalf("AddRepo %s: %v", d, err)
 		}
 	}
 
-	removed, err := workspace.RemoveRepo(first)
+	removed, err := settings.RemoveRepo(first)
 	if err != nil {
 		t.Fatalf("RemoveRepo: %v", err)
 	}
@@ -318,7 +320,7 @@ func TestRemoveRepo_DropsAndReportsMissing(t *testing.T) {
 		t.Fatalf("RemoveRepo: expected removed=true for tracked repo")
 	}
 
-	loaded, err := workspace.LoadConfig()
+	loaded, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -334,7 +336,7 @@ func TestRemoveRepo_DropsAndReportsMissing(t *testing.T) {
 	}
 
 	// Removing the same path again is a no-op.
-	removed, err = workspace.RemoveRepo(first)
+	removed, err = settings.RemoveRepo(first)
 	if err != nil {
 		t.Fatalf("RemoveRepo (already gone): %v", err)
 	}
@@ -348,10 +350,10 @@ func TestLoadConfigDefaultsLaunchMode(t *testing.T) {
 	withConfigEnv(t, tmp)
 
 	// No launchMode key on disk → empty (caller treats as window).
-	if err := workspace.SaveConfig(workspace.Config{}); err != nil {
+	if err := settings.SaveConfig(settings.Config{}); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}
-	loaded, err := workspace.LoadConfig()
+	loaded, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -364,7 +366,7 @@ func TestLoadConfigUnknownLaunchModeFallsBackToSession(t *testing.T) {
 	tmp := t.TempDir()
 	withConfigEnv(t, tmp)
 
-	path, err := workspace.ConfigPath()
+	path, err := settings.ConfigPath()
 	if err != nil {
 		t.Fatalf("ConfigPath: %v", err)
 	}
@@ -375,12 +377,12 @@ func TestLoadConfigUnknownLaunchModeFallsBackToSession(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	loaded, err := workspace.LoadConfig()
+	loaded, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if loaded.LaunchMode != workspace.LaunchSession {
-		t.Errorf("LaunchMode: got %q, want %q (fallback)", loaded.LaunchMode, workspace.LaunchSession)
+	if loaded.LaunchMode != settings.LaunchSession {
+		t.Errorf("LaunchMode: got %q, want %q (fallback)", loaded.LaunchMode, settings.LaunchSession)
 	}
 }
 
@@ -389,10 +391,10 @@ func TestForceDeleteEnabledDefaultsToTrueWhenUnset(t *testing.T) {
 	withConfigEnv(t, tmp)
 
 	// No forceDeleteWorktree key on disk → force is the default (enabled).
-	if err := workspace.SaveConfig(workspace.Config{}); err != nil {
+	if err := settings.SaveConfig(settings.Config{}); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}
-	loaded, err := workspace.LoadConfig()
+	loaded, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -409,10 +411,10 @@ func TestForceDeleteEnabledRespectsExplicitFalse(t *testing.T) {
 	withConfigEnv(t, tmp)
 
 	disabled := false
-	if err := workspace.SaveConfig(workspace.Config{ForceDeleteWorktree: &disabled}); err != nil {
+	if err := settings.SaveConfig(settings.Config{ForceDeleteWorktree: &disabled}); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}
-	loaded, err := workspace.LoadConfig()
+	loaded, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -429,10 +431,10 @@ func TestForceDeleteEnabledRespectsExplicitFalse(t *testing.T) {
 func TestSetDefaultHarness_RoundTrip(t *testing.T) {
 	withConfigEnv(t, t.TempDir())
 
-	if err := workspace.SetDefaultHarness("codex"); err != nil {
+	if err := settings.SetDefaultHarness("codex"); err != nil {
 		t.Fatalf("SetDefaultHarness: %v", err)
 	}
-	cfg, err := workspace.LoadConfig()
+	cfg, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -440,12 +442,226 @@ func TestSetDefaultHarness_RoundTrip(t *testing.T) {
 		t.Errorf("DefaultHarness = %q, want codex", cfg.DefaultHarness)
 	}
 
-	if err := workspace.SetDefaultHarness(""); err != nil {
+	if err := settings.SetDefaultHarness(""); err != nil {
 		t.Fatalf("SetDefaultHarness clear: %v", err)
 	}
-	cfg, _ = workspace.LoadConfig()
+	cfg, _ = settings.LoadConfig()
 	if cfg.DefaultHarness != "" {
 		t.Errorf("DefaultHarness = %q, want empty after clear", cfg.DefaultHarness)
+	}
+}
+
+// TestResolveWorkspaceRoot_DefaultsUnderXDGDataHome verifies that an empty
+// WorkspaceRoot resolves to the canonical form of
+// $XDG_DATA_HOME/cogitator/workspaces — the default branch must canonicalize
+// exactly like the configured branch, since consumers (settings.PathUnderRoot)
+// compare it against paths that are themselves already canonical.
+func TestResolveWorkspaceRoot_DefaultsUnderXDGDataHome(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+
+	got, err := settings.ResolveWorkspaceRoot(settings.Config{})
+	if err != nil {
+		t.Fatalf("ResolveWorkspaceRoot: %v", err)
+	}
+	want, err := pathnorm.Canonical(filepath.Join(dataHome, "cogitator", "workspaces"))
+	if err != nil {
+		t.Fatalf("pathnorm.Canonical: %v", err)
+	}
+	if got != want {
+		t.Errorf("ResolveWorkspaceRoot default: got %q, want %q", got, want)
+	}
+	if !filepath.IsAbs(got) {
+		t.Errorf("ResolveWorkspaceRoot default: expected absolute path, got %q", got)
+	}
+}
+
+// TestResolveWorkspaceRoot_XDGFallback verifies that when $XDG_DATA_HOME is
+// unset, the default falls back to the canonical form of
+// ~/.local/share/cogitator/workspaces.
+func TestResolveWorkspaceRoot_XDGFallback(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	got, err := settings.ResolveWorkspaceRoot(settings.Config{})
+	if err != nil {
+		t.Fatalf("ResolveWorkspaceRoot: %v", err)
+	}
+	want, err := pathnorm.Canonical(filepath.Join(home, ".local", "share", "cogitator", "workspaces"))
+	if err != nil {
+		t.Fatalf("pathnorm.Canonical: %v", err)
+	}
+	if got != want {
+		t.Errorf("ResolveWorkspaceRoot fallback: got %q, want %q", got, want)
+	}
+}
+
+// TestResolveWorkspaceRoot_DefaultIsStableAndDoesNotCreateDirectory verifies
+// that resolving the default root twice yields a byte-identical, absolute
+// path, and that ResolveWorkspaceRoot never creates the (not yet existing)
+// workspace directory as a side effect of canonicalizing it.
+func TestResolveWorkspaceRoot_DefaultIsStableAndDoesNotCreateDirectory(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+
+	first, err := settings.ResolveWorkspaceRoot(settings.Config{})
+	if err != nil {
+		t.Fatalf("ResolveWorkspaceRoot (first): %v", err)
+	}
+	second, err := settings.ResolveWorkspaceRoot(settings.Config{})
+	if err != nil {
+		t.Fatalf("ResolveWorkspaceRoot (second): %v", err)
+	}
+	if first != second {
+		t.Errorf("ResolveWorkspaceRoot must be stable across calls: %q != %q", first, second)
+	}
+	if !filepath.IsAbs(first) {
+		t.Errorf("ResolveWorkspaceRoot default: expected absolute path, got %q", first)
+	}
+
+	rawDefault := filepath.Join(dataHome, "cogitator", "workspaces")
+	if _, statErr := os.Stat(rawDefault); statErr == nil {
+		t.Errorf("ResolveWorkspaceRoot must not create the default workspace directory, but %q exists", rawDefault)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("stat %q: %v", rawDefault, statErr)
+	}
+}
+
+// TestResolveWorkspaceRoot_DefaultRootExcludesMemberWorktreeViaPathUnderRoot
+// pins the modal-facing property the review flagged: a candidate repo path
+// discovered under the resolved DEFAULT root (which settings.DiscoverRepos
+// would return in canonical form) must be recognized as under that root by
+// settings.PathUnderRoot. Before the fix, ResolveWorkspaceRoot's default
+// branch returned an uncanonical path, so on a root whose ancestry contains a
+// symlink (e.g. macOS's /var -> /private/var) PathUnderRoot's prefix test
+// failed and the candidate leaked through as an attachable repo in the
+// repo-membership modal.
+func TestResolveWorkspaceRoot_DefaultRootExcludesMemberWorktreeViaPathUnderRoot(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+
+	rawDefault := filepath.Join(dataHome, "cogitator", "workspaces")
+	canonicalDefault, err := pathnorm.Canonical(rawDefault)
+	if err != nil {
+		t.Fatalf("pathnorm.Canonical(rawDefault): %v", err)
+	}
+	if rawDefault == canonicalDefault {
+		t.Fatalf("test setup invariant violated: raw default %q and its canonical form are identical (no symlink in t.TempDir()'s ancestry) — this test would be a no-op on this platform", rawDefault)
+	}
+
+	resolvedRoot, err := settings.ResolveWorkspaceRoot(settings.Config{})
+	if err != nil {
+		t.Fatalf("ResolveWorkspaceRoot: %v", err)
+	}
+
+	// A member repo's own worktree, discovered under the raw (uncanonical)
+	// join and then canonicalized — mirroring settings.DiscoverRepos, which
+	// canonicalizes every path it returns.
+	memberWorktree := filepath.Join(rawDefault, "payments", "feature-x", "app")
+	if err := os.MkdirAll(memberWorktree, 0o755); err != nil {
+		t.Fatalf("mkdir memberWorktree: %v", err)
+	}
+	candidate, err := pathnorm.Canonical(memberWorktree)
+	if err != nil {
+		t.Fatalf("pathnorm.Canonical(memberWorktree): %v", err)
+	}
+
+	if !settings.PathUnderRoot(resolvedRoot, candidate) {
+		t.Errorf("PathUnderRoot(%q, %q) = false, want true: a member worktree under the default root must be excluded", resolvedRoot, candidate)
+	}
+}
+
+// TestResolveWorkspaceRoot_ExpandsTilde verifies that a "~/..." WorkspaceRoot
+// resolves to an absolute, canonical path under the user's home directory.
+func TestResolveWorkspaceRoot_ExpandsTilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	got, err := settings.ResolveWorkspaceRoot(settings.Config{WorkspaceRoot: "~/ws"})
+	if err != nil {
+		t.Fatalf("ResolveWorkspaceRoot: %v", err)
+	}
+	want, err := pathnorm.Canonical(filepath.Join(home, "ws"))
+	if err != nil {
+		t.Fatalf("pathnorm.Canonical: %v", err)
+	}
+	if got != want {
+		t.Errorf("ResolveWorkspaceRoot tilde: got %q, want %q", got, want)
+	}
+	if !filepath.IsAbs(got) {
+		t.Errorf("ResolveWorkspaceRoot tilde: expected absolute path, got %q", got)
+	}
+}
+
+// TestResolveWorkspaceRoot_RejectsPathInsideGitWorkTree verifies that a
+// WorkspaceRoot resolving inside an existing git working tree is rejected
+// with an error naming the repository it would nest inside.
+func TestResolveWorkspaceRoot_RejectsPathInsideGitWorkTree(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	nested := filepath.Join(repo, "ws")
+
+	_, err := settings.ResolveWorkspaceRoot(settings.Config{WorkspaceRoot: nested})
+	if err == nil {
+		t.Fatal("ResolveWorkspaceRoot: expected error for path inside a git working tree")
+	}
+	canonicalRepo, canonErr := pathnorm.Canonical(repo)
+	if canonErr != nil {
+		t.Fatalf("pathnorm.Canonical(repo): %v", canonErr)
+	}
+	if !strings.Contains(err.Error(), canonicalRepo) {
+		t.Errorf("error %q does not name the offending repo %q", err.Error(), canonicalRepo)
+	}
+}
+
+// TestResolveWorkspaceRoot_RejectsGitWorkTreeItself verifies that setting
+// WorkspaceRoot to a git working tree's own root (not just a subdirectory) is
+// rejected too.
+func TestResolveWorkspaceRoot_RejectsGitWorkTreeItself(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+
+	if _, err := settings.ResolveWorkspaceRoot(settings.Config{WorkspaceRoot: repo}); err == nil {
+		t.Fatal("ResolveWorkspaceRoot: expected error when workspaceRoot is a repo root")
+	}
+}
+
+// TestSaveConfig_WorkspaceRootRoundTripsAndOmitsWhenEmpty verifies that
+// WorkspaceRoot survives a save/load round trip and is omitted from the JSON
+// on disk when empty.
+func TestSaveConfig_WorkspaceRootRoundTripsAndOmitsWhenEmpty(t *testing.T) {
+	tmp := t.TempDir()
+	withConfigEnv(t, tmp)
+
+	if err := settings.SaveConfig(settings.Config{WorkspaceRoot: "/custom/ws"}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	loaded, err := settings.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if loaded.WorkspaceRoot != "/custom/ws" {
+		t.Errorf("WorkspaceRoot round trip: got %q, want %q", loaded.WorkspaceRoot, "/custom/ws")
+	}
+
+	if err := settings.SaveConfig(settings.Config{}); err != nil {
+		t.Fatalf("SaveConfig empty: %v", err)
+	}
+	path, err := settings.ConfigPath()
+	if err != nil {
+		t.Fatalf("ConfigPath: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if strings.Contains(string(data), "workspaceRoot") {
+		t.Errorf("expected workspaceRoot omitted from JSON when empty, got: %s", data)
 	}
 }
 
@@ -454,17 +670,17 @@ func TestSetDefaultHarness_RoundTrip(t *testing.T) {
 func TestSetLaunchMode_PreservesOtherFields(t *testing.T) {
 	withConfigEnv(t, t.TempDir())
 
-	if err := workspace.SetDefaultHarness("opencode"); err != nil {
+	if err := settings.SetDefaultHarness("opencode"); err != nil {
 		t.Fatalf("seed harness: %v", err)
 	}
-	if err := workspace.SetLaunchMode(workspace.LaunchWindow); err != nil {
+	if err := settings.SetLaunchMode(settings.LaunchWindow); err != nil {
 		t.Fatalf("SetLaunchMode: %v", err)
 	}
-	cfg, err := workspace.LoadConfig()
+	cfg, err := settings.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.LaunchMode != workspace.LaunchWindow {
+	if cfg.LaunchMode != settings.LaunchWindow {
 		t.Errorf("LaunchMode = %q, want window", cfg.LaunchMode)
 	}
 	if cfg.DefaultHarness != "opencode" {

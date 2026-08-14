@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"context"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -16,8 +15,9 @@ import (
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/git"
 	"github.com/guilhermehto/cogitator/internal/harness"
+	"github.com/guilhermehto/cogitator/internal/pathnorm"
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/taskwarrior"
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
@@ -25,11 +25,36 @@ import (
 type snapshotMsg state.Snapshot
 
 // workspaceRowsMsg is returned by buildWorkspaceRowsCmd when the background
-// workspace-row build completes. It carries the merged row list and the
-// resolved tmux launch mode so the Update handler can apply them atomically.
+// workspace-row build completes. It carries the merged row list, the
+// resolved tmux launch mode, and the resolved workspace root so the Update
+// handler can apply them atomically.
 type workspaceRowsMsg struct {
-	rows       []workspace.Row
+	rows       []settings.Row
 	launchMode tmuxctl.LaunchMode
+	// root is the resolved workspace root (settings.ResolveWorkspaceRoot),
+	// carried alongside rows/launchMode because buildWorkspaceRows resolves it
+	// even on its zero-repos early return — the exact case where View's
+	// fallback branch needs it to exclude workspace-owned sessions.
+	root string
+}
+
+// viewMode selects which top-level view occupies the full pane: Sessions
+// (worktrees merged across configured repos) or Workspaces (multi-repo
+// bundles and their sessions). Iota order is load-bearing: the zero value
+// maps to viewSessions, keeping existing model{} literals in tests valid
+// without explicit initialisation — the same convention promptMode documents
+// below.
+type viewMode int
+
+const (
+	viewSessions viewMode = iota
+	viewWorkspaces
+)
+
+// wsStatusMsg carries the result of loadWorkspaceStatusCmd: the workspace set
+// merged with live/roster status, ready for the Workspaces view to render.
+type wsStatusMsg struct {
+	statuses []workspace.WorkspaceStatus
 }
 
 // tickMsg is sent by tickCmd on each relative-time refresh interval.
@@ -51,26 +76,14 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-// focusArea tracks which pane currently holds keyboard focus.
-// Iota order is load-bearing: zero value maps to focusSessions, keeping
-// existing model{} literals in tests valid without explicit initialisation.
-type focusArea int
-
-const (
-	focusSessions focusArea = iota
-	focusTasks
-)
-
-// promptMode tracks whether the task input bar is active and in which mode.
-// Iota order is load-bearing: zero value maps to promptIdle, keeping
-// existing model{} literals in tests valid without explicit initialisation.
+// promptMode tracks whether the sessions-pane input bar is active and in
+// which mode. Iota order is load-bearing: zero value maps to promptIdle,
+// keeping existing model{} literals in tests valid without explicit
+// initialisation.
 type promptMode int
 
 const (
 	promptIdle promptMode = iota
-	promptAdd
-	promptEdit
-	promptConfirmDelete
 	// promptNewWorktree is active while the user types a branch name for 'n'.
 	// On enter, the branch name is passed to git.AddWorktree + harness launch.
 	// On esc, the prompt is cancelled without creating anything.
@@ -122,6 +135,63 @@ const (
 	// immediately. Placed last so existing model{} literals keep their iota
 	// values.
 	promptSettings
+	// promptNewWorkspace is active while the user types a name for 'N' (new,
+	// empty workspace) from the Workspaces view. On enter, the name is
+	// dispatched to createWorkspaceCmd; on esc, cancelled without creating
+	// anything. Placed last so existing model{} literals keep their iota
+	// values.
+	promptNewWorkspace
+	// promptNewWorkspaceSession is active while the user types a session name
+	// for 'n' (new session) from the Workspaces view, for the workspace under
+	// the cursor (captured in wsCreateTarget). On enter, a valid name advances
+	// to promptChooseHarness (shared with the Sessions pane's 'n'/'F' flow;
+	// wsCreateTarget non-empty is what tells that shared handler to dispatch
+	// assembleWorkspaceSessionCmd instead of newWorktreeCmd); an invalid or
+	// duplicate name is refused with wsHint and the prompt stays open. Placed
+	// last so existing model{} literals keep their iota values.
+	promptNewWorkspaceSession
+	// promptConfirmDeleteWsSession is the FIRST of two confirmations for
+	// deleting a single workspace session ('D' with the cursor on a session
+	// row in the Workspaces view). Mirrors promptConfirmDeleteWorktree's
+	// y/any-key gate, but the bundle being deleted has one member repo per
+	// SessionMember rather than one branch, so the confirm renders one
+	// merge-status line per member (wsDeleteMembers) instead of a single
+	// branch/merge-status pair. Placed last so existing model{} literals keep
+	// their iota values.
+	promptConfirmDeleteWsSession
+	// promptConfirmDeleteWsSession2 is the SECOND confirmation for a single
+	// workspace session. Default is cancel: only an explicit 'y' proceeds;
+	// every other key (including esc/enter) aborts, mirroring
+	// promptConfirmDeleteWorktree2's last-gate contract.
+	promptConfirmDeleteWsSession2
+	// promptConfirmDeleteWorkspace is the FIRST of two confirmations for
+	// deleting an entire workspace ('D' with the cursor on a workspace's
+	// header or empty-sessions hint row). Every session in the workspace is
+	// listed (via wsDeleteMembers, spanning all of them) and torn down the
+	// same way a single session is; the workspace itself is removed from the
+	// store only once every session has succeeded.
+	promptConfirmDeleteWorkspace
+	// promptConfirmDeleteWorkspace2 is the SECOND confirmation for a whole
+	// workspace. Default is cancel; only 'y' proceeds.
+	promptConfirmDeleteWorkspace2
+	// promptWorkspaceModal is active while the repo-membership modal ('e' in
+	// the Workspaces view) is open. It scans $HOME for git repositories, like
+	// promptAddRepo, but combines the discovered non-member candidates with
+	// the workspace's current members into one fuzzy-filterable list: enter
+	// on a candidate attaches it, enter on a member detaches it; esc cancels
+	// with no change. Placed last so existing model{} literals keep their
+	// iota values.
+	promptWorkspaceModal
+	// promptWorkspaceBackfill is active while the membership-backfill
+	// multi-select (workspace_backfill.go) is open: it follows a committed
+	// attach/detach (membershipChangedMsg) for a workspace that has one or
+	// more existing sessions, and lets the user choose which of them receive
+	// the change — never touching a live agent's directory without that
+	// choice. Up/down moves the cursor, space toggles the highlighted
+	// session, enter applies the choice (zero chosen is a valid no-op), esc
+	// skips entirely. Placed last so existing model{} literals keep their
+	// iota values.
+	promptWorkspaceBackfill
 )
 
 // launchResultMsg is returned by launchCmd / resumeCmd after the tmux
@@ -250,8 +320,8 @@ type viewMarker interface {
 // launchModeFor maps the workspace config's LaunchMode to the tmuxctl mode used
 // by the action Cmds. LaunchWindow maps to ModeWindow; everything else
 // (including the empty default) maps to ModeSession.
-func launchModeFor(m workspace.LaunchMode) tmuxctl.LaunchMode {
-	if m == workspace.LaunchWindow {
+func launchModeFor(m settings.LaunchMode) tmuxctl.LaunchMode {
+	if m == settings.LaunchWindow {
 		return tmuxctl.ModeWindow
 	}
 	return tmuxctl.ModeSession
@@ -308,6 +378,57 @@ func (realHarnessOps) Kinds() []harness.Kind {
 	return harness.DefaultRegistry.Kinds()
 }
 
+// storeOps is the injectable seam for workspace persistence, mirroring
+// tmuxOps/gitOps/harnessOps over their real implementations. *workspace.Store
+// satisfies it via realStoreOps. Kept narrow (mirrors the Store's own public
+// surface) so tests can inject a fake instead of driving real XDG paths in a
+// temp directory.
+type storeOps interface {
+	LoadWorkspaces() ([]workspace.Workspace, error)
+	SaveWorkspaces(workspaces []workspace.Workspace) error
+	AddWorkspace(name string) (workspace.Workspace, error)
+	RemoveWorkspace(name string) error
+	AddSession(workspaceName string, session workspace.Session) error
+	RemoveSession(workspaceName, sessionName string) error
+	AttachRepo(workspaceName, repoPath string) error
+	DetachRepo(workspaceName, repoPath string) error
+}
+
+// realStoreOps delegates to a concrete *workspace.Store.
+type realStoreOps struct{ store *workspace.Store }
+
+func (r realStoreOps) LoadWorkspaces() ([]workspace.Workspace, error) {
+	return r.store.LoadWorkspaces()
+}
+
+func (r realStoreOps) SaveWorkspaces(workspaces []workspace.Workspace) error {
+	return r.store.SaveWorkspaces(workspaces)
+}
+
+func (r realStoreOps) AddWorkspace(name string) (workspace.Workspace, error) {
+	return r.store.AddWorkspace(name)
+}
+
+func (r realStoreOps) RemoveWorkspace(name string) error {
+	return r.store.RemoveWorkspace(name)
+}
+
+func (r realStoreOps) AddSession(workspaceName string, session workspace.Session) error {
+	return r.store.AddSession(workspaceName, session)
+}
+
+func (r realStoreOps) RemoveSession(workspaceName, sessionName string) error {
+	return r.store.RemoveSession(workspaceName, sessionName)
+}
+
+func (r realStoreOps) AttachRepo(workspaceName, repoPath string) error {
+	return r.store.AttachRepo(workspaceName, repoPath)
+}
+
+func (r realStoreOps) DetachRepo(workspaceName, repoPath string) error {
+	return r.store.DetachRepo(workspaceName, repoPath)
+}
+
 type model struct {
 	snap            state.Snapshot
 	width           int
@@ -320,10 +441,18 @@ type model struct {
 	cfg             *config.Config
 
 	// Workspace / worktree fields.
-	// workspaceRows is the merged list of worktree rows built by workspace.Merge
+	// workspaceRows is the merged list of worktree rows built by settings.Merge
 	// on each snapshot and on each tickMsg. It is nil when no repos are
 	// configured (zero value is safe — View() guards on len > 0).
-	workspaceRows []workspace.Row
+	workspaceRows []settings.Row
+	// workspaceRoot is the resolved workspace root (settings.ResolveWorkspaceRoot),
+	// refreshed alongside workspaceRows. View uses it to exclude
+	// workspace-owned session directories from the live-only fallback path
+	// and from the header's live/recent counts, so a workspace session's
+	// per-repo checkouts are never double-counted alongside their own
+	// workspaceRows entry. Empty disables the exclusion (matches
+	// pre-workspace behaviour) until the first successful resolve.
+	workspaceRoot string
 	// sessionCursor is the index into the visible worktree rows list that
 	// currently holds keyboard focus. Zero value (0) is safe.
 	sessionCursor int
@@ -368,14 +497,14 @@ type model struct {
 	// working copy of the persisted config, snapshotted on open and written
 	// back on each change. An empty settingsDefaultHarness means "always ask".
 	settingsDefaultHarness string
-	settingsLaunchMode     workspace.LaunchMode
+	settingsLaunchMode     settings.LaunchMode
 	// settingsErr holds the last config-save error shown in the settings modal
 	// (empty when the last write succeeded).
 	settingsErr string
 	// rosterUpserts is the channel used to inject create-time roster entries
-	// into the recorder without calling workspace.Save directly. Nil when the
+	// into the recorder without calling settings.Save directly. Nil when the
 	// recorder is not wired (e.g. in tests that don't need roster writes).
-	rosterUpserts chan<- workspace.RosterEntry
+	rosterUpserts chan<- settings.RosterEntry
 	// viewMarker reports a session as viewed by the user (jump/resume) so the
 	// store can clear its AttnFinished badge. nil in tests that don't exercise
 	// the launch path; the handler guards on nil.
@@ -383,7 +512,7 @@ type model struct {
 	// deleteTarget is the worktree row captured when the user presses 'D' to
 	// begin the two-step delete confirmation. Zero value when no delete is in
 	// progress. Cleared on cancel and on dispatch of the delete Cmd.
-	deleteTarget workspace.Row
+	deleteTarget settings.Row
 	// deleteMergeInfo is the human-readable branch merge status shown in the
 	// delete confirmation prompts (e.g. "merged into main"). Empty until the
 	// async probe (mergeStatusCmd) returns; rendered as "checking…" meanwhile.
@@ -420,7 +549,7 @@ type model struct {
 	// While a path is pending, workspaceRowsMsg filters it out so an in-flight
 	// snapshot rebuild (the worktree still exists on disk until git finishes)
 	// cannot resurrect the row. Entries clear on deletion success or failure.
-	pendingDeletes map[string]workspace.Row
+	pendingDeletes map[string]settings.Row
 	// pendingCreates tracks worktrees being created ('n') or fetched ('F') that
 	// do not exist on disk yet, keyed by createKey(repo, branch). Each is shown
 	// as an optimistic spinner row injected into the table until newWorktreeCmd
@@ -454,50 +583,227 @@ type model struct {
 
 	// Session switcher (ctrl+P) state, meaningful only while
 	// prompt == promptSwitchSession. sessionPaletteRows is a snapshot of the
-	// candidate worktree rows captured when the palette opens; sessionPaletteLabels
-	// is the parallel "repo branch" match text for each row; sessionPaletteMatches
+	// candidate rows (worktree rows and workspace sessions alike, via
+	// sessionCandidate) captured when the palette opens, used only for
+	// rendering (renderPaletteRow, render.go); sessionPaletteTargets is the
+	// parallel launch identity dispatched on enter; sessionPaletteLabels is
+	// the parallel match text ("repo branch" for a worktree row,
+	// "<workspace>/<session>" for a workspace session); sessionPaletteMatches
 	// indexes those slices, holding the current fuzzy-filtered view ordered
-	// best-first; sessionPaletteCursor indexes sessionPaletteMatches. Zero values
-	// are safe (palette closed).
-	sessionPaletteRows    []workspace.Row
+	// best-first; sessionPaletteCursor indexes sessionPaletteMatches. Zero
+	// values are safe (palette closed).
+	sessionPaletteRows    []settings.Row
+	sessionPaletteTargets []launchTarget
 	sessionPaletteLabels  []string
 	sessionPaletteMatches []int
 	sessionPaletteCursor  int
 
 	// switchOrder records the monotonically increasing sequence in which
-	// worktrees were last jumped to or resumed, keyed by worktree path; switchSeq
-	// is the next sequence to hand out. It seeds the ctrl+P palette's
-	// most-recently-used ordering so pressing ctrl+P then enter returns to the
-	// previous session. In-memory only — it resets on restart, falling back to
-	// the alphabetical row order.
+	// targets (worktrees or workspace sessions) were last jumped to or
+	// resumed, keyed by the target's launch directory (launchTarget.dir);
+	// switchSeq is the next sequence to hand out. It seeds the ctrl+P
+	// palette's most-recently-used ordering so pressing ctrl+P then enter
+	// returns to the previous session. In-memory only — it resets on restart,
+	// falling back to the alphabetical row order.
 	switchOrder map[string]int
 	switchSeq   int
 
-	// Injectable seams for tmux, git, and harness operations. Nil values are
-	// replaced with the real implementations in newModel. Tests inject fakes.
-	// Zero-value model{} literals in tests are safe: action Cmds guard on nil
-	// and return an error result rather than panicking.
+	// Workspaces view (Tab) state. view selects which top-level view occupies
+	// the pane; wsStatuses is the merged workspace/session list built by
+	// loadWorkspaceStatusCmd on Init and refreshed on each snapshot.
+	// wsCursor/wsScroll are this view's own cursor and scroll position, kept
+	// separate from sessionCursor/sessionScroll so Tab never disturbs the
+	// other view's position. wsPendingG mirrors pendingG for this view's own
+	// `gg` jump-to-top, kept separate so a `g` pressed in one view can never
+	// arm the other's.
+	view       viewMode
+	wsStatuses []workspace.WorkspaceStatus
+	wsCursor   int
+	wsScroll   int
+	wsPendingG bool
+	// wsBuilding/wsDirty coalesce loadWorkspaceStatusCmd exactly as
+	// rowsBuilding/rowsDirty do for buildWorkspaceRowsCmd: only one load runs
+	// at a time, and a burst of snapshots arriving while one is in flight
+	// collapses into a single follow-up load using the latest snapshot.
+	wsBuilding bool
+	wsDirty    bool
+	// wsHint is a transient one-line message shown in the Workspaces view
+	// (e.g. "add a repo first", a failed create's error), mirroring tmuxHint's
+	// role for the Sessions pane. Kept separate from tmuxHint so a message
+	// raised in one view can never bleed into the other's rendering after Tab.
+	wsHint string
+	// wsCreateTarget is the workspace name captured when 'n' opens
+	// promptNewWorkspaceSession, carried forward through promptChooseHarness
+	// (shared with the Sessions pane's 'n'/'F' flow) so its enter-handler
+	// knows to dispatch assembleWorkspaceSessionCmd rather than
+	// newWorktreeCmd. Empty whenever no workspace-session create is in
+	// progress.
+	wsCreateTarget string
+	// wsCreateSessionName is the session name typed in promptNewWorkspaceSession,
+	// carried forward to promptChooseHarness exactly as newWorktreeBranch carries
+	// the Sessions pane's branch name.
+	wsCreateSessionName string
+	// wsPendingSessions tracks workspace sessions being assembled ('n' in the
+	// Workspaces view), keyed by wsSessionKey(workspace, session). Each is
+	// rendered as an optimistic, animated placeholder row (injectPendingWsSessions)
+	// until assembleWorkspaceSessionCmd reports completion, mirroring
+	// pendingCreates for the Sessions pane.
+	wsPendingSessions map[string]pendingWsSession
+
+	// Workspace/session delete confirmation ('D' in the Workspaces view)
+	// state, meaningful only while prompt is one of the four
+	// promptConfirmDelete{WsSession,Workspace}[2] modes. wsDeleteWorkspace is
+	// the target workspace's name; wsDeleteSession is the target session's
+	// name for a single-session delete, empty when the whole workspace (every
+	// session) is the target. wsDeleteMembers is the flat, session-tagged list
+	// of member rows the confirm renders and probes — captured once when 'D'
+	// opens the flow so the confirm dialog and the eventual teardown act on
+	// the same snapshot regardless of store changes in between.
+	// wsDeleteMergeInfo holds each member's human-readable merge status,
+	// keyed by its worktree path, filled in as the concurrent per-member
+	// probes (wsMergeStatusCmd) return; a member with no entry yet renders as
+	// "checking…", mirroring deleteMergeInfo's role for the single-worktree
+	// flow. Zero values are safe (no delete in progress).
+	wsDeleteWorkspace string
+	wsDeleteSession   string
+	wsDeleteMembers   []wsDeleteMember
+	wsDeleteMergeInfo map[string]string
+
+	// Repo-membership modal ('e' in the Workspaces view) state, meaningful
+	// only while prompt == promptWorkspaceModal. wsModalWorkspace is the
+	// target workspace's name, captured when the modal opens.
+	// wsModalScanning is true between opening and the scan result arriving.
+	// wsModalEntries is the combined, alphabetically sorted set of the
+	// workspace's current members (offered for removal) and freshly
+	// discovered non-member candidates (offered for addition) — see
+	// wsModalEntry (workspace_modal.go). wsModalMatches is its current
+	// fuzzy-filtered view (what is rendered), indices into wsModalEntries;
+	// wsModalCursor indexes wsModalMatches. wsModalErr holds a scan error to
+	// surface in the modal body (a failed commit is reported via wsHint
+	// instead, since the modal has already closed by then). Zero values are
+	// safe (modal closed).
+	wsModalWorkspace string
+	wsModalScanning  bool
+	wsModalEntries   []wsModalEntry
+	wsModalMatches   []int
+	wsModalCursor    int
+	wsModalErr       string
+
+	// Membership-backfill prompt ('promptWorkspaceBackfill') state, opened
+	// when a membershipChangedMsg lands for a workspace that has at least one
+	// existing session (workspace_backfill.go). wsBackfillWorkspace/
+	// wsBackfillRepo/wsBackfillAttached capture what changed and are
+	// stamped on the eventual backfillMembershipCmd dispatch.
+	// wsBackfillSessions is the session-name list offered, captured once when
+	// the prompt opens so the choice acts on the same snapshot regardless of
+	// store changes in between, mirroring wsDeleteMembers.
+	// wsBackfillSelected tracks which are currently checked, keyed by session
+	// name; wsBackfillCursor indexes wsBackfillSessions. Zero values are safe
+	// (no backfill prompt in progress).
+	wsBackfillWorkspace string
+	wsBackfillRepo      string
+	wsBackfillAttached  bool
+	wsBackfillSessions  []string
+	wsBackfillSelected  map[string]bool
+	wsBackfillCursor    int
+
+	// Injectable seams for tmux, git, harness, and workspace-store operations.
+	// Nil values are replaced with the real implementations in newModel (store
+	// is wired separately by RunTUI after newModel returns, like viewMarker
+	// and rosterUpserts). Tests inject fakes. Zero-value model{} literals in
+	// tests are safe: action Cmds guard on nil and return an error result
+	// rather than panicking.
 	tmux   tmuxOps
 	gitOp  gitOps
 	harnOp harnessOps
+	store  storeOps
 
-	// Taskwarrior fields
-	tw               ClientAPI
-	twAvail          bool
-	tasksActive      bool
-	tasks            []taskwarrior.TaskView
-	tasksErr         error // last error from Export; nil on success
-	tasksLoaded      bool
-	taskCursor       int
-	focus            focusArea
-	prompt           promptMode
-	input            textinput.Model
-	lastMutationErr  error
-	lastMutationOp   string
-	mutationInFlight bool
+	// prompt/input drive the sessions-pane input bar shared by every prompt
+	// mode (new worktree, fetch branch, repo finder, session switcher, ...).
+	prompt promptMode
+	input  textinput.Model
 }
 
-// launchCmd performs the jump/resume tmux operations for the given row and
+// launchTarget is the neutral tmux-launch identity consumed by launchCmd,
+// launchArgv, and launchInner. It is the seam that lets both the Sessions
+// pane (rowLaunchTarget, from a settings.Row) and the Workspaces view
+// (wsSessionLaunchTarget, from a workspace session) share one launch path
+// without either function being keyed on settings.Row.
+type launchTarget struct {
+	// dir is the canonical directory tmux selects/creates a window or session
+	// for, and the harness's working directory. For a workspace session this
+	// is the session directory, not any single member repo's worktree — the
+	// harness launched there can read every member through its subdirectories.
+	dir string
+	// name is the tmux window/session name used only when EnsureWindowMode
+	// must create a brand-new target (no existing window is found for dir).
+	name string
+	// harness is the recorded harness kind ("" falls back to opencode).
+	harness string
+	// harnessAuthoritative is true when harness must NOT be overridden by a
+	// configured default harness. Set for workspace sessions, whose harness
+	// was chosen explicitly at create time and recorded on the Session;
+	// false for Sessions-pane rows, which keep the pre-existing
+	// default-overrides-row behaviour.
+	harnessAuthoritative bool
+	// resumeToken is passed to the harness's LaunchArgv to resume a specific
+	// session; empty lets the harness resume its own most-recent session for
+	// dir (or launch fresh).
+	resumeToken string
+	// provider and sessionID identify the session that was selected so the
+	// Update handler can mark it viewed (clearing any AttnFinished badge).
+	// Empty when the target has no associated session.
+	provider  string
+	sessionID string
+}
+
+// fallbackProvider returns provider unless it is empty, in which case it
+// falls back to harnessKind — the same "stale roster metadata" tolerance
+// settings.Row.Provider documents, reused here so workspace sessions get the
+// identical fallback for the live-store attention clear.
+func fallbackProvider(provider, harnessKind string) string {
+	if provider == "" {
+		return harnessKind
+	}
+	return provider
+}
+
+// rowLaunchTarget builds the launchTarget for a Sessions-pane worktree row,
+// preserving the window-naming and provider-fallback behaviour launchCmd and
+// launchInner had inline before the seam was extracted.
+func rowLaunchTarget(row settings.Row) launchTarget {
+	name := filepath.Base(row.Worktree)
+	if row.Branch != "" {
+		name = filepath.Base(row.Repo) + "/" + row.Branch
+	}
+	return launchTarget{
+		dir:         row.Worktree,
+		name:        name,
+		harness:     row.Harness,
+		resumeToken: row.SessionID,
+		provider:    fallbackProvider(row.Provider, row.Harness),
+		sessionID:   row.SessionID,
+	}
+}
+
+// wsSessionLaunchTarget builds the launchTarget for a workspace session:
+// name identifies both the workspace and the session so the tmux
+// window/session title distinguishes it from every other target, and
+// harnessAuthoritative is set so the session's own recorded harness is never
+// second-guessed by a configured default.
+func wsSessionLaunchTarget(workspaceName string, sess workspace.SessionStatus) launchTarget {
+	return launchTarget{
+		dir:                  sess.Session.Dir,
+		name:                 workspaceName + "/" + sess.Session.Name,
+		harness:              sess.Session.Harness,
+		harnessAuthoritative: true,
+		resumeToken:          sess.SessionID,
+		provider:             fallbackProvider(sess.Provider, sess.Session.Harness),
+		sessionID:            sess.SessionID,
+	}
+}
+
+// launchCmd performs the jump/resume tmux operations for the given target and
 // returns a launchResultMsg. It selects the correct tmux action based on
 // window existence and pane liveness:
 //
@@ -506,103 +812,98 @@ type model struct {
 //   - no window: EnsureWindow → Select
 //
 // The function is a tea.Cmd (runs off the UI goroutine).
-func launchCmd(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl.LaunchMode, defaultKind string) tea.Cmd {
-	inner := launchInner(ops, row, harnOp, mode, defaultKind)
+func launchCmd(ops tmuxOps, target launchTarget, harnOp harnessOps, mode tmuxctl.LaunchMode, defaultKind string) tea.Cmd {
+	inner := launchInner(ops, target, harnOp, mode, defaultKind)
 	return func() tea.Msg {
 		res := inner()
 		// Stamp the session identity so the Update handler can mark it viewed
 		// (clearing AttnFinished) when the select succeeds.
-		res.provider = row.Provider
-		if res.provider == "" {
-			res.provider = row.Harness
-		}
-		res.sessionID = row.SessionID
+		res.provider = target.provider
+		res.sessionID = target.sessionID
 		return res
 	}
 }
 
-// launchArgv resolves the harness launch argv for row. A configured,
-// already-validated default kind overrides the row's recorded harness;
-// overrideKind is the new kind when an override happened and empty otherwise,
-// so callers upsert the roster only on a real switch. Falls back to opencode
-// when the harness cannot be resolved.
-func launchArgv(row workspace.Row, harnOp harnessOps, defaultKind string) (argv []string, overrideKind harness.Kind) {
-	kind := harness.Kind(row.Harness)
+// launchArgv resolves the harness launch argv for target. A configured,
+// already-validated default kind overrides the target's recorded harness
+// unless harnessAuthoritative is set; overrideKind is the new kind when an
+// override happened and empty otherwise, so callers upsert the roster only on
+// a real switch. Falls back to opencode when the harness cannot be resolved.
+func launchArgv(target launchTarget, harnOp harnessOps, defaultKind string) (argv []string, overrideKind harness.Kind) {
+	kind := harness.Kind(target.harness)
 	if kind == "" {
 		kind = harness.KindOpenCode
 	}
-	if defaultKind != "" && harness.Kind(defaultKind) != kind {
+	if !target.harnessAuthoritative && defaultKind != "" && harness.Kind(defaultKind) != kind {
 		kind = harness.Kind(defaultKind)
 		overrideKind = kind
 	}
 	if harnOp != nil {
 		if h, err := harnOp.Get(kind); err == nil {
-			// On an override the row's SessionID belongs to the previous
+			// On an override the target's resumeToken belongs to the previous
 			// harness and is invalid for the new one; start a fresh session.
-			token := row.SessionID
+			token := target.resumeToken
 			if overrideKind != "" {
 				token = ""
 			}
-			argv = h.LaunchArgv(row.Worktree, token)
+			argv = h.LaunchArgv(target.dir, token)
 		}
 	}
 	if len(argv) == 0 {
-		argv = []string{"opencode", "--mdns", row.Worktree}
+		argv = []string{"opencode", "--mdns", target.dir}
 	}
 	return argv, overrideKind
 }
 
-func launchInner(ops tmuxOps, row workspace.Row, harnOp harnessOps, mode tmuxctl.LaunchMode, defaultKind string) func() launchResultMsg {
+func launchInner(ops tmuxOps, target launchTarget, harnOp harnessOps, mode tmuxctl.LaunchMode, defaultKind string) func() launchResultMsg {
 	return func() launchResultMsg {
 		if ops == nil || !ops.Available() {
-			return launchResultMsg{dir: row.Worktree, err: tmuxctl.ErrNotAvailable}
+			return launchResultMsg{dir: target.dir, err: tmuxctl.ErrNotAvailable}
 		}
 
-		dir := row.Worktree
+		dir := target.dir
 
-		// Resolve the harness argv; a configured default overrides the row's
-		// recorded harness on a cold (re)launch (overrideKind set only then).
-		argv, overrideKind := launchArgv(row, harnOp, defaultKind)
+		// Resolve the harness argv; a configured default overrides the
+		// target's recorded harness on a cold (re)launch (overrideKind set
+		// only then, and never when harnessAuthoritative is set).
+		argv, overrideKind := launchArgv(target, harnOp, defaultKind)
 
-		// selectTarget moves the client to target. In session mode it switches
-		// to the session and lets tmux restore its last-active window (so you
-		// land where you left off, not always the worktree's first window).
-		// In window mode it focuses the exact tagged window.
-		selectTarget := func(target tmuxctl.Target) error {
+		// selectTarget moves the client to tmuxTarget. In session mode it
+		// switches to the session and lets tmux restore its last-active
+		// window (so you land where you left off, not always the first
+		// window). In window mode it focuses the exact tagged window.
+		selectTarget := func(tmuxTarget tmuxctl.Target) error {
 			if mode == tmuxctl.ModeSession {
-				return ops.SelectSession(target)
+				return ops.SelectSession(tmuxTarget)
 			}
-			return ops.Select(target)
+			return ops.Select(tmuxTarget)
 		}
 
-		// Check tmux directly instead of trusting the row state. A running row can
-		// be stale if the opencode process or tmux target died before the next
-		// discovery update, so use the same recovery path for all resumable rows.
-		target, findErr := ops.FindWindowByDir(dir)
+		// Check tmux directly instead of trusting the caller's cached state.
+		// A running target can be stale if its process or tmux window died
+		// before the next discovery update, so use the same recovery path for
+		// every resumable target.
+		tmuxTarget, findErr := ops.FindWindowByDir(dir)
 		if findErr == nil {
 			// Window exists — check if the process is alive.
-			alive, aliveErr := ops.WindowProcessAlive(target)
+			alive, aliveErr := ops.WindowProcessAlive(tmuxTarget)
 			if aliveErr != nil {
 				// Cannot determine liveness — try to select anyway.
-				return launchResultMsg{dir: dir, err: selectTarget(target)}
+				return launchResultMsg{dir: dir, err: selectTarget(tmuxTarget)}
 			}
 			if alive {
 				// Process is alive — just select.
-				return launchResultMsg{dir: dir, err: selectTarget(target)}
+				return launchResultMsg{dir: dir, err: selectTarget(tmuxTarget)}
 			}
 			// Process is dead — relaunch then select.
-			if err := ops.RelaunchInWindow(target, argv); err != nil {
+			if err := ops.RelaunchInWindow(tmuxTarget, argv); err != nil {
 				return launchResultMsg{dir: dir, err: err}
 			}
-			return launchResultMsg{dir: dir, launched: true, harnessKind: string(overrideKind), err: selectTarget(target)}
+			return launchResultMsg{dir: dir, launched: true, harnessKind: string(overrideKind), err: selectTarget(tmuxTarget)}
 		}
 
 		// No window exists — create one and select it.
-		windowName := filepath.Base(dir)
-		if row.Branch != "" {
-			windowName = filepath.Base(row.Repo) + "/" + row.Branch
-		}
-		newTarget, err := ops.EnsureWindowMode(dir, windowName, argv, mode)
+		newTarget, err := ops.EnsureWindowMode(dir, target.name, argv, mode)
 		if err != nil {
 			return launchResultMsg{dir: dir, err: err}
 		}
@@ -723,15 +1024,7 @@ func deleteWorktreeCmd(ops tmuxOps, gitOp gitOps, repo, path, branch string, mod
 
 		// Best-effort cleanup of the worktree's tmux attachment. Failures here
 		// do not undo the successful removal — the directory is already gone.
-		if ops != nil && ops.Available() {
-			if target, err := ops.FindWindowByDir(path); err == nil {
-				if mode == tmuxctl.ModeSession {
-					_ = ops.KillSession(target)
-				} else {
-					_ = ops.KillWindow(target)
-				}
-			}
-		}
+		killTmuxTargetForDir(ops, path, mode)
 		return worktreeDeletedMsg{path: path}
 	}
 }
@@ -777,13 +1070,13 @@ func (m *model) addPulling(path string) {
 // returning a user-facing reason when it cannot. A worktree that is not yet on
 // disk (creating) or whose directory is missing has nowhere to run git; a
 // detached HEAD (empty branch) has no branch name to pull from origin.
-func canPullWorktree(row workspace.Row) (bool, string) {
+func canPullWorktree(row settings.Row) (bool, string) {
 	switch {
 	case row.Worktree == "":
 		return false, "no worktree selected"
-	case row.State == workspace.StateCreating:
+	case row.State == settings.StateCreating:
 		return false, "worktree is still being created"
-	case row.State == workspace.StateMissing:
+	case row.State == settings.StateMissing:
 		return false, "worktree directory is missing — cannot pull"
 	case row.Branch == "":
 		return false, "cannot pull: detached HEAD has no branch"
@@ -794,9 +1087,9 @@ func canPullWorktree(row workspace.Row) (bool, string) {
 // removeWorktreeRow optimistically drops target's row from the visible table
 // and records it in pendingDeletes so a failed deletion can restore it. The
 // session cursor is clamped so it never points past the shortened list.
-func (m *model) removeWorktreeRow(target workspace.Row) {
+func (m *model) removeWorktreeRow(target settings.Row) {
 	if m.pendingDeletes == nil {
-		m.pendingDeletes = map[string]workspace.Row{}
+		m.pendingDeletes = map[string]settings.Row{}
 	}
 	m.pendingDeletes[target.Worktree] = target
 	remaining := m.workspaceRows[:0:0]
@@ -822,14 +1115,14 @@ func (m *model) removeWorktreeRow(target workspace.Row) {
 // out-of-sequence index, making j/k navigation skip over it. The session cursor
 // is nudged so it keeps pointing at the same row. The next snapshot rebuild
 // reconciles exact intra-repo ordering.
-func (m *model) restoreWorktreeRow(saved workspace.Row) {
+func (m *model) restoreWorktreeRow(saved settings.Row) {
 	insertAt := len(m.workspaceRows)
 	for i, row := range m.workspaceRows {
 		if row.Repo == saved.Repo {
 			insertAt = i + 1
 		}
 	}
-	m.workspaceRows = append(m.workspaceRows, workspace.Row{})
+	m.workspaceRows = append(m.workspaceRows, settings.Row{})
 	copy(m.workspaceRows[insertAt+1:], m.workspaceRows[insertAt:])
 	m.workspaceRows[insertAt] = saved
 	if insertAt <= m.sessionCursor {
@@ -842,7 +1135,7 @@ func (m *model) restoreWorktreeRow(saved workspace.Row) {
 // removing yet; without this filter the row would flash back into the table
 // between the confirmation and the deletion completing. Returns rows unchanged
 // when nothing is pending.
-func filterPendingDeletes(rows []workspace.Row, pending map[string]workspace.Row) []workspace.Row {
+func filterPendingDeletes(rows []settings.Row, pending map[string]settings.Row) []settings.Row {
 	if len(pending) == 0 {
 		return rows
 	}
@@ -903,7 +1196,7 @@ func (m *model) clearPendingCreate(repo, branch string) {
 	}
 	filtered := m.workspaceRows[:0:0]
 	for _, row := range m.workspaceRows {
-		if row.State == workspace.StateCreating && row.Repo == repo && row.Branch == branch {
+		if row.State == settings.StateCreating && row.Repo == repo && row.Branch == branch {
 			continue
 		}
 		filtered = append(filtered, row)
@@ -923,7 +1216,7 @@ func (m *model) clearPendingCreate(repo, branch string) {
 // that has appeared, or a placeholder already injected, is never duplicated.
 // Placeholders are appended in a stable repo+branch order to avoid frame-to-
 // frame jitter when several creates run at once.
-func injectPendingCreates(rows []workspace.Row, pending map[string]pendingCreate) []workspace.Row {
+func injectPendingCreates(rows []settings.Row, pending map[string]pendingCreate) []settings.Row {
 	if len(pending) == 0 {
 		return rows
 	}
@@ -946,11 +1239,11 @@ func injectPendingCreates(rows []workspace.Row, pending map[string]pendingCreate
 		if present {
 			continue
 		}
-		out = append(out, workspace.Row{
+		out = append(out, settings.Row{
 			Repo:     pc.repo,
 			Worktree: pc.dest,
 			Branch:   pc.branch,
-			State:    workspace.StateCreating,
+			State:    settings.StateCreating,
 		})
 	}
 	return out
@@ -960,11 +1253,11 @@ func injectPendingCreates(rows []workspace.Row, pending map[string]pendingCreate
 // reason when it may not. The repository's primary worktree (Worktree == Repo)
 // and rows not associated with a configured repo are protected: git refuses the
 // former, and the latter has no repo root to run `git worktree remove` from.
-func canDeleteWorktree(row workspace.Row) (bool, string) {
+func canDeleteWorktree(row settings.Row) (bool, string) {
 	if row.Worktree == "" {
 		return false, "no worktree selected"
 	}
-	if row.State == workspace.StateCreating {
+	if row.State == settings.StateCreating {
 		return false, "worktree is still being created"
 	}
 	if row.Repo == "" {
@@ -1001,10 +1294,16 @@ func (m model) Init() tea.Cmd {
 	// of whether repos are configured — it is cheap and avoids a conditional
 	// that would complicate Init.
 	tick := tickCmd()
-	if m.twAvail {
-		return tea.Batch(waitSnapshot(m.snaps), loadTasksCmd(m.tw, m.cfg.TaskwarriorTimeout), tick)
+	// Kick off the initial Workspaces-view load so it is ready before the
+	// user ever presses Tab, rather than waiting for the first snapshot.
+	// Gated behind !m.demo (mirroring the snapshotMsg row build below) so
+	// --demo never touches the workspaces store and its capture stays
+	// deterministic.
+	var wsC tea.Cmd
+	if !m.demo {
+		wsC = loadWorkspaceStatusCmd(m.store, m.snap)
 	}
-	return tea.Batch(waitSnapshot(m.snaps), tick)
+	return tea.Batch(waitSnapshot(m.snaps), tick, wsC)
 }
 
 func waitSnapshot(ch <-chan state.Snapshot) tea.Cmd {
@@ -1028,30 +1327,27 @@ func paneInnerWidth(w int) int {
 	return inner
 }
 
-// paneHeights returns the total and inner heights for the sessions and tasks
-// panes under the model's current terminal and footer state. Keeping this
-// calculation shared between Update and View lets cursor movement adjust the
-// sessions viewport using exactly the height View will render.
-func (m model) paneHeights() (sessionsOuterH, tasksOuterH, sessionsInnerH, tasksInnerH int) {
+// paneHeights returns the total and inner heights for the sessions pane under
+// the model's current terminal and footer state. Keeping this calculation
+// shared between Update and View lets cursor movement adjust the sessions
+// viewport using exactly the height View will render.
+func (m model) paneHeights() (sessionsOuterH, sessionsInnerH int) {
 	extraFooterRows := 0
 	if m.debug && unreachableFooter(m.snap.UnreachableInstances) != "" {
 		extraFooterRows++
 	}
-	if taskwarriorErrorFooter(m.lastMutationOp, m.lastMutationErr) != "" {
+	// The Workspaces view appends wsHint as its own line below the pane
+	// (View, mirroring the debug footer above) whenever it has something to
+	// say, so it must reserve a row here too — otherwise the pane keeps its
+	// full height and View returns m.height+1 lines while a hint is set.
+	if m.view == viewWorkspaces && m.wsHint != "" {
 		extraFooterRows++
 	}
 
-	tasksActive := m.twAvail && m.tasksActive
-	if tasksActive {
-		tasksOuterH = max(8, m.height/3)
-	}
 	// The application header and legend always reserve one row each.
-	sessionsOuterH = max(6, m.height-tasksOuterH-2-extraFooterRows)
+	sessionsOuterH = max(6, m.height-2-extraFooterRows)
 	sessionsInnerH = max(1, sessionsOuterH-2)
-	if tasksActive {
-		tasksInnerH = max(1, tasksOuterH-2)
-	}
-	return sessionsOuterH, tasksOuterH, sessionsInnerH, tasksInnerH
+	return sessionsOuterH, sessionsInnerH
 }
 
 // syncSessionScroll moves the grouped sessions viewport just enough to keep
@@ -1067,7 +1363,7 @@ func (m *model) syncSessionScroll() {
 // sessionsListHeight is the number of grouped repo/worktree lines available
 // inside the sessions pane after its title and pinned hint/prompt lines.
 func (m model) sessionsListHeight() int {
-	_, _, innerH, _ := m.paneHeights()
+	_, innerH := m.paneHeights()
 	return max(0, innerH-1-m.workspaceFooterLineCount())
 }
 
@@ -1078,60 +1374,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// This ensures Esc inside a prompt clears the prompt rather than quitting.
 		if m.prompt != promptIdle {
 			switch m.prompt {
-			case promptConfirmDelete:
-				if msg.String() == "y" || msg.String() == "Y" {
-					tasks := m.tasks
-					cursor := m.taskCursor
-					m.mutationInFlight = true
-					m.prompt = promptIdle
-					return m, mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "delete", func(c ClientAPI, ctx context.Context) error {
-						return c.Delete(ctx, tasks[cursor].ID)
-					})
-				}
-				// Any other key (including esc) cancels the confirm prompt.
-				m.prompt = promptIdle
-				return m, nil
-
-			case promptAdd, promptEdit:
-				switch msg.String() {
-				case "enter":
-					value := m.input.Value()
-					isEdit := m.prompt == promptEdit
-					tasks := m.tasks
-					cursor := m.taskCursor
-					m.prompt = promptIdle
-					m.input.Blur()
-					m.input.SetValue("")
-					m.mutationInFlight = true
-					// Batch the input update cmd (cursor blink teardown) with the mutation.
-					_, inputCmd := m.input.Update(msg)
-					var mutCmd tea.Cmd
-					if isEdit {
-						mutCmd = mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "modify", func(c ClientAPI, ctx context.Context) error {
-							return c.Modify(ctx, tasks[cursor].ID, value)
-						})
-					} else {
-						mutCmd = mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "add", func(c ClientAPI, ctx context.Context) error {
-							return c.Add(ctx, value)
-						})
-					}
-					return m, tea.Batch(inputCmd, mutCmd)
-
-				case "esc":
-					// Cancel prompt without quitting — must short-circuit before global quit.
-					m.prompt = promptIdle
-					m.input.Blur()
-					m.input.SetValue("")
-					return m, nil
-
-				default:
-					// Forward all other keys to the textinput so typing, backspace,
-					// cursor movement, and the blink Cmd all work correctly.
-					var cmd tea.Cmd
-					m.input, cmd = m.input.Update(msg)
-					return m, cmd
-				}
-
 			case promptNewWorktree, promptFetchBranch:
 				// Branch-name prompt for 'n' (new worktree) and 'F' (fetch from
 				// origin). On enter, advance to the harness chooser; the fetch-vs-
@@ -1184,11 +1426,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			case promptChooseHarness:
 				// Harness chooser: up/down moves the cursor; enter confirms and
-				// dispatches newWorktreeCmd; esc cancels the whole flow.
+				// dispatches newWorktreeCmd — or, when this chooser was opened by
+				// the Workspaces view's 'n' (wsCreateTarget set),
+				// assembleWorkspaceSessionCmd instead; esc cancels the whole flow.
 				switch msg.String() {
 				case "enter":
-					branch := m.newWorktreeBranch
-					repoPath := m.newWorktreeRepo
 					var chosenKind string
 					if len(m.harnessChooserKinds) > 0 {
 						idx := clampIndex(m.harnessChooserCursor, len(m.harnessChooserKinds))
@@ -1197,6 +1439,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if chosenKind == "" {
 						chosenKind = string(harness.KindOpenCode)
 					}
+					if m.wsCreateTarget != "" {
+						return m.startWorkspaceSessionCreate(m.wsCreateTarget, m.wsCreateSessionName, chosenKind)
+					}
+					branch := m.newWorktreeBranch
+					repoPath := m.newWorktreeRepo
 					return m.startNewWorktree(repoPath, branch, chosenKind, m.worktreeFromRemote)
 
 				case "esc":
@@ -1204,6 +1451,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.newWorktreeRepo = ""
 					m.newWorktreeBranch = ""
 					m.worktreeFromRemote = false
+					m.wsCreateTarget = ""
+					m.wsCreateSessionName = ""
 					m.harnessChooserKinds = nil
 					m.harnessChooserCursor = 0
 					return m, nil
@@ -1217,6 +1466,82 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				return m, nil
+
+			case promptNewWorkspace:
+				// Name prompt for 'N' (new, empty workspace). On enter, a
+				// non-empty name is dispatched to createWorkspaceCmd; esc or an
+				// empty name cancels without creating anything.
+				switch msg.String() {
+				case "enter":
+					name := strings.TrimSpace(m.input.Value())
+					_, inputCmd := m.input.Update(msg)
+					m.prompt = promptIdle
+					m.input.Blur()
+					m.input.SetValue("")
+					if name == "" {
+						return m, inputCmd
+					}
+					return m, tea.Batch(inputCmd, createWorkspaceCmd(m.store, name))
+
+				case "esc":
+					m.prompt = promptIdle
+					m.input.Blur()
+					m.input.SetValue("")
+					return m, nil
+
+				default:
+					var cmd tea.Cmd
+					m.input, cmd = m.input.Update(msg)
+					return m, cmd
+				}
+
+			case promptNewWorkspaceSession:
+				// Name prompt for 'n' (new session) in the workspace captured in
+				// wsCreateTarget. On enter, a valid name advances to the shared
+				// promptChooseHarness; an invalid or duplicate name is refused via
+				// wsHint and the prompt stays open so the user can retype. esc or
+				// an empty name cancels the whole flow.
+				switch msg.String() {
+				case "enter":
+					name := strings.TrimSpace(m.input.Value())
+					target := m.wsCreateTarget
+					_, inputCmd := m.input.Update(msg)
+					if name == "" {
+						m.prompt = promptIdle
+						m.input.Blur()
+						m.input.SetValue("")
+						m.wsCreateTarget = ""
+						return m, inputCmd
+					}
+					if err := m.validateNewWsSessionName(target, name); err != nil {
+						m.wsHint = err.Error()
+						return m, inputCmd
+					}
+					m.wsCreateSessionName = name
+					m.wsHint = ""
+					m.input.Blur()
+					m.input.SetValue("")
+					if dk := resolvedDefaultHarness(m.harnOp); dk != "" {
+						return m.startWorkspaceSessionCreate(target, name, dk)
+					}
+					m.prompt = promptChooseHarness
+					m.harnessChooserKinds = harnessChooserKinds(m.harnOp)
+					m.harnessChooserCursor = defaultHarnessIndex(m.harnessChooserKinds)
+					return m, inputCmd
+
+				case "esc":
+					m.prompt = promptIdle
+					m.input.Blur()
+					m.input.SetValue("")
+					m.wsCreateTarget = ""
+					m.wsCreateSessionName = ""
+					return m, nil
+
+				default:
+					var cmd tea.Cmd
+					m.input, cmd = m.input.Update(msg)
+					return m, cmd
+				}
 
 			case promptAddRepo:
 				// Embedded repo finder. Enter adds the highlighted repo; the
@@ -1255,7 +1580,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.prompt = promptIdle
-				m.deleteTarget = workspace.Row{}
+				m.deleteTarget = settings.Row{}
 				m.deleteMergeInfo = ""
 				return m, nil
 
@@ -1266,7 +1591,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if msg.String() == "y" || msg.String() == "Y" {
 					target := m.deleteTarget
 					m.prompt = promptIdle
-					m.deleteTarget = workspace.Row{}
+					m.deleteTarget = settings.Row{}
 					m.deleteMergeInfo = ""
 					// Optimistically drop the row now: git worktree removal can
 					// take a few seconds, and leaving the row visible looks like
@@ -1278,8 +1603,52 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, deleteWorktreeCmd(m.tmux, m.gitOp, target.Repo, target.Worktree, target.Branch, m.launchMode, m.deleteForce)
 				}
 				m.prompt = promptIdle
-				m.deleteTarget = workspace.Row{}
+				m.deleteTarget = settings.Row{}
 				m.deleteMergeInfo = ""
+				return m, nil
+
+			case promptConfirmDeleteWsSession:
+				// First confirmation for a single workspace session. 'y'
+				// advances to the second prompt; any other key (including
+				// esc) cancels.
+				if msg.String() == "y" || msg.String() == "Y" {
+					m.prompt = promptConfirmDeleteWsSession2
+					return m, nil
+				}
+				m.clearWsDeleteTarget()
+				return m, nil
+
+			case promptConfirmDeleteWsSession2:
+				// Second (last) confirmation. Default is cancel: only an
+				// explicit 'y' proceeds; every other key (including
+				// esc/enter) aborts.
+				if msg.String() == "y" || msg.String() == "Y" {
+					wsName, sessName := m.wsDeleteWorkspace, m.wsDeleteSession
+					m.clearWsDeleteTarget()
+					return m, deleteWsSessionCmd(m.store, m.tmux, wsName, sessName, m.launchMode)
+				}
+				m.clearWsDeleteTarget()
+				return m, nil
+
+			case promptConfirmDeleteWorkspace:
+				// First confirmation for an entire workspace (every session).
+				// 'y' advances to the second prompt; any other key cancels.
+				if msg.String() == "y" || msg.String() == "Y" {
+					m.prompt = promptConfirmDeleteWorkspace2
+					return m, nil
+				}
+				m.clearWsDeleteTarget()
+				return m, nil
+
+			case promptConfirmDeleteWorkspace2:
+				// Second (last) confirmation. Default is cancel: only an
+				// explicit 'y' proceeds.
+				if msg.String() == "y" || msg.String() == "Y" {
+					wsName := m.wsDeleteWorkspace
+					m.clearWsDeleteTarget()
+					return m, deleteWorkspaceCmd(m.store, m.tmux, wsName, m.launchMode)
+				}
+				m.clearWsDeleteTarget()
 				return m, nil
 
 			case promptConfirmRemoveRepo:
@@ -1308,8 +1677,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if len(m.sessionPaletteMatches) == 0 {
 						return m, nil
 					}
-					sel := clampIndex(m.sessionPaletteCursor, len(m.sessionPaletteMatches))
-					row := m.sessionPaletteRows[m.sessionPaletteMatches[sel]]
+					idx := m.sessionPaletteMatches[clampIndex(m.sessionPaletteCursor, len(m.sessionPaletteMatches))]
+					row := m.sessionPaletteRows[idx]
+					target := m.sessionPaletteTargets[idx]
 					m.closeSessionPalette()
 					// Apply the same guards as the sessions-pane Enter handler.
 					tmuxAvail := m.tmux != nil && m.tmux.Available()
@@ -1317,24 +1687,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.tmuxHint = "tmux not available — start cogitator inside a tmux session to use jump/resume"
 						return m, nil
 					}
-					if row.State == workspace.StateMissing {
+					if row.State == settings.StateMissing {
 						m.tmuxHint = "worktree directory is missing — cannot resume"
 						return m, nil
 					}
-					if row.State == workspace.StateCreating {
+					if row.State == settings.StateCreating {
 						m.tmuxHint = "worktree is still being created…"
 						return m, nil
 					}
 					// Sync the sessions-pane cursor to the chosen row so the
-					// highlight reflects where the jump landed.
+					// highlight reflects where the jump landed. A workspace
+					// session's target dir has no matching entry in
+					// m.workspaceRows, so this is a harmless no-op for those.
 					for i, r := range m.workspaceRows {
-						if r.Worktree == row.Worktree {
+						if r.Worktree == target.dir {
 							m.sessionCursor = i
 							break
 						}
 					}
-					m.recordSessionSwitch(row)
-					return m, launchCmd(m.tmux, row, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
+					m.recordSessionSwitch(target.dir)
+					return m, launchCmd(m.tmux, target, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
 				case "up", "ctrl+p":
 					m.sessionPaletteCursor = clampIndex(m.sessionPaletteCursor-1, len(m.sessionPaletteMatches))
 					return m, nil
@@ -1364,6 +1736,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			case promptSettings:
 				return m.updateSettings(msg)
+
+			case promptWorkspaceModal:
+				return m.updateWorkspaceModalActive(msg)
+
+			case promptWorkspaceBackfill:
+				return m.updateWorkspaceBackfillActive(msg)
 			}
 		}
 
@@ -1374,19 +1752,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// (b.1) Session switcher — ctrl+P opens the fuzzy "go to session"
-		// palette over the worktree rows. Global (works regardless of which
-		// pane is focused) and only reachable here when no prompt is active,
-		// since the prompt pre-empt block above short-circuits first.
+		// palette over every worktree row and workspace session. Global
+		// (works regardless of which pane is focused) and only reachable
+		// here when no prompt is active, since the prompt pre-empt block
+		// above short-circuits first.
 		if msg.String() == "ctrl+p" {
-			if len(m.workspaceRows) == 0 {
+			candidates, startOnPrevious := m.orderedSessionCandidates()
+			if len(candidates) == 0 {
 				m.tmuxHint = "no sessions to switch to"
 				return m, nil
 			}
-			rows, startOnPrevious := m.orderedSessionRows()
-			m.sessionPaletteRows = rows
-			m.sessionPaletteLabels = make([]string, len(m.sessionPaletteRows))
-			for i, row := range m.sessionPaletteRows {
-				m.sessionPaletteLabels[i] = sessionPaletteLabel(row)
+			m.sessionPaletteRows = make([]settings.Row, len(candidates))
+			m.sessionPaletteTargets = make([]launchTarget, len(candidates))
+			m.sessionPaletteLabels = make([]string, len(candidates))
+			for i, c := range candidates {
+				m.sessionPaletteRows[i] = c.row
+				m.sessionPaletteTargets[i] = c.target
+				m.sessionPaletteLabels[i] = c.label
 			}
 			m.sessionPaletteMatches = fuzzyMatchIndices("", m.sessionPaletteLabels)
 			// Seed the cursor on the previous session (row 1) so ctrl+P then enter
@@ -1404,359 +1786,314 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (b.2) Help overlay — '?' opens the floating keybinding reference.
 		// Global (works in either pane) and only reachable here when no prompt
 		// is active, since the prompt pre-empt block short-circuits first.
+		// Clears wsHint here (not just on the m.view == viewWorkspaces "any
+		// key" clear below) because dismissing the overlay afterwards returns
+		// through the promptHelp arm of the pre-empt block above, which never
+		// reaches that clear either — so a hint set before '?' would otherwise
+		// survive the whole open/close round trip.
 		if msg.String() == "?" {
+			m.wsHint = ""
 			m.prompt = promptHelp
 			return m, nil
 		}
 
 		// (b.3) Settings overlay — 'S' opens the persistent-settings modal
 		// (default harness, launch mode). Global; only reachable when no prompt
-		// is active, since the pre-empt block above short-circuits first.
+		// is active, since the pre-empt block above short-circuits first. See
+		// the '?' comment above for why wsHint is cleared here rather than
+		// relying on the m.view == viewWorkspaces clear below.
 		if msg.String() == "S" {
+			m.wsHint = ""
 			m.openSettings()
 			return m, nil
 		}
 
-		// (c) Tasks pane activation and focus swap.
-		if msg.String() == "T" {
-			if m.twAvail {
-				m.tasksActive = !m.tasksActive
-				if m.tasksActive {
-					m.focus = focusTasks
-					if !m.tasksLoaded {
-						return m, loadTasksCmd(m.tw, m.cfg.TaskwarriorTimeout)
-					}
-				} else {
-					m.focus = focusSessions
-				}
-			}
-			return m, nil
-		}
-
+		// (b.4) View swap — Tab toggles the whole content area between the
+		// Sessions and Workspaces views. Global; only reachable when no prompt
+		// is active, since the pre-empt block above short-circuits first. Each
+		// view keeps its own cursor/scroll state, so swapping never disturbs
+		// the other view's position. Both hints are cleared here — not just on
+		// the "any key" clears further down — because tab returns before
+		// either of those is reached, so a hint set in one view would
+		// otherwise survive a tab round trip and reappear on return.
 		if msg.String() == "tab" {
-			if m.twAvail && m.tasksActive {
-				if m.focus == focusSessions {
-					m.focus = focusTasks
-				} else {
-					m.focus = focusSessions
-				}
+			m.wsHint = ""
+			m.tmuxHint = ""
+			if m.view == viewWorkspaces {
+				m.view = viewSessions
+			} else {
+				m.view = viewWorkspaces
 			}
-			// No-op when !twAvail or tasks are inactive — focus stays on sessions.
 			return m, nil
 		}
 
-		// (d) Sessions-focused keys.
-		if m.focus == focusSessions {
-			// Clear any transient tmux hint on any key press.
-			m.tmuxHint = ""
+		// Workspaces-view keys route through their own methods rather than
+		// adding arms here, following updateSettings's precedent — this
+		// switch already exceeds the configured gocyclo minimum. Lifecycle
+		// keys (create workspace/session) are tried first, since they open a
+		// prompt or dispatch a Cmd rather than moving the cursor; delete
+		// ('D', opening the merge-status confirm) is tried next; launch
+		// ('enter' on a session row) after that; anything else falls through
+		// to the pure-navigation handler in workspace_view.go.
+		// updateWorkspaceDelete/updateWorkspaceLaunch live here (not
+		// workspace_view.go/workspace_cmd.go) because both of those files are
+		// untouched by this feature.
+		if m.view == viewWorkspaces {
+			// Clear any transient workspace hint on any key press, mirroring
+			// tmuxHint's clear for the Sessions pane below: a hint set by an
+			// async failure (create/delete/backfill) or a lifecycle refusal
+			// (e.g. "no member repos") must not linger past the next keypress.
+			m.wsHint = ""
+			// `gg` jump-to-top is armed only by updateWorkspaceView's own
+			// navigation keys; any key one of the other delegates below
+			// consumes (open a prompt, launch, etc.) must disarm it the same
+			// way an unrelated key disarms pendingG in the Sessions switch —
+			// otherwise a `g` pressed long after, following an intervening
+			// non-navigation key, jumps to the top instead of re-arming.
+			if next, cmd, handled := m.updateWorkspaceLifecycle(msg); handled {
+				next.wsPendingG = false
+				return next, cmd
+			}
+			if next, cmd, handled := m.updateWorkspaceDelete(msg); handled {
+				next.wsPendingG = false
+				return next, cmd
+			}
+			if next, cmd, handled := m.updateWorkspaceLaunch(msg); handled {
+				next.wsPendingG = false
+				return next, cmd
+			}
+			if next, cmd, handled := m.updateWorkspaceModal(msg); handled {
+				next.wsPendingG = false
+				return next, cmd
+			}
+			return m.updateWorkspaceView(msg)
+		}
 
-			// `gg` jumps to the top: the first `g` arms pendingG, the second
-			// fires. Any other key clears it.
-			wasPendingG := m.pendingG
-			m.pendingG = false
+		// Sessions-focused keys. The sessions pane is the only pane, so every
+		// key reaches this switch once the global/prompt handlers above have
+		// passed on it.
+		// Clear any transient tmux hint on any key press.
+		m.tmuxHint = ""
 
-			switch msg.String() {
-			case "a":
-				m.recentCollapsed = !m.recentCollapsed
-			case "j", "down":
-				if n := len(m.workspaceRows); n > 0 {
-					m.sessionCursor = min(m.sessionCursor+1, n-1)
-					m.syncSessionScroll()
-				}
-			case "k", "up":
-				if n := len(m.workspaceRows); n > 0 {
-					m.sessionCursor = max(m.sessionCursor-1, 0)
-					m.syncSessionScroll()
-				}
-			case "g":
-				if wasPendingG {
-					m.sessionCursor = 0
-					m.syncSessionScroll()
-				} else {
-					m.pendingG = true
-				}
-			case "<":
+		// `gg` jumps to the top: the first `g` arms pendingG, the second
+		// fires. Any other key clears it.
+		wasPendingG := m.pendingG
+		m.pendingG = false
+
+		switch msg.String() {
+		case "a":
+			m.recentCollapsed = !m.recentCollapsed
+		case "j", "down":
+			if n := len(m.workspaceRows); n > 0 {
+				m.sessionCursor = min(m.sessionCursor+1, n-1)
+				m.syncSessionScroll()
+			}
+		case "k", "up":
+			if n := len(m.workspaceRows); n > 0 {
+				m.sessionCursor = max(m.sessionCursor-1, 0)
+				m.syncSessionScroll()
+			}
+		case "g":
+			if wasPendingG {
 				m.sessionCursor = 0
 				m.syncSessionScroll()
-			case "G", ">":
-				if n := len(m.workspaceRows); n > 0 {
-					m.sessionCursor = n - 1
-					m.syncSessionScroll()
-				}
-			case "ctrl+d":
-				m.sessionCursor = m.repoBoundary(1)
+			} else {
+				m.pendingG = true
+			}
+		case "<":
+			m.sessionCursor = 0
+			m.syncSessionScroll()
+		case "G", ">":
+			if n := len(m.workspaceRows); n > 0 {
+				m.sessionCursor = n - 1
 				m.syncSessionScroll()
-			case "ctrl+u":
-				m.sessionCursor = m.repoBoundary(-1)
-				m.syncSessionScroll()
+			}
+		case "ctrl+d":
+			m.sessionCursor = m.repoBoundary(1)
+			m.syncSessionScroll()
+		case "ctrl+u":
+			m.sessionCursor = m.repoBoundary(-1)
+			m.syncSessionScroll()
 
-			case "enter":
-				// Jump to a running agent or resume a stopped one.
-				// Guard: tmux must be available.
-				tmuxAvail := m.tmux != nil && m.tmux.Available()
-				if !tmuxAvail {
-					m.tmuxHint = "tmux not available — start cogitator inside a tmux session to use jump/resume"
-					return m, nil
-				}
-				if len(m.workspaceRows) == 0 {
-					return m, nil
-				}
-				row := m.workspaceRows[m.sessionCursor]
-
-				// Missing rows cannot be resumed (directory absent from disk).
-				if row.State == workspace.StateMissing {
-					m.tmuxHint = "worktree directory is missing — cannot resume"
-					return m, nil
-				}
-
-				// Pending-create placeholder rows are not on disk yet.
-				if row.State == workspace.StateCreating {
-					m.tmuxHint = "worktree is still being created…"
-					return m, nil
-				}
-
-				m.recordSessionSwitch(row)
-				return m, launchCmd(m.tmux, row, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
-
-			case "n":
-				// New worktree: collect a branch name via prompt.
-				tmuxAvail := m.tmux != nil && m.tmux.Available()
-				if !tmuxAvail {
-					m.tmuxHint = "tmux not available — start cogitator inside a tmux session to create worktrees"
-					return m, nil
-				}
-				if len(m.workspaceRows) == 0 {
-					return m, nil
-				}
-				row := m.workspaceRows[m.sessionCursor]
-				// Determine the repo path: use row.Repo if set, else row.Worktree.
-				repoPath := row.Repo
-				if repoPath == "" {
-					repoPath = row.Worktree
-				}
-				if repoPath == "" {
-					return m, nil
-				}
-				m.newWorktreeRepo = repoPath
-				m.worktreeFromRemote = false
-				m.prompt = promptNewWorktree
-				m.input.Placeholder = "branch name"
-				m.input.SetValue("")
-				focusCmd := m.input.Focus()
-				return m, focusCmd
-
-			case "F":
-				// Fetch a branch from origin into a new worktree: collect the
-				// branch name via prompt, then (after the harness chooser) fetch
-				// and check it out. Mirrors 'n' but sets worktreeFromRemote so the
-				// chooser dispatches the fetch path.
-				tmuxAvail := m.tmux != nil && m.tmux.Available()
-				if !tmuxAvail {
-					m.tmuxHint = "tmux not available — start cogitator inside a tmux session to create worktrees"
-					return m, nil
-				}
-				if len(m.workspaceRows) == 0 {
-					return m, nil
-				}
-				row := m.workspaceRows[m.sessionCursor]
-				// Determine the repo path: use row.Repo if set, else row.Worktree.
-				repoPath := row.Repo
-				if repoPath == "" {
-					repoPath = row.Worktree
-				}
-				if repoPath == "" {
-					return m, nil
-				}
-				m.newWorktreeRepo = repoPath
-				m.worktreeFromRemote = true
-				m.prompt = promptFetchBranch
-				m.input.Placeholder = "branch name to fetch from origin"
-				m.input.SetValue("")
-				focusCmd := m.input.Focus()
-				return m, focusCmd
-
-			case "A":
-				// Open the embedded repo finder: scan $HOME for git repos in
-				// the background, then let the user fuzzy-filter and pick one.
-				// Runs entirely inside the TUI (no ExecProcess), so it cannot
-				// disturb the host tmux client.
-				m.prompt = promptAddRepo
-				m.repoFinderScanning = true
-				m.repoFinderAll = nil
-				m.repoFinderMatches = nil
-				m.repoFinderCursor = 0
-				m.repoFinderErr = ""
-				m.input.Placeholder = "filter repos"
-				m.input.SetValue("")
-				return m, tea.Batch(m.input.Focus(), scanReposCmd(repoFinderRoot()))
-
-			case "D":
-				// Delete worktree: open the first of two confirmations and
-				// kick off an async merge-status probe to annotate it. tmux is
-				// not required (git removal works without it; window cleanup is
-				// best-effort).
-				if len(m.workspaceRows) == 0 {
-					return m, nil
-				}
-				row := m.workspaceRows[m.sessionCursor]
-				if ok, reason := canDeleteWorktree(row); !ok {
-					m.tmuxHint = reason
-					return m, nil
-				}
-				m.deleteTarget = row
-				m.deleteMergeInfo = ""
-				// Resolve force-delete once, here, so the confirm prompt's
-				// data-loss warning and the eventual removal agree on the flag.
-				m.deleteForce = true
-				if wsCfg, err := workspace.LoadConfig(); err == nil {
-					m.deleteForce = wsCfg.ForceDeleteEnabled()
-				}
-				m.prompt = promptConfirmDeleteWorktree
-				return m, mergeStatusCmd(m.gitOp, row.Repo, row.Branch, row.Worktree)
-
-			case "R":
-				// Untrack repo: drop the repo under the cursor from cogitator's
-				// config. Non-destructive — the repo and its worktrees stay on
-				// disk — so a single confirmation gates it.
-				if len(m.workspaceRows) == 0 {
-					return m, nil
-				}
-				row := m.workspaceRows[m.sessionCursor]
-				if row.Repo == "" {
-					m.tmuxHint = "no repo to remove for this row"
-					return m, nil
-				}
-				m.removeRepoTarget = row.Repo
-				m.prompt = promptConfirmRemoveRepo
+		case "enter":
+			// Jump to a running agent or resume a stopped one.
+			// Guard: tmux must be available.
+			tmuxAvail := m.tmux != nil && m.tmux.Available()
+			if !tmuxAvail {
+				m.tmuxHint = "tmux not available — start cogitator inside a tmux session to use jump/resume"
 				return m, nil
-
-			case "P":
-				// Pull latest into the highlighted worktree's branch from origin.
-				// Handy for refreshing a base branch before branching a new
-				// worktree off it. tmux is not required — this is a pure git
-				// operation.
-				if len(m.workspaceRows) == 0 {
-					return m, nil
-				}
-				row := m.workspaceRows[m.sessionCursor]
-				if ok, reason := canPullWorktree(row); !ok {
-					m.tmuxHint = reason
-					return m, nil
-				}
-				if m.pulling[row.Worktree] {
-					// A pull for this worktree is already in flight; ignore the
-					// repeated keypress rather than dispatching a duplicate.
-					return m, nil
-				}
-				m.addPulling(row.Worktree)
-				var spinnerC tea.Cmd
-				if !m.spinnerActive {
-					m.spinnerActive = true
-					spinnerC = spinnerTickCmd()
-				}
-				return m, tea.Batch(pullCmd(m.gitOp, row.Worktree, row.Branch), spinnerC)
 			}
+			if len(m.workspaceRows) == 0 {
+				return m, nil
+			}
+			row := m.workspaceRows[m.sessionCursor]
+
+			// Missing rows cannot be resumed (directory absent from disk).
+			if row.State == settings.StateMissing {
+				m.tmuxHint = "worktree directory is missing — cannot resume"
+				return m, nil
+			}
+
+			// Pending-create placeholder rows are not on disk yet.
+			if row.State == settings.StateCreating {
+				m.tmuxHint = "worktree is still being created…"
+				return m, nil
+			}
+
+			target := rowLaunchTarget(row)
+			m.recordSessionSwitch(target.dir)
+			return m, launchCmd(m.tmux, target, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
+
+		case "n":
+			// New worktree: collect a branch name via prompt.
+			tmuxAvail := m.tmux != nil && m.tmux.Available()
+			if !tmuxAvail {
+				m.tmuxHint = "tmux not available — start cogitator inside a tmux session to create worktrees"
+				return m, nil
+			}
+			if len(m.workspaceRows) == 0 {
+				return m, nil
+			}
+			row := m.workspaceRows[m.sessionCursor]
+			// Determine the repo path: use row.Repo if set, else row.Worktree.
+			repoPath := row.Repo
+			if repoPath == "" {
+				repoPath = row.Worktree
+			}
+			if repoPath == "" {
+				return m, nil
+			}
+			m.newWorktreeRepo = repoPath
+			m.worktreeFromRemote = false
+			m.prompt = promptNewWorktree
+			m.input.Placeholder = "branch name"
+			m.input.SetValue("")
+			focusCmd := m.input.Focus()
+			return m, focusCmd
+
+		case "F":
+			// Fetch a branch from origin into a new worktree: collect the
+			// branch name via prompt, then (after the harness chooser) fetch
+			// and check it out. Mirrors 'n' but sets worktreeFromRemote so the
+			// chooser dispatches the fetch path.
+			tmuxAvail := m.tmux != nil && m.tmux.Available()
+			if !tmuxAvail {
+				m.tmuxHint = "tmux not available — start cogitator inside a tmux session to create worktrees"
+				return m, nil
+			}
+			if len(m.workspaceRows) == 0 {
+				return m, nil
+			}
+			row := m.workspaceRows[m.sessionCursor]
+			// Determine the repo path: use row.Repo if set, else row.Worktree.
+			repoPath := row.Repo
+			if repoPath == "" {
+				repoPath = row.Worktree
+			}
+			if repoPath == "" {
+				return m, nil
+			}
+			m.newWorktreeRepo = repoPath
+			m.worktreeFromRemote = true
+			m.prompt = promptFetchBranch
+			m.input.Placeholder = "branch name to fetch from origin"
+			m.input.SetValue("")
+			focusCmd := m.input.Focus()
+			return m, focusCmd
+
+		case "A":
+			// Open the embedded repo finder: scan $HOME for git repos in
+			// the background, then let the user fuzzy-filter and pick one.
+			// Runs entirely inside the TUI (no ExecProcess), so it cannot
+			// disturb the host tmux client.
+			m.prompt = promptAddRepo
+			m.repoFinderScanning = true
+			m.repoFinderAll = nil
+			m.repoFinderMatches = nil
+			m.repoFinderCursor = 0
+			m.repoFinderErr = ""
+			m.input.Placeholder = "filter repos"
+			m.input.SetValue("")
+			return m, tea.Batch(m.input.Focus(), scanReposCmd(repoFinderRoot()))
+
+		case "D":
+			// Delete worktree: open the first of two confirmations and
+			// kick off an async merge-status probe to annotate it. tmux is
+			// not required (git removal works without it; window cleanup is
+			// best-effort).
+			if len(m.workspaceRows) == 0 {
+				return m, nil
+			}
+			row := m.workspaceRows[m.sessionCursor]
+			if ok, reason := canDeleteWorktree(row); !ok {
+				m.tmuxHint = reason
+				return m, nil
+			}
+			m.deleteTarget = row
+			m.deleteMergeInfo = ""
+			// Resolve force-delete once, here, so the confirm prompt's
+			// data-loss warning and the eventual removal agree on the flag.
+			m.deleteForce = true
+			if wsCfg, err := settings.LoadConfig(); err == nil {
+				m.deleteForce = wsCfg.ForceDeleteEnabled()
+			}
+			m.prompt = promptConfirmDeleteWorktree
+			return m, mergeStatusCmd(m.gitOp, row.Repo, row.Branch, row.Worktree)
+
+		case "R":
+			// Untrack repo: drop the repo under the cursor from cogitator's
+			// config. Non-destructive — the repo and its worktrees stay on
+			// disk — so a single confirmation gates it.
+			if len(m.workspaceRows) == 0 {
+				return m, nil
+			}
+			row := m.workspaceRows[m.sessionCursor]
+			if row.Repo == "" {
+				m.tmuxHint = "no repo to remove for this row"
+				return m, nil
+			}
+			m.removeRepoTarget = row.Repo
+			m.prompt = promptConfirmRemoveRepo
 			return m, nil
-		}
 
-		// (e) Tasks-focused keys — only when focused on tasks and no mutation in flight.
-		if m.focus == focusTasks && m.tasksActive && !m.mutationInFlight {
-			tasks := m.tasks
-			cursor := m.taskCursor
-			switch msg.String() {
-			case "j", "down":
-				if len(tasks) > 0 {
-					m.taskCursor = min(cursor+1, len(tasks)-1)
-				}
-			case "k", "up":
-				if len(tasks) > 0 {
-					m.taskCursor = max(cursor-1, 0)
-				}
-			case "a":
-				m.prompt = promptAdd
-				m.input.SetValue("")
-				focusCmd := m.input.Focus()
-				return m, focusCmd
-			case "e":
-				if len(tasks) > 0 && cursor >= 0 {
-					m.prompt = promptEdit
-					m.input.SetValue(flattenTaskDSL(tasks[cursor]))
-					focusCmd := m.input.Focus()
-					return m, focusCmd
-				}
-			case "d":
-				if len(tasks) > 0 && cursor >= 0 {
-					m.mutationInFlight = true
-					return m, mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "done", func(c ClientAPI, ctx context.Context) error {
-						return c.Done(ctx, tasks[cursor].ID)
-					})
-				}
-			case "s":
-				// Toggle: running task → stop, idle task → start.
-				// We branch on Start.IsZero() rather than tracking a flag so
-				// the action stays consistent with whatever Export last
-				// reported, even if the row was mutated out-of-band.
-				if len(tasks) > 0 && cursor >= 0 {
-					m.mutationInFlight = true
-					if tasks[cursor].Start.IsZero() {
-						return m, mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "start", func(c ClientAPI, ctx context.Context) error {
-							return c.Start(ctx, tasks[cursor].ID)
-						})
-					}
-					return m, mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "stop", func(c ClientAPI, ctx context.Context) error {
-						return c.Stop(ctx, tasks[cursor].ID)
-					})
-				}
-			case "D":
-				if len(tasks) > 0 && cursor >= 0 {
-					m.prompt = promptConfirmDelete
-				}
-			case "U":
-				m.mutationInFlight = true
-				return m, mutateCmd(m.tw, m.cfg.TaskwarriorTimeout, "undo", func(c ClientAPI, ctx context.Context) error {
-					return c.Undo(ctx)
-				})
+		case "P":
+			// Pull latest into the highlighted worktree's branch from origin.
+			// Handy for refreshing a base branch before branching a new
+			// worktree off it. tmux is not required — this is a pure git
+			// operation.
+			if len(m.workspaceRows) == 0 {
+				return m, nil
 			}
+			row := m.workspaceRows[m.sessionCursor]
+			if ok, reason := canPullWorktree(row); !ok {
+				m.tmuxHint = reason
+				return m, nil
+			}
+			if m.pulling[row.Worktree] {
+				// A pull for this worktree is already in flight; ignore the
+				// repeated keypress rather than dispatching a duplicate.
+				return m, nil
+			}
+			m.addPulling(row.Worktree)
+			var spinnerC tea.Cmd
+			if !m.spinnerActive {
+				m.spinnerActive = true
+				spinnerC = spinnerTickCmd()
+			}
+			return m, tea.Batch(pullCmd(m.gitOp, row.Worktree, row.Branch), spinnerC)
 		}
 		return m, nil
 
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		// Recompute the input width so the prompt fits inside the bordered
-		// tasks pane. The prefix "edit #999: " is 11 chars; we reserve that
-		// space so the cursor never overflows the pane boundary.
-		const editPromptLen = len("edit #999: ")
-		m.input.Width = max(0, paneInnerWidth(m.width)-editPromptLen)
+		// sessions pane. The prefix "fetch branch from origin: " is the
+		// longest prompt label; we reserve that much space so the cursor
+		// never overflows the pane boundary.
+		const promptLabelLen = len("fetch branch from origin: ")
+		m.input.Width = max(0, paneInnerWidth(m.width)-promptLabelLen)
 		m.syncSessionScroll()
-	case tasksLoadedMsg:
-		// Sort once at load time so m.tasks[m.taskCursor] is always the
-		// highlighted row. Sorting in the render path instead would
-		// desynchronise the cursor index from action dispatch (done, stop,
-		// delete, etc. all read m.tasks[m.taskCursor]).
-		m.tasks = sortedTasks(msg.tasks)
-		m.tasksErr = msg.err
-		m.tasksLoaded = true
-		// Clamp cursor into [0, len-1]. Allow -1 when the list is empty so
-		// downstream key handlers can no-op cleanly without a bounds check.
-		switch {
-		case len(m.tasks) == 0:
-			m.taskCursor = -1
-		case m.taskCursor >= len(m.tasks):
-			m.taskCursor = len(m.tasks) - 1
-		case m.taskCursor < 0:
-			m.taskCursor = 0
-		}
-	case taskMutationOkMsg:
-		m.mutationInFlight = false
-		m.lastMutationErr = nil
-		m.lastMutationOp = msg.op
-		// Re-fetch the task list so the pane reflects the mutation result.
-		return m, loadTasksCmd(m.tw, m.cfg.TaskwarriorTimeout)
-	case taskMutationFailedMsg:
-		m.mutationInFlight = false
-		m.lastMutationErr = msg.err
-		m.lastMutationOp = msg.op
-		// Do not refresh — leave the existing list intact and surface the error.
+		m.syncWsScroll()
 
 	case launchResultMsg:
 		// A launch/resume Cmd completed.
@@ -1773,7 +2110,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// status display reflect what is now running. Mirrors the create-time
 		// roster write; Title/SessionID refresh on the next discovery snapshot.
 		if msg.launched && msg.harnessKind != "" && msg.dir != "" && m.rosterUpserts != nil {
-			entry := workspace.RosterEntry{
+			entry := settings.RosterEntry{
 				Dir:          msg.dir,
 				Harness:      msg.harnessKind,
 				Provider:     msg.harnessKind,
@@ -1808,7 +2145,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if kind == "" {
 					kind = string(harness.KindOpenCode)
 				}
-				entry := workspace.RosterEntry{
+				entry := settings.RosterEntry{
 					Dir:          msg.canonDest,
 					Harness:      kind,
 					Provider:     kind,
@@ -1852,9 +2189,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Rebuild rows so the new repo appears immediately rather than
 			// waiting for the next snapshot. Reapply the create overlay so an
 			// in-flight fetch's spinner row is not dropped by the rebuild.
-			rows, mode := buildWorkspaceRows(m.snap, m.cfg)
+			rows, mode, root := buildWorkspaceRows(m.snap, m.cfg)
 			m.workspaceRows = injectPendingCreates(rows, m.pendingCreates)
 			m.launchMode = mode
+			m.workspaceRoot = root
 			if n := len(m.workspaceRows); n == 0 {
 				m.sessionCursor = 0
 			} else if m.sessionCursor >= n {
@@ -1878,9 +2216,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Rebuild rows so the repo disappears immediately rather than
 			// waiting for the next snapshot. Reapply the create overlay so an
 			// in-flight fetch's spinner row is not dropped by the rebuild.
-			rows, mode := buildWorkspaceRows(m.snap, m.cfg)
+			rows, mode, root := buildWorkspaceRows(m.snap, m.cfg)
 			m.workspaceRows = injectPendingCreates(rows, m.pendingCreates)
 			m.launchMode = mode
+			m.workspaceRoot = root
 			if n := len(m.workspaceRows); n == 0 {
 				m.sessionCursor = 0
 			} else if m.sessionCursor >= n {
@@ -1893,6 +2232,82 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+	case wsModalScanMsg:
+		// Background repo-membership scan finished. Ignore a stale result if
+		// the modal was closed, or reopened for a different workspace, in
+		// the meantime.
+		if m.prompt != promptWorkspaceModal || msg.workspace != m.wsModalWorkspace {
+			return m, nil
+		}
+		m.wsModalScanning = false
+		if msg.err != nil {
+			m.wsModalErr = fmt.Sprintf("scan failed: %v", msg.err)
+			m.wsModalEntries = nil
+			m.wsModalMatches = nil
+			return m, nil
+		}
+		m.wsModalErr = ""
+		m.wsModalEntries = msg.entries
+		m.wsModalMatches = fuzzyMatchIndices(m.input.Value(), wsModalEntryPaths(m.wsModalEntries))
+		m.wsModalCursor = clampIndex(m.wsModalCursor, len(m.wsModalMatches))
+		return m, nil
+
+	case wsModalActionErrMsg:
+		// A committed attach/detach failed validation or persistence; report
+		// it in wsHint since the modal has already closed by the time this
+		// arrives. membershipChangedMsg (the success case) is handled below,
+		// by workspace_backfill.go's handleMembershipChanged.
+		m.wsHint = fmt.Sprintf("membership change failed: %v", msg.err)
+		return m, nil
+
+	case membershipChangedMsg:
+		// A committed attach/detach (workspace_modal.go) landed. The
+		// membership record itself is already persisted; this handler's only
+		// job is to ask which of the workspace's existing sessions (if any)
+		// should receive the change into their own worktree bundle, never
+		// touching a live agent's directory without that choice.
+		//
+		// Guarded here, not inside handleMembershipChanged
+		// (workspace_backfill.go), because opening promptWorkspaceBackfill
+		// must never clobber a prompt the user already has open — mirroring
+		// the repoScanMsg/wsModalScanMsg prompt guards above. When some other
+		// prompt is active, drop the backfill offer but still refresh the
+		// statuses so the already-persisted membership change shows up. The
+		// user has no way to know the backfill never happened otherwise, so
+		// name the repo and workspace and point at the recovery (re-add the
+		// repo to be offered the backfill again).
+		if m.prompt != promptIdle {
+			m.wsHint = fmt.Sprintf(
+				"%s: existing sessions in %s were not updated — re-add the repo to offer the backfill again",
+				filepath.Base(msg.repo), msg.workspace,
+			)
+			return m.reloadWsStatuses()
+		}
+		return m.handleMembershipChanged(msg)
+
+	case wsBackfillAppliedMsg:
+		// Outcome of backfillMembershipCmd (workspace_backfill.go), dispatched
+		// once the multi-select prompt's choice is applied. A session in
+		// msg.failures could not be backfilled — named alongside the repo in
+		// its own error — but every other chosen session was, so the reload
+		// below always runs to pick up whichever succeeded.
+		if len(msg.failures) > 0 {
+			parts := make([]string, len(msg.failures))
+			for i, f := range msg.failures {
+				parts[i] = fmt.Sprintf("%q: %v", f.session, f.err)
+			}
+			m.wsHint = fmt.Sprintf("backfill %s into %s failed for %s",
+				filepath.Base(msg.repo), msg.workspaceName, strings.Join(parts, "; "))
+		} else {
+			m.wsHint = ""
+		}
+		if m.wsBuilding {
+			m.wsDirty = true
+			return m, nil
+		}
+		m.wsBuilding = true
+		return m, loadWorkspaceStatusCmd(m.store, m.snap)
+
 	case mergeStatusMsg:
 		// Annotate the active delete confirmation, but only if it still targets
 		// the same worktree the probe was launched for (guards against a stale
@@ -1900,6 +2315,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if (m.prompt == promptConfirmDeleteWorktree || m.prompt == promptConfirmDeleteWorktree2) &&
 			msg.path == m.deleteTarget.Worktree {
 			m.deleteMergeInfo = mergeInfoText(msg.state, msg.base)
+		}
+		// Same guard for the workspace/session delete confirm, but against the
+		// snapshotted wsDeleteMembers list (a bundle probes one path per
+		// member, not a single deleteTarget) — a probe whose path is not
+		// among the current members is a stale result from a cancelled or
+		// since-retargeted confirm and is dropped.
+		if wsDeletePromptActive(m.prompt) {
+			for _, mem := range m.wsDeleteMembers {
+				if mem.worktreePath == msg.path {
+					if m.wsDeleteMergeInfo == nil {
+						m.wsDeleteMergeInfo = map[string]string{}
+					}
+					m.wsDeleteMergeInfo[msg.path] = mergeInfoText(msg.state, msg.base)
+					break
+				}
+			}
 		}
 		return m, nil
 
@@ -1918,7 +2349,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// deletion was confirmed; remove it again defensively (idempotent) in
 		// case it was never optimistically removed (e.g. a direct dispatch).
 		delete(m.pendingDeletes, msg.path)
-		var remaining []workspace.Row
+		var remaining []settings.Row
 		for _, row := range m.workspaceRows {
 			if row.Worktree != msg.path {
 				remaining = append(remaining, row)
@@ -1974,7 +2405,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				buildC = buildWorkspaceRowsCmd(m.snap, m.cfg)
 			}
 		}
-		return m, tea.Batch(next, bellC, buildC)
+		var wsC tea.Cmd
+		// Same coalescing, same demo gate, for the Workspaces view's status
+		// load — it also touches the workspaces store and must stay out of
+		// the deterministic --demo capture.
+		if !m.demo {
+			if m.wsBuilding {
+				m.wsDirty = true
+			} else {
+				m.wsBuilding = true
+				wsC = loadWorkspaceStatusCmd(m.store, m.snap)
+			}
+		}
+		return m, tea.Batch(next, bellC, buildC, wsC)
 
 	case workspaceRowsMsg:
 		// Apply both optimistic overlays: drop rows awaiting deletion, and
@@ -1983,6 +2426,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		rows := filterPendingDeletes(msg.rows, m.pendingDeletes)
 		m.workspaceRows = injectPendingCreates(rows, m.pendingCreates)
 		m.launchMode = msg.launchMode
+		m.workspaceRoot = msg.root
 		// Clamp cursor so it never points past the end of the new row list.
 		if n := len(m.workspaceRows); n == 0 {
 			m.sessionCursor = 0
@@ -1997,6 +2441,94 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case wsStatusMsg:
+		// msg.statuses is always freshly merged (never carries a placeholder),
+		// so re-inject any in-flight session creates before storing it —
+		// otherwise a snapshot-driven reload while 'n' is assembling would drop
+		// the spinner row until assembleWorkspaceSessionCmd completes.
+		m.wsStatuses = injectPendingWsSessions(msg.statuses, m.wsPendingSessions, m.spinnerFrame)
+		m.clampWsCursor()
+		m.wsBuilding = false
+		if m.wsDirty {
+			m.wsDirty = false
+			m.wsBuilding = true
+			return m, loadWorkspaceStatusCmd(m.store, m.snap)
+		}
+		return m, nil
+
+	case wsWorkspaceCreatedMsg:
+		// Outcome of createWorkspaceCmd ('N'). On success, refresh from the
+		// store so the new workspace appears without waiting for the next
+		// snapshot, mirroring repoAddMsg's immediate rebuild for the Sessions
+		// pane; coalesce with an in-flight load exactly as snapshotMsg does.
+		if msg.err != nil {
+			m.wsHint = fmt.Sprintf("create workspace %q failed: %v", msg.name, msg.err)
+			return m, nil
+		}
+		m.wsHint = ""
+		if m.wsBuilding {
+			m.wsDirty = true
+			return m, nil
+		}
+		m.wsBuilding = true
+		return m, loadWorkspaceStatusCmd(m.store, m.snap)
+
+	case wsSessionAssembledMsg:
+		// Outcome of assembleWorkspaceSessionCmd ('n' in the Workspaces view).
+		// Clear the optimistic spinner row first regardless of outcome: on
+		// success the real session arrives via the reload dispatched below; on
+		// failure nothing was persisted (assembleWorkspaceSessionCmd rolls back
+		// its own partial work).
+		m.clearPendingWsSession(msg.workspaceName, msg.sessionName)
+		if msg.err != nil {
+			m.wsHint = fmt.Sprintf("create session %q failed: %v", msg.sessionName, msg.err)
+			return m, nil
+		}
+		m.wsHint = ""
+		if m.wsBuilding {
+			m.wsDirty = true
+			return m, nil
+		}
+		m.wsBuilding = true
+		return m, loadWorkspaceStatusCmd(m.store, m.snap)
+
+	case wsSessionDeletedMsg:
+		// Outcome of deleteWsSessionCmd ('D', both confirms, on a session
+		// row). On success, refresh from the store so the removed session
+		// disappears without waiting for the next snapshot; on failure
+		// nothing was dropped (deleteWsSessionCmd only calls RemoveSession
+		// once TeardownSession reports no per-repo failures), so the row
+		// stays exactly as it was and the error is surfaced instead.
+		if msg.err != nil {
+			m.wsHint = fmt.Sprintf("delete session %q failed: %v", msg.sessionName, msg.err)
+			return m, nil
+		}
+		m.wsHint = ""
+		if m.wsBuilding {
+			m.wsDirty = true
+			return m, nil
+		}
+		m.wsBuilding = true
+		return m, loadWorkspaceStatusCmd(m.store, m.snap)
+
+	case wsWorkspaceDeletedMsg:
+		// Outcome of deleteWorkspaceCmd ('D', both confirms, on a workspace
+		// header/hint row). Mirrors wsSessionDeletedMsg: refresh on success,
+		// surface the error on failure (the workspace and every session —
+		// torn down or not — are left in the store when any session's
+		// teardown failed).
+		if msg.err != nil {
+			m.wsHint = fmt.Sprintf("delete workspace %q failed: %v", msg.workspaceName, msg.err)
+			return m, nil
+		}
+		m.wsHint = ""
+		if m.wsBuilding {
+			m.wsDirty = true
+			return m, nil
+		}
+		m.wsBuilding = true
+		return m, loadWorkspaceStatusCmd(m.store, m.snap)
+
 	case tickMsg:
 		// Re-arm the ticker and record the current time so View() can render
 		// fresh relative timestamps without calling time.Now() on every frame.
@@ -2004,15 +2536,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickCmd()
 
 	case spinnerTickMsg:
-		// Advance the spinner shared by pending creates and in-flight pulls. Stop
-		// re-arming once neither remains so the ticker costs nothing when idle;
-		// reset the frame so the next operation starts from the first glyph.
-		if len(m.pendingCreates) == 0 && len(m.pulling) == 0 {
+		// Advance the spinner shared by pending creates, in-flight pulls, and
+		// pending workspace-session creates. Stop re-arming once none remain
+		// so the ticker costs nothing when idle; reset the frame so the next
+		// operation starts from the first glyph.
+		if len(m.pendingCreates) == 0 && len(m.pulling) == 0 && len(m.wsPendingSessions) == 0 {
 			m.spinnerActive = false
 			m.spinnerFrame = 0
 			return m, nil
 		}
 		m.spinnerFrame++
+		if len(m.wsPendingSessions) > 0 {
+			// Unlike the Sessions pane's formatCreatingRow (a model method
+			// that reads m.spinnerFrame at render time), formatWsSessionRow
+			// (workspace_view.go) is a pure function of workspace.SessionStatus
+			// alone, so the animated glyph must be baked into the placeholder's
+			// data on every tick rather than read live at render time.
+			m.wsStatuses = injectPendingWsSessions(stripPendingWsSessions(m.wsStatuses), m.wsPendingSessions, m.spinnerFrame)
+		}
 		return m, spinnerTickCmd()
 	}
 	return m, nil
@@ -2073,52 +2614,30 @@ func (m *model) closeSessionPalette() {
 	m.input.Blur()
 	m.input.SetValue("")
 	m.sessionPaletteRows = nil
+	m.sessionPaletteTargets = nil
 	m.sessionPaletteLabels = nil
 	m.sessionPaletteMatches = nil
 	m.sessionPaletteCursor = 0
 }
 
-// recordSessionSwitch marks a worktree as the most recently jumped to or
-// resumed, so the ctrl+P switcher can order rows most-recently-used first.
-// Rows with no worktree path (nothing to key on) are ignored.
-func (m *model) recordSessionSwitch(row workspace.Row) {
-	if row.Worktree == "" {
+// recordSessionSwitch marks dir (a launchTarget.dir — a worktree path or a
+// workspace session directory) as the most recently jumped to or resumed, so
+// the ctrl+P switcher can order candidates most-recently-used first. An empty
+// dir (nothing to key on) is ignored.
+func (m *model) recordSessionSwitch(dir string) {
+	if dir == "" {
 		return
 	}
 	if m.switchOrder == nil {
 		m.switchOrder = make(map[string]int)
 	}
 	m.switchSeq++
-	m.switchOrder[row.Worktree] = m.switchSeq
+	m.switchOrder[dir] = m.switchSeq
 }
 
-// orderedSessionRows returns a copy of workspaceRows ordered most-recently
-// switched-to first (per switchOrder), preserving the existing alphabetical
-// order for worktrees never jumped to this run. startOnPrevious is true when
-// both of the top two rows have a recorded switch — i.e. a genuine "previous"
-// session exists — so the palette cursor should start on row 1.
-func (m model) orderedSessionRows() (rows []workspace.Row, startOnPrevious bool) {
-	rows = append([]workspace.Row(nil), m.workspaceRows...)
-	sort.SliceStable(rows, func(i, j int) bool {
-		si, oi := m.switchOrder[rows[i].Worktree]
-		sj, oj := m.switchOrder[rows[j].Worktree]
-		if oi != oj {
-			return oi // switched rows sort ahead of never-switched ones
-		}
-		if oi && oj {
-			return si > sj // more recently switched first
-		}
-		return false // both unswitched: stable sort keeps alphabetical order
-	})
-	startOnPrevious = len(rows) >= 2 &&
-		m.hasSwitchRecord(rows[0]) && m.hasSwitchRecord(rows[1])
-	return rows, startOnPrevious
-}
-
-// hasSwitchRecord reports whether the row's worktree has been jumped to or
-// resumed this run.
-func (m model) hasSwitchRecord(row workspace.Row) bool {
-	_, ok := m.switchOrder[row.Worktree]
+// hasSwitchRecord reports whether dir has been jumped to or resumed this run.
+func (m model) hasSwitchRecord(dir string) bool {
+	_, ok := m.switchOrder[dir]
 	return ok
 }
 
@@ -2126,7 +2645,7 @@ func (m model) hasSwitchRecord(row workspace.Row) bool {
 // session switcher: the repo's base name and the branch, space-separated. The
 // repo path falls back to the worktree path when Repo is unset, matching the
 // fallback used by the 'n'/'F'/'R' handlers.
-func sessionPaletteLabel(row workspace.Row) string {
+func sessionPaletteLabel(row settings.Row) string {
 	repo := row.Repo
 	if repo == "" {
 		repo = row.Worktree
@@ -2138,13 +2657,91 @@ func sessionPaletteLabel(row workspace.Row) string {
 	return label
 }
 
+// sessionCandidate is one entry the ctrl+P switcher can jump to: row is the
+// render-only settings.Row shim renderPaletteRow (render.go) needs for its
+// status glyph and branch styling; target is the neutral launch identity
+// dispatched on enter; label is the fuzzy-match text.
+type sessionCandidate struct {
+	row    settings.Row
+	target launchTarget
+	label  string
+}
+
+// sessionSwitchCandidates collects every target the ctrl+P switcher offers:
+// every Sessions-pane worktree row (m.workspaceRows) plus every assembled
+// workspace session across m.wsStatuses. A workspace session still being
+// assembled has Session.Dir == "" (the same pending-create discriminator
+// stripPendingWsSessions documents, workspace_cmd.go) and is excluded,
+// mirroring how a Sessions-pane creating row has no equivalent exclusion
+// needed here (it is still keyed on a real, if not-yet-existing, worktree
+// path).
+func (m model) sessionSwitchCandidates() []sessionCandidate {
+	out := make([]sessionCandidate, 0, len(m.workspaceRows))
+	for _, row := range m.workspaceRows {
+		out = append(out, sessionCandidate{
+			row:    row,
+			target: rowLaunchTarget(row),
+			label:  sessionPaletteLabel(row),
+		})
+	}
+	for _, ws := range m.wsStatuses {
+		for _, sess := range ws.Sessions {
+			if sess.Session.Dir == "" {
+				continue
+			}
+			out = append(out, sessionCandidate{
+				row: settings.Row{
+					Worktree:  sess.Session.Dir,
+					Branch:    sess.Session.Branch,
+					Harness:   sess.Session.Harness,
+					Provider:  sess.Provider,
+					SessionID: sess.SessionID,
+					State:     sess.State,
+					Attention: sess.Attention,
+				},
+				target: wsSessionLaunchTarget(ws.Workspace.Name, sess),
+				label:  ws.Workspace.Name + "/" + sess.Session.Name,
+			})
+		}
+	}
+	return out
+}
+
+// orderedSessionCandidates returns sessionSwitchCandidates ordered
+// most-recently switched-to first (per switchOrder, keyed by each
+// candidate's target directory), preserving the existing alphabetical order
+// for candidates never switched to this run. startOnPrevious is true when
+// both of the top two candidates have a recorded switch — i.e. a genuine
+// "previous" session exists — so the palette cursor should start on row 1.
+func (m model) orderedSessionCandidates() (candidates []sessionCandidate, startOnPrevious bool) {
+	candidates = m.sessionSwitchCandidates()
+	sort.SliceStable(candidates, func(i, j int) bool {
+		si, oi := m.switchOrder[candidates[i].target.dir]
+		sj, oj := m.switchOrder[candidates[j].target.dir]
+		if oi != oj {
+			return oi // switched candidates sort ahead of never-switched ones
+		}
+		if oi && oj {
+			return si > sj // more recently switched first
+		}
+		return false // both unswitched: stable sort keeps alphabetical order
+	})
+	startOnPrevious = len(candidates) >= 2 &&
+		m.hasSwitchRecord(candidates[0].target.dir) && m.hasSwitchRecord(candidates[1].target.dir)
+	return candidates, startOnPrevious
+}
+
 // renderHarnessChooser renders the harness-selection list shown in the sessions
 // pane while prompt == promptChooseHarness. The user moves the cursor with
 // up/down and confirms with enter; esc cancels the whole new-worktree flow.
 func (m model) renderHarnessChooser(width, height int) string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Choose harness") + "\n")
-	b.WriteString(dimStyle.Render(fmt.Sprintf("new worktree: %s / %s", filepath.Base(m.newWorktreeRepo), m.newWorktreeBranch)) + "\n")
+	if m.wsCreateTarget != "" {
+		b.WriteString(dimStyle.Render(fmt.Sprintf("new session: %s / %s", m.wsCreateTarget, m.wsCreateSessionName)) + "\n")
+	} else {
+		b.WriteString(dimStyle.Render(fmt.Sprintf("new worktree: %s / %s", filepath.Base(m.newWorktreeRepo), m.newWorktreeBranch)) + "\n")
+	}
 
 	if len(m.harnessChooserKinds) == 0 {
 		b.WriteString(dimStyle.Render("(no harnesses registered)"))
@@ -2173,7 +2770,13 @@ func (m model) View() string {
 	if cfg == nil {
 		cfg = config.Default()
 	}
-	rows, recentByInstance := visibleSessions(m.snap.Sessions, m.recentCollapsed, m.snap.UpdatedAt, cfg.InactiveHideAfter)
+	// Exclude workspace-owned session directories before visibleSessions runs:
+	// they already have their own row in workspaceRows (settings.Merge applies
+	// the same exclusion), so the live-only fallback and the header's
+	// live/recent counts must agree rather than double-counting them. This is
+	// the one call site that filters — visibleSessions itself is untouched.
+	sessions := excludeWorkspaceOwnedSessions(m.snap.Sessions, m.workspaceRoot)
+	rows, recentByInstance := visibleSessions(sessions, m.recentCollapsed, m.snap.UpdatedAt, cfg.InactiveHideAfter)
 	paneW := m.width - 2
 	if paneW < 30 {
 		paneW = 30
@@ -2190,22 +2793,11 @@ func (m model) View() string {
 
 	recentMins := int(cfg.RecentWindow.Minutes())
 
-	var headerHint string
-	tasksActive := m.twAvail && m.tasksActive
-	viewFocus := m.focus
-	if !tasksActive {
-		viewFocus = focusSessions
-	}
-
-	if viewFocus == focusSessions {
-		headerHint = fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  ? help",
-			live, recent, recentMins, m.snap.UpdatedAt.Format("15:04:05"))
-	} else {
-		headerHint = fmt.Sprintf("  %d pending  ·  ? help", len(m.tasks))
-	}
+	headerHint := fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  ? help",
+		live, recent, recentMins, m.snap.UpdatedAt.Format("15:04:05"))
 	header := titleStyle.Render("cogitator") + dimStyle.Render(headerHint)
 
-	legend := legendLine(m.width, tasksActive)
+	legend := legendLine()
 	// The unreachable footer is gated behind --debug because transient
 	// "instance unreachable" warnings (laptop sleep, network blips,
 	// short-lived opencode processes) are noisy during normal operation
@@ -2214,18 +2806,11 @@ func (m model) View() string {
 	if m.debug {
 		footer = unreachableFooter(m.snap.UnreachableInstances)
 	}
-	mutationFooter := taskwarriorErrorFooter(m.lastMutationOp, m.lastMutationErr)
 
-	_, tasksOuterH, sessionsInnerH, tasksInnerH := m.paneHeights()
+	_, sessionsInnerH := m.paneHeights()
 
-	// Choose border style based on which pane is focused.
-	sessionsStyle := paneStyle
-	tasksStyle := paneStyle
-	if viewFocus == focusSessions {
-		sessionsStyle = paneFocusedStyle
-	} else {
-		tasksStyle = paneFocusedStyle
-	}
+	// The sessions pane is the only pane, so it always renders focused.
+	sessionsStyle := paneFocusedStyle
 
 	// When repos are configured, render the merged worktree view. Otherwise
 	// fall back to the live-only path so --status/--demo and unconfigured
@@ -2235,44 +2820,73 @@ func (m model) View() string {
 	case m.prompt == promptAddRepo:
 		sessionContent = m.renderRepoFinder(paneW, sessionsInnerH)
 	case m.prompt == promptSwitchSession:
-		// Render the worktree list as the backdrop, then composite the floating
-		// switcher box centred over it so the surrounding sessions stay visible.
+		// Render whichever view (Sessions or Workspaces) is active as the
+		// backdrop, then composite the floating switcher box centred over it
+		// so the surrounding view stays visible.
 		now := m.tickNow
 		if now.IsZero() {
 			now = time.Now()
 		}
-		backdrop := m.renderWorkspaceRowsViewport(paneW, sessionsInnerH, m.workspaceRows, m.sessionCursor, now)
+		var backdrop string
+		if m.view == viewWorkspaces {
+			backdrop = m.renderWorkspacesView(paneW, sessionsInnerH)
+		} else {
+			backdrop = m.renderWorkspaceRowsViewport(paneW, sessionsInnerH, m.workspaceRows, m.sessionCursor, now)
+		}
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderSessionPalette(paneW, sessionsInnerH))
 	case m.prompt == promptHelp:
-		// Render the normal session list as the backdrop, then composite the
+		// Render whichever view is active as the backdrop, then composite the
 		// floating help box centred over it so the pane stays visible behind.
 		now := m.tickNow
 		if now.IsZero() {
 			now = time.Now()
 		}
 		var backdrop string
-		if len(m.workspaceRows) > 0 {
+		switch {
+		case m.view == viewWorkspaces:
+			backdrop = m.renderWorkspacesView(paneW, sessionsInnerH)
+		case len(m.workspaceRows) > 0:
 			backdrop = m.renderWorkspaceRowsViewport(paneW, sessionsInnerH, m.workspaceRows, m.sessionCursor, now)
-		} else {
+		default:
 			backdrop = m.renderAllSessions(paneW, rows, recentByInstance)
 		}
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, renderHelp(paneW))
 	case m.prompt == promptSettings:
-		// Render the session list as the backdrop, then composite the settings
-		// modal centred over it so the pane stays visible behind.
+		// Render whichever view is active as the backdrop, then composite the
+		// settings modal centred over it so the pane stays visible behind.
 		now := m.tickNow
 		if now.IsZero() {
 			now = time.Now()
 		}
 		var backdrop string
-		if len(m.workspaceRows) > 0 {
+		switch {
+		case m.view == viewWorkspaces:
+			backdrop = m.renderWorkspacesView(paneW, sessionsInnerH)
+		case len(m.workspaceRows) > 0:
 			backdrop = m.renderWorkspaceRowsViewport(paneW, sessionsInnerH, m.workspaceRows, m.sessionCursor, now)
-		} else {
+		default:
 			backdrop = m.renderAllSessions(paneW, rows, recentByInstance)
 		}
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderSettings(paneW))
 	case m.prompt == promptChooseHarness:
 		sessionContent = m.renderHarnessChooser(paneW, sessionsInnerH)
+	case m.prompt == promptNewWorkspace:
+		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsNamePrompt("New workspace", "workspace name: "))
+	case m.prompt == promptNewWorkspaceSession:
+		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsNamePrompt("New session", "session name: "))
+	case wsDeletePromptActive(m.prompt):
+		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsDeleteConfirm())
+	case m.prompt == promptWorkspaceModal:
+		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWorkspaceModal(paneW, sessionsInnerH))
+	case m.prompt == promptWorkspaceBackfill:
+		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWorkspaceBackfillPrompt())
+	case m.view == viewWorkspaces:
+		sessionContent = m.renderWorkspacesView(paneW, sessionsInnerH)
 	case len(m.workspaceRows) > 0:
 		now := m.tickNow
 		if now.IsZero() {
@@ -2284,73 +2898,62 @@ func (m model) View() string {
 	}
 	sessionsPane := sessionsStyle.Width(paneW).Height(sessionsInnerH).Render(sessionContent)
 
-	parts := []string{header, sessionsPane}
-	if tasksActive {
-		tasksContent := m.renderTasksPane(tasksOuterH, paneW)
-		tasksPane := tasksStyle.Width(paneW).Height(tasksInnerH).Render(tasksContent)
-		parts = append(parts, tasksPane)
+	parts := []string{header, sessionsPane, legend}
+	// The Workspaces view's own renderer (workspace_view.go) has no pinned
+	// footer line to grow into (unlike renderWorkspaceRowsViewport's tmuxHint),
+	// so wsHint is appended here instead — below the pane, same as the debug
+	// footer — whenever the Workspaces view is active and has something to say.
+	if m.view == viewWorkspaces && m.wsHint != "" {
+		parts = append(parts, wtHintStyle.Render(m.wsHint))
 	}
-	parts = append(parts, legend)
 	if footer != "" {
 		parts = append(parts, footer)
-	}
-	if mutationFooter != "" {
-		parts = append(parts, mutationFooter)
 	}
 	return strings.Join(parts, "\n")
 }
 
-// newModel constructs the TUI model. tw is injected so demo / test paths can
-// substitute a synthetic ClientAPI without shelling out to the `task` binary;
-// production callers pass taskwarrior.NewClient(). If tw is nil, the Tasks
-// pane is suppressed (twAvail=false). debug enables diagnostic UI elements
+// newModel constructs the TUI model. debug enables diagnostic UI elements
 // such as the unreachable-instance footer.
-func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debug bool, tw ClientAPI) model {
+func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debug bool) model {
 	if cfg == nil {
 		cfg = config.Default()
 	}
 
-	twAvail := tw != nil && tw.Available()
-
 	ti := textinput.New()
-	ti.Placeholder = "description project:foo +tag priority:H due:tomorrow"
-	// Override AcceptSuggestion so Tab is never consumed by the suggestion
-	// mechanism. Tab is routed by the Update loop to switch focus between
-	// panes; disabling the binding here prevents the textinput from
-	// intercepting it when the input bar is active.
+	// Override AcceptSuggestion so it is never consumed by the suggestion
+	// mechanism, since the sessions pane's various prompts set their own
+	// placeholder and don't want it clobbered.
 	ti.KeyMap.AcceptSuggestion = key.NewBinding(key.WithDisabled())
 	// Width is intentionally left at zero here; it is recomputed in Update
 	// on the first tea.WindowSizeMsg so it tracks the actual terminal width.
 
 	return model{
-		snaps:           snaps,
-		recentCollapsed: true,
-		bellEnabled:     bellEnabled,
-		debug:           debug,
-		bellSent:        map[rowKey]state.Attention{},
-		pendingDeletes:  map[string]workspace.Row{},
-		pendingCreates:  map[string]pendingCreate{},
-		pulling:         map[string]bool{},
-		cfg:             cfg,
+		snaps:             snaps,
+		recentCollapsed:   true,
+		bellEnabled:       bellEnabled,
+		debug:             debug,
+		bellSent:          map[rowKey]state.Attention{},
+		pendingDeletes:    map[string]settings.Row{},
+		pendingCreates:    map[string]pendingCreate{},
+		wsPendingSessions: map[string]pendingWsSession{},
+		pulling:           map[string]bool{},
+		cfg:               cfg,
+
+		// Init always attempts an initial Workspaces-view load (skipped only
+		// under --demo). Starting wsBuilding true means a snapshot arriving
+		// before that load completes coalesces into wsDirty instead of
+		// dispatching a second, concurrent load — see loadWorkspaceStatusCmd.
+		wsBuilding: true,
 
 		// Inject real implementations for tmux, git, and harness operations.
-		// Tests can override these fields with fakes after construction.
+		// Tests can override these fields with fakes after construction. store
+		// is wired separately by RunTUI (mirrors viewMarker/rosterUpserts).
 		tmux:   realTmuxOps{},
 		gitOp:  realGitOps{},
 		harnOp: realHarnessOps{},
 
-		tw:               tw,
-		twAvail:          twAvail,
-		tasksActive:      twAvail,
-		tasks:            nil,
-		tasksLoaded:      false,
-		taskCursor:       0,
-		focus:            focusSessions,
-		prompt:           promptIdle,
-		input:            ti,
-		lastMutationErr:  nil,
-		lastMutationOp:   "",
-		mutationInFlight: false,
+		prompt: promptIdle,
+		input:  ti,
 	}
 }
 
@@ -2358,7 +2961,7 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 // current position: dir > 0 jumps to the first row of the next repo group,
 // dir < 0 to the first row of the previous group (or the current group's first
 // row when the cursor sits mid-group, matching vim's section motion). Rows are
-// contiguous by Repo (workspace.Merge groups them), so a group begins wherever
+// contiguous by Repo (settings.Merge groups them), so a group begins wherever
 // Repo differs from the previous row. Returns the cursor unchanged when there
 // is no group in that direction.
 func (m model) repoBoundary(dir int) int {
@@ -2396,13 +2999,48 @@ func (m model) repoBoundary(dir int) int {
 // mutations to the model.
 func buildWorkspaceRowsCmd(snap state.Snapshot, cfg *config.Config) tea.Cmd {
 	return func() tea.Msg {
-		rows, mode := buildWorkspaceRows(snap, cfg)
-		return workspaceRowsMsg{rows: rows, launchMode: mode}
+		rows, mode, root := buildWorkspaceRows(snap, cfg)
+		return workspaceRowsMsg{rows: rows, launchMode: mode, root: root}
+	}
+}
+
+// loadWorkspaceStatusCmd returns a tea.Cmd that loads the workspace set from
+// store, joins it to the roster and the live session snapshot via
+// workspace.MergeStatus, and delivers the result as a wsStatusMsg. snap is
+// captured by value at dispatch time, matching buildWorkspaceRowsCmd. store
+// may be nil (no workspace store wired, or --demo/tests) — the load is
+// skipped and an empty result is returned rather than dispatching to a nil
+// interface.
+func loadWorkspaceStatusCmd(store storeOps, snap state.Snapshot) tea.Cmd {
+	return func() tea.Msg {
+		if store == nil {
+			return wsStatusMsg{}
+		}
+		workspaces, err := store.LoadWorkspaces()
+		if err != nil {
+			// Non-fatal: render with an empty workspace set rather than
+			// failing the whole load.
+			workspaces = nil
+		}
+		roster, err := settings.Load()
+		if err != nil {
+			roster = map[string]settings.RosterEntry{}
+		}
+		// Pre-filter to top-level sessions only, matching buildWorkspaceRows'
+		// contract for settings.Merge (MergeStatus documents the same
+		// requirement).
+		var liveTopLevel []state.SessionView
+		for _, sv := range snap.Sessions {
+			if !shouldHideSubagent(sv) && sv.ParentID == "" {
+				liveTopLevel = append(liveTopLevel, sv)
+			}
+		}
+		return wsStatusMsg{statuses: workspace.MergeStatus(workspaces, roster, liveTopLevel)}
 	}
 }
 
 // buildWorkspaceRows loads workspace config, roster, git worktrees, and tmux
-// window dirs, then calls workspace.Merge to produce the merged row list. It
+// window dirs, then calls settings.Merge to produce the merged row list. It
 // is called on every snapshot update so the list stays in sync with live
 // session changes.
 //
@@ -2411,19 +3049,29 @@ func buildWorkspaceRowsCmd(snap state.Snapshot, cfg *config.Config) tea.Cmd {
 // fallback: unknown rows render as stopped instead of unknown).
 //
 // It also returns the resolved tmux launch mode from workspace config so the
-// caller can keep its launch behaviour in sync with config edits.
+// caller can keep its launch behaviour in sync with config edits, and the
+// resolved workspace root so the caller can exclude workspace-owned session
+// directories from the live-only fallback path.
 //
 // Returns nil rows when no repos are configured (zero-value safe for callers);
-// the launch mode is still resolved (defaulting to ModeWindow).
-func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) ([]workspace.Row, tmuxctl.LaunchMode) {
-	wsCfg, err := workspace.LoadConfig()
+// the launch mode and workspace root are still resolved in that case —
+// the fallback view (which renders exactly when repos are empty) needs the
+// root to exclude workspace-owned sessions from its own listing.
+func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) ([]settings.Row, tmuxctl.LaunchMode, string) {
+	wsCfg, err := settings.LoadConfig()
 	if err != nil {
-		return nil, tmuxctl.ModeWindow
+		return nil, tmuxctl.ModeWindow, ""
 	}
 	mode := launchModeFor(wsCfg.LaunchMode)
+	root, err := settings.ResolveWorkspaceRoot(wsCfg)
+	if err != nil {
+		// Unresolvable root (e.g. nested inside a git working tree) — disable
+		// the exclusion rather than failing the whole row build.
+		root = ""
+	}
 	if len(wsCfg.Repos) == 0 {
 		// No repos configured — live-only path.
-		return nil, mode
+		return nil, mode, root
 	}
 
 	// Display repos alphabetically by name. Sort the in-memory copy only;
@@ -2449,14 +3097,14 @@ func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) ([]workspace.Ro
 		worktreesByRepo[repo.Path] = wts
 	}
 
-	roster, err := workspace.Load()
+	roster, err := settings.Load()
 	if err != nil {
 		// Non-fatal: proceed with an empty roster.
-		roster = map[string]workspace.RosterEntry{}
+		roster = map[string]settings.RosterEntry{}
 	}
 
 	// Pre-filter to top-level sessions only (shouldHideSubagent is private to
-	// the ui package; workspace.Merge trusts the caller to do this filtering).
+	// the ui package; settings.Merge trusts the caller to do this filtering).
 	var liveTopLevel []state.SessionView
 	for _, sv := range snap.Sessions {
 		if !shouldHideSubagent(sv) && sv.ParentID == "" {
@@ -2474,7 +3122,102 @@ func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) ([]workspace.Ro
 		}
 	}
 
-	return workspace.Merge(wsCfg.Repos, worktreesByRepo, roster, liveTopLevel, tmuxDirs), mode
+	return settings.Merge(wsCfg.Repos, worktreesByRepo, roster, liveTopLevel, tmuxDirs, root), mode, root
+}
+
+// excludeWorkspaceOwnedSessions drops sessions whose Directory lies at or
+// below workspaceRoot from sessions. It is View's counterpart to
+// settings.Merge's own exclusion (settings.filterWorkspaceOwnedWorktrees):
+// without it, a workspace session's per-repo worktree would render twice —
+// once as its workspaceRows entry, once via the live-only fallback path and
+// the header's live/recent counts, both of which are built from this slice.
+//
+// An empty workspaceRoot is a no-op (returns sessions unchanged), matching
+// settings.PathUnderRoot's own empty-root behaviour, so --demo/--status and
+// any install that has not yet resolved a root render exactly as before this
+// exclusion existed. processBellTransitions deliberately runs on the raw,
+// unfiltered m.snap.Sessions rather than through this function — a workspace
+// session that needs attention should still ring the bell.
+func excludeWorkspaceOwnedSessions(sessions []state.SessionView, workspaceRoot string) []state.SessionView {
+	if workspaceRoot == "" || len(sessions) == 0 {
+		return sessions
+	}
+	root, err := pathnorm.Canonical(workspaceRoot)
+	if err != nil {
+		root = workspaceRoot
+	}
+	out := make([]state.SessionView, 0, len(sessions))
+	for _, sv := range sessions {
+		if sv.Directory != "" {
+			dir, err := pathnorm.Canonical(sv.Directory)
+			if err != nil {
+				dir = sv.Directory
+			}
+			if settings.PathUnderRoot(root, dir) {
+				continue
+			}
+		}
+		out = append(out, sv)
+	}
+	return out
+}
+
+// wsSessionUnderCursor returns the WorkspaceStatus and SessionStatus the
+// Workspaces-view cursor currently targets, and false when the cursor sits on
+// a workspace header line, an empty-workspace hint line, or there are no
+// workspaces at all. It mirrors wsUnderCursor (workspace_cmd.go) but resolves
+// all the way to the session row, which that helper does not need for its own
+// (workspace-only) callers.
+func (m model) wsSessionUnderCursor() (workspace.WorkspaceStatus, workspace.SessionStatus, bool) {
+	for _, dl := range wsDisplayLines(m.wsStatuses) {
+		if dl.entry != m.wsCursor {
+			continue
+		}
+		if dl.kind != wsLineSession {
+			return workspace.WorkspaceStatus{}, workspace.SessionStatus{}, false
+		}
+		ws := m.wsStatuses[dl.wsIndex]
+		return ws, ws.Sessions[dl.sessIndex], true
+	}
+	return workspace.WorkspaceStatus{}, workspace.SessionStatus{}, false
+}
+
+// updateWorkspaceLaunch handles 'enter' on a workspace session row in the
+// Workspaces view: it launches (or jumps/resumes) exactly like the Sessions
+// pane's own 'enter' (same tmux guards, same StateMissing/StateCreating
+// guards), but keyed on the workspace session's own directory and named
+// "<workspace>/<session>" via wsSessionLaunchTarget. Defined here rather than
+// in workspace_view.go/workspace_cmd.go, both untouched by this feature, per
+// the phase convention that every workspace mode routes its key handling
+// through a dedicated method. Returns handled=false for any other key, or
+// when the cursor is not on a session row, so the caller falls through to
+// updateWorkspaceLifecycle and then updateWorkspaceView.
+func (m model) updateWorkspaceLaunch(msg tea.KeyMsg) (model, tea.Cmd, bool) {
+	if msg.String() != "enter" {
+		return m, nil, false
+	}
+	ws, sess, ok := m.wsSessionUnderCursor()
+	if !ok {
+		return m, nil, false
+	}
+
+	tmuxAvail := m.tmux != nil && m.tmux.Available()
+	if !tmuxAvail {
+		m.wsHint = "tmux not available — start cogitator inside a tmux session to use jump/resume"
+		return m, nil, true
+	}
+	if sess.State == settings.StateMissing {
+		m.wsHint = "session directory is missing — cannot resume"
+		return m, nil, true
+	}
+	if sess.State == settings.StateCreating {
+		m.wsHint = "session is still being created…"
+		return m, nil, true
+	}
+
+	target := wsSessionLaunchTarget(ws.Workspace.Name, sess)
+	m.recordSessionSwitch(target.dir)
+	return m, launchCmd(m.tmux, target, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp)), true
 }
 
 // resolvedDefaultHarness returns the configured default harness kind when one
@@ -2482,7 +3225,7 @@ func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) ([]workspace.Ro
 // unregistered default (e.g. removed or renamed) resolves to "", so callers
 // fall back to the per-launch "always ask" behaviour.
 func resolvedDefaultHarness(harnOp harnessOps) string {
-	wsCfg, err := workspace.LoadConfig()
+	wsCfg, err := settings.LoadConfig()
 	if err != nil || wsCfg.DefaultHarness == "" || harnOp == nil {
 		return ""
 	}
@@ -2504,7 +3247,7 @@ func (m model) startNewWorktree(repoPath, branch, harnessKind string, fromRemote
 	m.harnessChooserKinds = nil
 	m.harnessChooserCursor = 0
 	launchMode := m.launchMode
-	if wsCfg, err := workspace.LoadConfig(); err == nil {
+	if wsCfg, err := settings.LoadConfig(); err == nil {
 		launchMode = launchModeFor(wsCfg.LaunchMode)
 	}
 	// Optimistic spinner row for the duration of the create/fetch.
@@ -2535,17 +3278,17 @@ func settingsHarnessOptions(harnOp harnessOps) []string {
 
 // normalizeSettingsLaunchMode maps the unset launch mode to its effective
 // default (session) so the modal always displays a concrete value.
-func normalizeSettingsLaunchMode(mode workspace.LaunchMode) workspace.LaunchMode {
-	if mode == workspace.LaunchWindow {
-		return workspace.LaunchWindow
+func normalizeSettingsLaunchMode(mode settings.LaunchMode) settings.LaunchMode {
+	if mode == settings.LaunchWindow {
+		return settings.LaunchWindow
 	}
-	return workspace.LaunchSession
+	return settings.LaunchSession
 }
 
 // openSettings snapshots the persisted config into the modal's working copy and
 // opens the settings overlay.
 func (m *model) openSettings() {
-	wsCfg, _ := workspace.LoadConfig()
+	wsCfg, _ := settings.LoadConfig()
 	m.settingsDefaultHarness = wsCfg.DefaultHarness
 	m.settingsLaunchMode = normalizeSettingsLaunchMode(wsCfg.LaunchMode)
 	m.settingsCursor = 0
@@ -2580,15 +3323,15 @@ func (m *model) cycleSetting(delta int) {
 		opts := settingsHarnessOptions(m.harnOp)
 		i := indexOfString(opts, m.settingsDefaultHarness)
 		m.settingsDefaultHarness = opts[wrapIndex(i+delta, len(opts))]
-		m.recordSettingsErr(workspace.SetDefaultHarness(m.settingsDefaultHarness))
+		m.recordSettingsErr(settings.SetDefaultHarness(m.settingsDefaultHarness))
 	case 1:
 		// Only two launch modes, so ±1 always toggles.
-		if m.settingsLaunchMode == workspace.LaunchWindow {
-			m.settingsLaunchMode = workspace.LaunchSession
+		if m.settingsLaunchMode == settings.LaunchWindow {
+			m.settingsLaunchMode = settings.LaunchSession
 		} else {
-			m.settingsLaunchMode = workspace.LaunchWindow
+			m.settingsLaunchMode = settings.LaunchWindow
 		}
-		if err := workspace.SetLaunchMode(m.settingsLaunchMode); err != nil {
+		if err := settings.SetLaunchMode(m.settingsLaunchMode); err != nil {
 			m.recordSettingsErr(err)
 		} else {
 			m.recordSettingsErr(nil)

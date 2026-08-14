@@ -22,8 +22,9 @@ cogitator is a TUI dashboard for your harnesses. It gives you a live view of ses
 
 - **See status at a glance**: discovers running instances, flagging which sessions need you (permission requests, pending questions, errors).
 - **Create git worktrees**: spin up a new worktree for a branch, or fetch, pull, and delete existing ones, straight from the roster.
+- **Bundle multi-repo workspaces**: group several repos into a workspace and create a session that checks out one new branch across every member repo at once; `Tab` swaps between the Sessions and Workspaces panes.
 - **Navigate into them**: jump to a running agent or resume a stopped one in a tmux session (or window) with a single keystroke.
-- **Works across harnesses**: opencode, Claude Code, Codex, and omp, with an optional [Taskwarrior](https://taskwarrior.org) pane for your task list.
+- **Works across harnesses**: opencode, Claude Code, Codex, and omp.
 
 ## Table of contents
 
@@ -37,7 +38,7 @@ cogitator is a TUI dashboard for your harnesses. It gives you a live view of ses
     - [omp](#omp)
 - [Key bindings](#key-bindings)
 - [Configuration](#configuration)
-- [Taskwarrior integration](#taskwarrior-integration)
+- [Workspaces](#workspaces)
 - [Live attention reference](#live-attention-reference)
   - [Claude Code](#claude-code-reference)
   - [Codex](#codex-reference)
@@ -282,18 +283,15 @@ and [Live attention reference → omp](#omp-reference) for how it behaves.
 
 | Key | Context | Action |
 | --- | --- | --- |
-| `T` | anywhere (outside a prompt) | show or hide the Tasks pane |
-| `ctrl+P` | anywhere (outside a prompt) | open the session switcher: fuzzy-find a repo/branch and jump to it (`cmd+P` is not supported — terminals don't forward it to TUI apps) |
-| `Tab` | anywhere (outside a prompt) | swap focus between Sessions and Tasks panes when Tasks is shown |
-| `j` / `k` | Tasks pane focused | move cursor down / up |
-| `a` | Tasks pane focused | open inline prompt to add a new task |
-| `e` | Tasks pane focused | open inline prompt to edit the selected task |
-| `s` | Tasks pane focused | start the selected task, or stop it if already running |
-| `d` | Tasks pane focused | mark the selected task done |
-| `D` | Tasks pane focused | prompt to delete the selected task (confirm with `y`) |
-| `U` | Tasks pane focused | undo the last Taskwarrior mutation |
+| `ctrl+P` | anywhere (outside a prompt) | open the session switcher: fuzzy-find a repo/branch or workspace session (listed as `<workspace>/<session>`) and jump to it (`cmd+P` is not supported — terminals don't forward it to TUI apps) |
+| `Tab` | anywhere (outside a prompt) | swap focus between the Sessions and Workspaces panes |
 | `a` | Sessions pane focused | toggle collapsed/expanded recent sessions |
 | `P` | Sessions pane focused | pull latest into the highlighted worktree's branch (`git pull --ff-only --no-tags origin <branch>`); handy for refreshing a base branch before branching off it |
+| `N` | Workspaces pane focused | create a new, empty workspace |
+| `n` | Workspaces pane focused | create a session in the workspace under the cursor: prompts for a session name, then a harness, then checks out one new branch across every member repo |
+| `e` | Workspaces pane focused | open the repo-membership modal for the workspace under the cursor: attach a repo found under `$HOME`, or detach a current member |
+| `D` | Workspaces pane focused | delete the session or workspace under the cursor, behind a two-step `y`/`y` confirm that shows each member repo's branch merge status |
+| `Enter` | Workspaces pane focused, on a session row | launch the session in tmux |
 | `Esc` | inside add/edit prompt | cancel the prompt without quitting |
 | `Enter` | inside add/edit prompt | submit the prompt |
 
@@ -324,6 +322,7 @@ no in-app setter, so editing this file is the only way to change them.
 | `repos` | string array | `[]` | Absolute paths to the git repositories cogitator tracks for worktree launching. Normally managed from the UI — press `A` in the Sessions pane to fuzzy-find and add a repo — so entries usually appear here without hand-editing. Paths are canonicalized; a configured repo missing from disk is still listed but its worktree actions are disabled. |
 | `defaultHarness` | string | `opencode` | Harness pre-selected when you create a new worktree (`n`). One of `opencode`, `claude-code`, `codex`, `omp`. Empty falls back to `opencode`. |
 | `launchMode` | string | `session` | How a worktree opens in tmux: `window` or `session`. Empty or any unrecognized value falls back to `session`. |
+| `workspaceRoot` | string | `` (empty) | Directory under which workspace session bundles are created (one git worktree per member repo, per session). Empty uses `$XDG_DATA_HOME/cogitator/workspaces`, falling back to `~/.local/share/cogitator/workspaces` when `$XDG_DATA_HOME` is unset. A leading `~` is expanded. Rejected if it resolves inside an existing git working tree. |
 
 ### tmux window vs session
 
@@ -342,41 +341,37 @@ Either way, cogitator reuses an existing window/session for a worktree when one 
 open instead of creating a duplicate. Edits to `launchMode` take effect on the next launch —
 no restart needed.
 
-## Taskwarrior integration
+## Workspaces
 
-cogitator displays a live Tasks pane alongside the Sessions pane when a
-`task` binary is found on the cogitator process's `$PATH`.
+A **workspace** bundles several repos so you can work across all of them on one
+branch. Creating a session inside a workspace checks out that branch as a real
+git worktree in *every* member repo, laid out side by side under one session
+directory. Press `Tab` to swap between the Sessions pane (single-repo
+worktrees) and the Workspaces pane.
 
-**Requirements:**
+- **Real directories, not symlinks**: every supported harness (opencode, Claude
+  Code, Codex, omp) searches with ripgrep, which skips symlinked directories
+  unless you pass `-L`. Member worktrees are real checkouts, so ripgrep sees
+  every file in them.
+- **Disk cost**: one working-tree checkout per member repo, per session — git
+  history itself is shared with the repo's other worktrees, not duplicated,
+  but each session materializes its own copy of the checked-out files.
+- **Divergent bases**: each member's branch is created from that repo's own
+  current `HEAD`, so if repo A is on `main` and repo B is on a feature branch,
+  their new worktrees start from different points.
+- **Membership is independent of `repos`**: the flat `repos` list (Sessions
+  pane) and a workspace's member repos are tracked separately — adding a repo
+  to a workspace does not add it to `repos`, and vice versa.
+- **Hidden repo basenames are rejected**: a member whose directory basename
+  starts with `.` (e.g. `~/.dotfiles`) is refused, for the same reason ripgrep
+  skips it — the worktree would be invisible to search.
+- **Adding a member later**: attaching a repo to a workspace that already has
+  sessions prompts which of those sessions to backfill with a new worktree for
+  it; sessions you skip keep their existing member list.
 
-- A `task` (Taskwarrior) binary must be reachable on the `$PATH` of the
-  process that runs cogitator. No configuration flag is needed.
-
-**Auto-detection:**
-
-- cogitator checks for `task` at startup. If the binary is present the Tasks
-  pane is shown by default; if not, the pane is hidden and no error is surfaced.
-- Press `T` to hide or show the Tasks pane while cogitator is running. There is
-  no `--no-tasks` flag.
-
-**Visual indicators:**
-
-- The `ST` column shows a priority glyph (high / medium / low) for idle tasks.
-- A running task (one started via `s` or `task <id> start`) is rendered bold
-  green with a play glyph (`󰐊`) in the `ST` column, replacing the priority
-  glyph for that row. Press `s` again to stop it. The legend at the bottom of
-  the TUI lists each glyph.
-
-**Environment variables:**
-
-cogitator inherits the full environment of the process that launched it.
-Taskwarrior respects the following variables from that environment:
-
-| Variable | Effect |
-| --- | --- |
-| `$PATH` | must include the directory containing the `task` binary |
-| `$TASKDATA` | overrides the Taskwarrior data directory (`~/.task` by default) |
-| `$TASKRC` | overrides the Taskwarrior config file (`~/.taskrc` by default) |
+`ctrl+P` lists workspace sessions in the session switcher too, labelled
+`<workspace>/<session>`. See [Key bindings](#key-bindings) for the full set of
+Workspaces-pane keys (`N`, `n`, `e`, `D`).
 
 ## Live attention reference
 

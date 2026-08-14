@@ -11,10 +11,10 @@ import (
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/omp"
 	"github.com/guilhermehto/cogitator/internal/provider"
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/singleinstance"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/supervisor"
-	"github.com/guilhermehto/cogitator/internal/taskwarrior"
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
@@ -43,10 +43,10 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 
 	// Seed the store with last-known attention from the persisted roster so
 	// badges (finished, errored, permission, question) survive restarts.
-	// workspace.Load prunes missing dirs and returns an empty map when the
+	// settings.Load prunes missing dirs and returns an empty map when the
 	// file is absent; on any other error we fall back to an empty seed rather
 	// than aborting startup.
-	if roster, err := workspace.Load(); err == nil {
+	if roster, err := settings.Load(); err == nil {
 		store.RestoreSessions(rosterToRestored(roster))
 	} else {
 		logger.Warn("roster load failed; starting without restored badges", "err", err)
@@ -76,15 +76,31 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 	// Start the roster recorder as a distinct subscriber. It drains snapshots
 	// in its own goroutine and writes roster.json atomically off the hot path.
 	// Cancelled by the existing defer cancel() above.
-	rec := workspace.NewRecorder()
+	rec := settings.NewRecorder()
 	rec.Run(ctx, store.Subscribe())
 
-	m := newModel(store.Subscribe(), cfg, bellEnabled, debug, taskwarrior.NewClient())
+	// Construct the workspace store beside the roster recorder: it is the
+	// single writer of workspaces.json for the lifetime of this process,
+	// mirroring how rec is the single writer of roster.json. A construction
+	// failure (e.g. an unresolvable config directory) is non-fatal — the
+	// Workspaces view falls back to its empty state rather than aborting
+	// startup, exactly like the roster-restore and single-instance guards
+	// above.
+	var wsStore storeOps
+	if s, err := workspace.NewStore(); err != nil {
+		logger.Warn("workspace store init failed; workspaces view will be unavailable", "err", err)
+	} else {
+		wsStore = realStoreOps{store: s}
+	}
+
+	m := newModel(store.Subscribe(), cfg, bellEnabled, debug)
 	// Wire the recorder's Upserts channel so the model can inject create-time
 	// roster entries (e.g. for Codex worktrees that are never live-discovered).
 	m.rosterUpserts = rec.Upserts
 	// Wire the store so jump/resume clears the AttnFinished badge.
 	m.viewMarker = store
+	// Wire the workspace store so the Workspaces view can load workspaces.json.
+	m.store = wsStore
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
 }
