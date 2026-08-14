@@ -27,6 +27,113 @@ func openPalette(t *testing.T, m model) model {
 	return m2
 }
 
+// openSearch opens the lightweight '/' session search on m and returns the
+// resulting model.
+func openSearch(t *testing.T, m model) model {
+	t.Helper()
+	updated, _ := m.Update(keyMsg("/"))
+	m2 := updated.(model)
+	if m2.prompt != promptSearchSession {
+		t.Fatalf("'/' should open session search; prompt = %v", m2.prompt)
+	}
+	return m2
+}
+
+func TestSlash_OpensSearchOnlyWhenSessionsFocused(t *testing.T) {
+	rows := []workspace.Row{
+		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
+	}
+	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, rows)
+
+	m2 := openSearch(t, m)
+	if len(m2.sessionPaletteMatches) != 1 {
+		t.Fatalf("empty search should show every row; got %d matches", len(m2.sessionPaletteMatches))
+	}
+	if m2.input.Placeholder != "search sessions" {
+		t.Errorf("placeholder = %q, want %q", m2.input.Placeholder, "search sessions")
+	}
+
+	m.focus = focusTasks
+	m.tasksActive = true
+	updated, cmd := m.Update(keyMsg("/"))
+	m3 := updated.(model)
+	if m3.prompt != promptIdle {
+		t.Errorf("'/' with tasks focused must stay idle; prompt = %v", m3.prompt)
+	}
+	if cmd != nil {
+		t.Error("'/' with tasks focused must return a nil cmd")
+	}
+}
+
+func TestSlash_NoRowsSetsHintAndStaysIdle(t *testing.T) {
+	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, nil)
+
+	updated, cmd := m.Update(keyMsg("/"))
+	m2 := updated.(model)
+
+	if m2.prompt != promptIdle {
+		t.Errorf("'/' with no rows must stay idle; prompt = %v", m2.prompt)
+	}
+	if cmd != nil {
+		t.Error("'/' with no rows must return a nil cmd")
+	}
+	if m2.tmuxHint != "no sessions to search" {
+		t.Errorf("hint = %q, want %q", m2.tmuxHint, "no sessions to search")
+	}
+}
+
+func TestSessionSearch_EnterMovesCursorWithoutJumping(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{available: true}
+	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []workspace.Row{
+		// The scattered match appears first in list order, while fuzzy ranking
+		// should put the contiguous match first after typing "abc".
+		makeRow("/r", "/r/xaybzc", "xaybzc", "scattered", workspace.StateRunning, state.AttnActive, fixedNow),
+		makeRow("/r", "/r/abc", "abc", "contiguous", workspace.StateRunning, state.AttnActive, fixedNow),
+	})
+	m = openSearch(t, m)
+
+	for _, ch := range "abc" {
+		updated, _ := m.Update(keyMsg(string(ch)))
+		m = updated.(model)
+	}
+	if got := m.sessionPaletteMatches[0]; got != 1 {
+		t.Fatalf("top fuzzy match index = %d, want 1", got)
+	}
+
+	updated, cmd := m.Update(keyMsg("enter"))
+	m2 := updated.(model)
+	if m2.prompt != promptIdle {
+		t.Errorf("enter must close search; prompt = %v", m2.prompt)
+	}
+	if cmd != nil {
+		t.Fatal("search enter must not dispatch a jump/resume command")
+	}
+	if m2.sessionCursor != 1 {
+		t.Errorf("session cursor = %d, want 1", m2.sessionCursor)
+	}
+	if len(tmuxFake.findWindowCalls) != 0 || len(tmuxFake.selectCalls) != 0 {
+		t.Errorf("search enter must not touch tmux; find=%v select=%v", tmuxFake.findWindowCalls, tmuxFake.selectCalls)
+	}
+	if len(m2.switchOrder) != 0 {
+		t.Errorf("search enter must not update switch history; got %v", m2.switchOrder)
+	}
+}
+
+func TestSessionSearch_EscKeepsOriginalCursor(t *testing.T) {
+	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []workspace.Row{
+		makeRow("/r", "/r/a", "alpha", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/r", "/r/b", "beta", "b", workspace.StateStopped, state.AttnInactive, fixedNow),
+	})
+	m.sessionCursor = 1
+	m = openSearch(t, m)
+
+	updated, _ := m.Update(keyMsg("esc"))
+	m2 := updated.(model)
+	if m2.sessionCursor != 1 {
+		t.Errorf("esc moved session cursor to %d, want 1", m2.sessionCursor)
+	}
+}
+
 func TestCtrlP_OpensPaletteWithAllRows(t *testing.T) {
 	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []workspace.Row{
 		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),

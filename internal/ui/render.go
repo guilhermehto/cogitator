@@ -764,12 +764,12 @@ func (m model) renderRepoFinder(width, height int) string {
 	return b.String()
 }
 
-// sessionPaletteRowsVisible is the fixed number of result rows the ctrl+P
-// switcher shows, clamped down only when the pane is too short. Holding it
+// sessionPaletteRowsVisible is the fixed number of result rows the session
+// palette shows, clamped down only when the pane is too short. Holding it
 // constant keeps the box from shrinking as the filter narrows matches.
 const sessionPaletteRowsVisible = 10
 
-// renderSessionPalette builds the floating ctrl+P switcher box. It is rendered
+// renderSessionPalette builds the floating ctrl+P switcher or '/' search box. It is rendered
 // independently of the session list and then composited (centred) over it by
 // the View via overlayBox, so the surrounding sessions stay visible around the
 // modal. fieldW/fieldH are the sessions pane's inner dimensions, used to size
@@ -788,8 +788,14 @@ func (m model) renderSessionPalette(fieldW, fieldH int) string {
 		contentW = max(1, fieldW-4)
 	}
 
+	title := "Switch session"
+	enterAction := "go"
+	if m.prompt == promptSearchSession {
+		title = "Search sessions"
+		enterAction = "select"
+	}
 	lines := []string{
-		padToWidth(" "+headerStyle.Render("Switch session"), contentW),
+		padToWidth(" "+headerStyle.Render(title), contentW),
 		padToWidth(ansi.Truncate(" "+dimStyle.Render("> ")+m.input.View(), contentW, ""), contentW),
 		"",
 	}
@@ -834,7 +840,7 @@ func (m model) renderSessionPalette(fieldW, fieldH int) string {
 		lines = append(lines, padToWidth("", contentW))
 	}
 
-	footer := fmt.Sprintf("%d sessions · ↑↓ move · enter go · esc cancel", len(m.sessionPaletteMatches))
+	footer := fmt.Sprintf("%d sessions · ↑↓ move · enter %s · esc cancel", len(m.sessionPaletteMatches), enterAction)
 	lines = append(lines, "", padToWidth(" "+dimStyle.Render(footer), contentW))
 
 	return paletteBoxStyle.Render(strings.Join(lines, "\n"))
@@ -981,6 +987,7 @@ var helpSections = []helpSection{
 		{"gg / < · G / >", "jump to top / bottom"},
 		{"ctrl+u / ctrl+d", "prev / next repo"},
 		{"enter", "jump to / resume session"},
+		{"/", "search sessions (move cursor)"},
 		{"ctrl+P", "switch session (fuzzy find)"},
 		{"a", "show / hide recent sessions"},
 	}},
