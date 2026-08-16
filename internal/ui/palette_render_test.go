@@ -82,3 +82,22 @@ func TestView_PaletteOverlaysSwitcherBox(t *testing.T) {
 		t.Error("View must render the switcher footer count")
 	}
 }
+
+func TestView_SearchPaletteUsesCursorOnlyCopy(t *testing.T) {
+	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []workspace.Row{
+		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
+	})
+	m.width, m.height = 100, 30
+	m = openSearch(t, m)
+
+	view := m.View()
+	if !strings.Contains(view, "Search sessions") {
+		t.Error("View must render the search title while '/' search is open")
+	}
+	if !strings.Contains(view, "enter select") {
+		t.Error("View must describe Enter as selection, not navigation")
+	}
+	if strings.Contains(view, "enter go") {
+		t.Error("search palette must not describe Enter as jumping into a session")
+	}
+}

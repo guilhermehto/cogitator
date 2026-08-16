@@ -111,6 +111,10 @@ const (
 	// sessions-pane Enter handler, esc cancels. cmd+P is intentionally not bound
 	// because macOS terminals do not forward it to TUI apps.
 	promptSwitchSession
+	// promptSearchSession is the lightweight '/' session search. It shares the
+	// switcher's fuzzy palette, but enter only moves the sessions-pane cursor to
+	// the selected row; it never jumps, attaches, or resumes the session.
+	promptSearchSession
 	// promptHelp is active while the floating help overlay ('?') is open. It
 	// is a passive modal: it lists every keybinding and is dismissed by any
 	// key. No input is collected. Placed last so existing model{} literals in
@@ -452,8 +456,8 @@ type model struct {
 	repoFinderCursor   int
 	repoFinderErr      string
 
-	// Session switcher (ctrl+P) state, meaningful only while
-	// prompt == promptSwitchSession. sessionPaletteRows is a snapshot of the
+	// Session palette state, meaningful while prompt is promptSwitchSession or
+	// promptSearchSession. sessionPaletteRows is a snapshot of the
 	// candidate worktree rows captured when the palette opens; sessionPaletteLabels
 	// is the parallel "repo branch" match text for each row; sessionPaletteMatches
 	// indexes those slices, holding the current fuzzy-filtered view ordered
@@ -1296,8 +1300,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.removeRepoTarget = ""
 				return m, nil
 
-			case promptSwitchSession:
-				// Session switcher. Enter jumps to the highlighted row; the
+			case promptSwitchSession, promptSearchSession:
+				// Session palette. Enter acts according to the mode; the
 				// arrow keys (and ctrl+n/p) move the selection; esc closes;
 				// everything else edits the filter query and re-ranks matches.
 				switch msg.String() {
@@ -1310,7 +1314,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					sel := clampIndex(m.sessionPaletteCursor, len(m.sessionPaletteMatches))
 					row := m.sessionPaletteRows[m.sessionPaletteMatches[sel]]
+					searchOnly := m.prompt == promptSearchSession
 					m.closeSessionPalette()
+					if searchOnly {
+						// Search confirmation only positions the main list cursor. Find
+						// the row again because workspaceRows may have refreshed while
+						// the palette was open.
+						for i, r := range m.workspaceRows {
+							if r.Worktree == row.Worktree {
+								m.sessionCursor = i
+								m.syncSessionScroll()
+								break
+							}
+						}
+						return m, nil
+					}
 					// Apply the same guards as the sessions-pane Enter handler.
 					tmuxAvail := m.tmux != nil && m.tmux.Available()
 					if !tmuxAvail {
@@ -1383,21 +1401,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			rows, startOnPrevious := m.orderedSessionRows()
-			m.sessionPaletteRows = rows
-			m.sessionPaletteLabels = make([]string, len(m.sessionPaletteRows))
-			for i, row := range m.sessionPaletteRows {
-				m.sessionPaletteLabels[i] = sessionPaletteLabel(row)
-			}
-			m.sessionPaletteMatches = fuzzyMatchIndices("", m.sessionPaletteLabels)
 			// Seed the cursor on the previous session (row 1) so ctrl+P then enter
 			// jumps straight back to it; only when a genuine previous exists.
-			m.sessionPaletteCursor = 0
+			startCursor := 0
 			if startOnPrevious {
-				m.sessionPaletteCursor = 1
+				startCursor = 1
 			}
-			m.prompt = promptSwitchSession
-			m.input.Placeholder = "go to session"
-			m.input.SetValue("")
+			m.openSessionPalette(promptSwitchSession, rows, startCursor, "go to session")
 			return m, m.input.Focus()
 		}
 
@@ -1489,6 +1499,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+u":
 				m.sessionCursor = m.repoBoundary(-1)
 				m.syncSessionScroll()
+			case "/":
+				if len(m.workspaceRows) == 0 {
+					m.tmuxHint = "no sessions to search"
+					return m, nil
+				}
+				m.openSessionPalette(promptSearchSession, m.workspaceRows, 0, "search sessions")
+				return m, m.input.Focus()
 
 			case "enter":
 				// Jump to a running agent or resume a stopped one.
@@ -2065,8 +2082,23 @@ func (m *model) closeRepoFinder() {
 	m.repoFinderErr = ""
 }
 
-// closeSessionPalette resets the ctrl+P session switcher back to the idle
-// state, mirroring closeRepoFinder. Callers that need to jump afterwards read
+// openSessionPalette snapshots rows and prepares the shared fuzzy palette.
+// startCursor is clamped against the initial unfiltered result list.
+func (m *model) openSessionPalette(mode promptMode, rows []workspace.Row, startCursor int, placeholder string) {
+	m.sessionPaletteRows = append([]workspace.Row(nil), rows...)
+	m.sessionPaletteLabels = make([]string, len(m.sessionPaletteRows))
+	for i, row := range m.sessionPaletteRows {
+		m.sessionPaletteLabels[i] = sessionPaletteLabel(row)
+	}
+	m.sessionPaletteMatches = fuzzyMatchIndices("", m.sessionPaletteLabels)
+	m.sessionPaletteCursor = clampIndex(startCursor, len(m.sessionPaletteMatches))
+	m.prompt = mode
+	m.input.Placeholder = placeholder
+	m.input.SetValue("")
+}
+
+// closeSessionPalette resets the ctrl+P switcher or '/' search back to idle,
+// mirroring closeRepoFinder. Callers that need the selected row read
 // the selected row before calling this, since it clears the candidate slices.
 func (m *model) closeSessionPalette() {
 	m.prompt = promptIdle
@@ -2234,9 +2266,9 @@ func (m model) View() string {
 	switch {
 	case m.prompt == promptAddRepo:
 		sessionContent = m.renderRepoFinder(paneW, sessionsInnerH)
-	case m.prompt == promptSwitchSession:
+	case m.prompt == promptSwitchSession || m.prompt == promptSearchSession:
 		// Render the worktree list as the backdrop, then composite the floating
-		// switcher box centred over it so the surrounding sessions stay visible.
+		// palette box centred over it so the surrounding sessions stay visible.
 		now := m.tickNow
 		if now.IsZero() {
 			now = time.Now()
