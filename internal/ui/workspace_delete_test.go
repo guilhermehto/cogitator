@@ -198,7 +198,7 @@ func TestWorkspaceDelete_MergeStatusFillsInAsProbesReturn(t *testing.T) {
 	updated, _ := m.Update(keyMsg("D"))
 	m2 := updated.(model)
 
-	before := m2.renderWsDeleteConfirm()
+	before := m2.renderWsDeleteConfirm(118, 36)
 	if got := strings.Count(before, "checking merge status…"); got != 2 {
 		t.Fatalf("both members must render checking… before any probe returns (got %d):\n%s", got, before)
 	}
@@ -209,7 +209,7 @@ func TestWorkspaceDelete_MergeStatusFillsInAsProbesReturn(t *testing.T) {
 	if got := m3.wsDeleteMergeInfo["/ws/payments/feature-x/a"]; got != "merged into main" {
 		t.Errorf("merge info for member a = %q, want %q", got, "merged into main")
 	}
-	after := m3.renderWsDeleteConfirm()
+	after := m3.renderWsDeleteConfirm(118, 36)
 	if got := strings.Count(after, "checking merge status…"); got != 1 {
 		t.Errorf("only the unresolved member must still show checking… (got %d):\n%s", got, after)
 	}
@@ -576,5 +576,43 @@ func TestWorkspaceDelete_WorkspaceDeletedMsgFailureSetsHint(t *testing.T) {
 	}
 	if m2.wsHint == "" || !strings.Contains(m2.wsHint, "Feature X") {
 		t.Errorf("failure must surface a hint naming the failing session, got %q", m2.wsHint)
+	}
+}
+
+func TestWorkspaceDelete_ScrollsThroughStatusesWithoutHidingConfirmation(t *testing.T) {
+	for _, prompt := range []promptMode{promptConfirmDeleteWorkspace, promptConfirmDeleteWorkspace2, promptConfirmDeleteWsSession, promptConfirmDeleteWsSession2} {
+		t.Run(fmt.Sprint(prompt), func(t *testing.T) {
+			m := model{width: 80, height: 24, view: viewWorkspaces, prompt: prompt,
+				wsDeleteWorkspace: "payments", wsDeleteMergeInfo: map[string]string{}}
+			if prompt == promptConfirmDeleteWsSession || prompt == promptConfirmDeleteWsSession2 {
+				m.wsDeleteSession = "feature"
+			}
+			for i := range 25 {
+				path := fmt.Sprintf("/ws/session-%02d/api", i)
+				m.wsDeleteMembers = append(m.wsDeleteMembers, wsDeleteMember{session: fmt.Sprintf("session-%02d", i), repoPath: fmt.Sprintf("/repo/api-%02d", i), worktreePath: path, branch: "feature"})
+				m.wsDeleteMergeInfo[path] = "merged into main"
+			}
+			m.wsDeleteMergeInfo[m.wsDeleteMembers[24].worktreePath] = "NOT merged into main"
+			for range m.wsDeleteMembers {
+				updated, cmd := m.Update(keyMsg("down"))
+				m = updated.(model)
+				if m.prompt != prompt || cmd != nil {
+					t.Fatal("scrolling must keep confirmation open without dispatching deletion")
+				}
+			}
+			view := assertWorkspaceDialogFits(t, m)
+			for _, want := range []string{"api-24", "NOT merged into main", "esc cancel", "default: cancel", "scroll"} {
+				if !strings.Contains(view, want) {
+					t.Errorf("scrolled deletion missing %q:\n%s", want, view)
+				}
+			}
+			for range m.wsDeleteMembers {
+				updated, _ := m.Update(keyMsg("up"))
+				m = updated.(model)
+			}
+			if view := assertWorkspaceDialogFits(t, m); !strings.Contains(view, "api-00") {
+				t.Errorf("cannot scroll back to first member:\n%s", view)
+			}
+		})
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/guilhermehto/cogitator/internal/git"
 	"github.com/guilhermehto/cogitator/internal/settings"
@@ -674,4 +675,40 @@ func findSessionMember(members []workspace.SessionMember, repoPath string) (work
 		}
 	}
 	return workspace.SessionMember{}, false
+}
+
+func assertWorkspaceDialogFits(t *testing.T, m model) string {
+	t.Helper()
+	view := m.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) > m.height {
+		t.Fatalf("view height %d exceeds terminal height %d:\n%s", len(lines), m.height, view)
+	}
+	for _, line := range lines[1 : len(lines)-1] {
+		if ansi.StringWidth(line) > m.width {
+			t.Fatalf("pane line exceeds terminal width %d:\n%s", m.width, line)
+		}
+	}
+	return ansi.Strip(view)
+}
+
+func TestWorkspaceBackfill_KeepsSelectedSessionAndControlsVisible(t *testing.T) {
+	sessions := make([]string, 25)
+	for i := range sessions {
+		sessions[i] = fmt.Sprintf("session-%02d", i)
+	}
+	m := model{width: 80, height: 24, view: viewWorkspaces}
+	m, _ = m.openWorkspaceBackfillPrompt("payments", "/repo/api", true, sessions)
+	for range sessions {
+		updated, _ := m.Update(keyMsg("down"))
+		m = updated.(model)
+	}
+	updated, _ := m.Update(keyMsg(" "))
+	m = updated.(model)
+	view := assertWorkspaceDialogFits(t, m)
+	for _, want := range []string{"[x] session-24", "space toggle", "enter apply", "esc skip"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("scrolled backfill missing %q:\n%s", want, view)
+		}
+	}
 }

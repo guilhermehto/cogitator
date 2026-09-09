@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
@@ -165,7 +166,7 @@ type wsBackfillAppliedMsg struct {
 // as it was. This is the single tea.Cmd boundary for the whole backfill: no
 // git or store access happens on the UI goroutine.
 func backfillMembershipCmd(store storeOps, workspaceName, repo string, attached bool, sessionNames []string) tea.Cmd {
-	return func() tea.Msg {
+	return workspaceMutationCmd(func() tea.Msg {
 		res := wsBackfillAppliedMsg{workspaceName: workspaceName, repo: repo, attached: attached}
 		if store == nil {
 			for _, sessionName := range sessionNames {
@@ -181,7 +182,7 @@ func backfillMembershipCmd(store storeOps, workspaceName, repo string, attached 
 			}
 		}
 		return res
-	}
+	})
 }
 
 // sessionMemberUpdater is the narrow seam backfillOneSession asserts store
@@ -287,7 +288,7 @@ func backfillOneSession(store storeOps, workspaceName, repo string, attached boo
 // target workspace, and a hint. Mirrors renderWsDeleteConfirm's floating-box
 // composition (workspace_delete.go) but for a checklist instead of a
 // probe-annotated confirm.
-func (m model) renderWorkspaceBackfillPrompt() string {
+func (m model) renderWorkspaceBackfillPrompt(fieldW, fieldH int) string {
 	repoName := filepath.Base(m.wsBackfillRepo)
 	var title string
 	if m.wsBackfillAttached {
@@ -296,22 +297,31 @@ func (m model) renderWorkspaceBackfillPrompt() string {
 		title = fmt.Sprintf("%s detached from %q — remove it from which sessions?", repoName, m.wsBackfillWorkspace)
 	}
 
+	contentW := min(72, max(1, fieldW-4))
+	title = ansi.Wrap(title, contentW, "")
+	hint := ansi.Wrap(fmt.Sprintf("%d sessions · ↑↓ move · space toggle · enter apply · esc skip", len(m.wsBackfillSessions)), contentW, "")
+	listH := max(1, fieldH-4-strings.Count(title, "\n")-strings.Count(hint, "\n"))
+	cursor := clampIndex(m.wsBackfillCursor, len(m.wsBackfillSessions))
+	start := max(0, cursor-listH+1)
+	end := min(start+listH, len(m.wsBackfillSessions))
+
 	var b strings.Builder
 	b.WriteString(headerStyle.Render(title))
 	if len(m.wsBackfillSessions) == 0 {
 		b.WriteString("\n  " + dimStyle.Render("(no sessions in this workspace)"))
 	}
-	for i, sess := range m.wsBackfillSessions {
+	for i := start; i < end; i++ {
+		sess := m.wsBackfillSessions[i]
 		box := "[ ]"
 		if m.wsBackfillSelected[sess] {
 			box = "[x]"
 		}
-		line := fmt.Sprintf("  %s %s", box, sess)
+		line := ansi.Truncate(fmt.Sprintf("  %s %s", box, sess), contentW, "…")
 		if i == m.wsBackfillCursor {
 			line = wtCursorStyle.Render(line)
 		}
 		b.WriteString("\n" + line)
 	}
-	b.WriteString("\n" + dimStyle.Render("↑↓ move · space toggle · enter apply · esc skip"))
+	b.WriteString("\n" + dimStyle.Render(hint))
 	return paletteBoxStyle.Render(b.String())
 }

@@ -538,7 +538,10 @@ func TestResolveWorkspaceRoot_DefaultIsStableAndDoesNotCreateDirectory(t *testin
 // failed and the candidate leaked through as an attachable repo in the
 // repo-membership modal.
 func TestResolveWorkspaceRoot_DefaultRootExcludesMemberWorktreeViaPathUnderRoot(t *testing.T) {
-	dataHome := t.TempDir()
+	dataHome := filepath.Join(t.TempDir(), "data-link")
+	if err := os.Symlink(t.TempDir(), dataHome); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("XDG_DATA_HOME", dataHome)
 
 	rawDefault := filepath.Join(dataHome, "cogitator", "workspaces")
@@ -547,7 +550,7 @@ func TestResolveWorkspaceRoot_DefaultRootExcludesMemberWorktreeViaPathUnderRoot(
 		t.Fatalf("pathnorm.Canonical(rawDefault): %v", err)
 	}
 	if rawDefault == canonicalDefault {
-		t.Fatalf("test setup invariant violated: raw default %q and its canonical form are identical (no symlink in t.TempDir()'s ancestry) — this test would be a no-op on this platform", rawDefault)
+		t.Fatalf("symlink fixture was not resolved: %q", rawDefault)
 	}
 
 	resolvedRoot, err := settings.ResolveWorkspaceRoot(settings.Config{})

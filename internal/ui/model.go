@@ -667,6 +667,7 @@ type model struct {
 	wsDeleteSession   string
 	wsDeleteMembers   []wsDeleteMember
 	wsDeleteMergeInfo map[string]string
+	wsDeleteCursor    int
 
 	// Repo-membership modal ('e' in the Workspaces view) state, meaningful
 	// only while prompt == promptWorkspaceModal. wsModalWorkspace is the
@@ -1372,6 +1373,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (a) Prompt mode pre-empt — evaluated before any global or pane key.
 		// This ensures Esc inside a prompt clears the prompt rather than quitting.
 		if m.prompt != promptIdle {
+			if wsDeletePromptActive(m.prompt) {
+				switch msg.String() {
+				case "up", "ctrl+p":
+					m.wsDeleteCursor = clampIndex(m.wsDeleteCursor-1, len(m.wsDeleteMembers))
+					return m, nil
+				case "down", "ctrl+n":
+					m.wsDeleteCursor = clampIndex(m.wsDeleteCursor+1, len(m.wsDeleteMembers))
+					return m, nil
+				}
+			}
 			switch m.prompt {
 			case promptNewWorktree, promptFetchBranch:
 				// Branch-name prompt for 'n' (new worktree) and 'F' (fetch from
@@ -2107,7 +2118,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case launchResultMsg:
 		// A launch/resume Cmd completed.
 		if msg.err != nil {
-			m.tmuxHint = fmt.Sprintf("launch error: %v", msg.err)
+			hint := fmt.Sprintf("launch error: %v", msg.err)
+			if m.view == viewWorkspaces {
+				m.wsHint = hint
+			} else {
+				m.tmuxHint = hint
+			}
 			return m, nil
 		}
 		if m.viewMarker != nil && msg.sessionID != "" {
@@ -2910,13 +2926,13 @@ func (m model) View() string {
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsNamePrompt("New session", "session name: "))
 	case wsDeletePromptActive(m.prompt):
 		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
-		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsDeleteConfirm())
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsDeleteConfirm(paneW, sessionsInnerH))
 	case m.prompt == promptWorkspaceModal:
 		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWorkspaceModal(paneW, sessionsInnerH))
 	case m.prompt == promptWorkspaceBackfill:
 		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
-		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWorkspaceBackfillPrompt())
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWorkspaceBackfillPrompt(paneW, sessionsInnerH))
 	case m.view == viewWorkspaces:
 		sessionContent = m.renderWorkspacesView(paneW, sessionsInnerH)
 	case len(m.workspaceRows) > 0:

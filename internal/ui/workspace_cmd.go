@@ -15,12 +15,24 @@ package ui
 import (
 	"fmt"
 	"sort"
+	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
+
+// ponytail: serialize workspace mutations process-wide; use per-workspace locks if parallel operations become necessary.
+var workspaceMutationMu sync.Mutex
+
+func workspaceMutationCmd(cmd tea.Cmd) tea.Cmd {
+	return func() tea.Msg {
+		workspaceMutationMu.Lock()
+		defer workspaceMutationMu.Unlock()
+		return cmd()
+	}
+}
 
 // pendingWsSession is an in-flight workspace-session assembly ('n' in the
 // Workspaces view), shown as an optimistic, animated placeholder session row
@@ -285,7 +297,7 @@ type wsWorkspaceCreatedMsg struct {
 // reports the outcome as a wsWorkspaceCreatedMsg. store may be nil (no
 // workspace store wired, e.g. --demo or a zero-value model in tests).
 func createWorkspaceCmd(store storeOps, name string) tea.Cmd {
-	return func() tea.Msg {
+	return workspaceMutationCmd(func() tea.Msg {
 		if store == nil {
 			return wsWorkspaceCreatedMsg{name: name, err: fmt.Errorf("workspace store is not available")}
 		}
@@ -293,7 +305,7 @@ func createWorkspaceCmd(store storeOps, name string) tea.Cmd {
 			return wsWorkspaceCreatedMsg{name: name, err: err}
 		}
 		return wsWorkspaceCreatedMsg{name: name}
-	}
+	})
 }
 
 // wsSessionAssembledMsg is returned by assembleWorkspaceSessionCmd after a
@@ -320,7 +332,7 @@ type wsSessionAssembledMsg struct {
 // before the error is returned. This is the single tea.Cmd boundary for the
 // whole create: no git or store access happens on the UI goroutine.
 func assembleWorkspaceSessionCmd(store storeOps, workspaceName, sessionName, harnessKind string) tea.Cmd {
-	return func() tea.Msg {
+	return workspaceMutationCmd(func() tea.Msg {
 		res := wsSessionAssembledMsg{workspaceName: workspaceName, sessionName: sessionName}
 		if store == nil {
 			res.err = fmt.Errorf("workspace store is not available")
@@ -361,7 +373,7 @@ func assembleWorkspaceSessionCmd(store storeOps, workspaceName, sessionName, har
 		}
 		res.session = session
 		return res
-	}
+	})
 }
 
 // findWorkspaceByName returns the workspace named name from workspaces, and

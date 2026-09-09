@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 	"github.com/guilhermehto/cogitator/internal/workspace"
@@ -85,6 +86,7 @@ func (m *model) clearWsDeleteTarget() {
 	m.wsDeleteSession = ""
 	m.wsDeleteMembers = nil
 	m.wsDeleteMergeInfo = nil
+	m.wsDeleteCursor = 0
 }
 
 // updateWorkspaceDelete handles 'D' in the Workspaces view: it opens the
@@ -114,6 +116,7 @@ func (m model) updateWorkspaceDelete(msg tea.KeyMsg) (model, tea.Cmd, bool) {
 // openDeleteWsSessionConfirm captures sess's members, opens the first
 // confirmation, and dispatches the concurrent per-member merge-status probes.
 func (m model) openDeleteWsSessionConfirm(workspaceName string, sess workspace.Session) (model, tea.Cmd, bool) {
+	m.wsDeleteCursor = 0
 	m.wsDeleteWorkspace = workspaceName
 	m.wsDeleteSession = sess.Name
 	m.wsDeleteMembers = wsDeleteMembersFor([]workspace.Session{sess})
@@ -126,6 +129,7 @@ func (m model) openDeleteWsSessionConfirm(workspaceName string, sess workspace.S
 // opens the first confirmation, and dispatches the concurrent per-member
 // merge-status probes across all of them.
 func (m model) openDeleteWorkspaceConfirm(ws workspace.Workspace) (model, tea.Cmd, bool) {
+	m.wsDeleteCursor = 0
 	m.wsDeleteWorkspace = ws.Name
 	m.wsDeleteSession = ""
 	m.wsDeleteMembers = wsDeleteMembersFor(ws.Sessions)
@@ -206,7 +210,7 @@ type wsSessionDeletedMsg struct {
 // the session (whatever state its members are actually in) so the error can
 // name the repo and the user can retry or investigate.
 func deleteWsSessionCmd(store storeOps, ops tmuxOps, workspaceName, sessionName string, mode tmuxctl.LaunchMode) tea.Cmd {
-	return func() tea.Msg {
+	return workspaceMutationCmd(func() tea.Msg {
 		res := wsSessionDeletedMsg{workspaceName: workspaceName, sessionName: sessionName}
 		if store == nil {
 			res.err = fmt.Errorf("workspace store is not available")
@@ -240,7 +244,7 @@ func deleteWsSessionCmd(store storeOps, ops tmuxOps, workspaceName, sessionName 
 			return res
 		}
 		return res
-	}
+	})
 }
 
 // wsWorkspaceDeletedMsg is returned by deleteWorkspaceCmd after every session
@@ -259,7 +263,7 @@ type wsWorkspaceDeletedMsg struct {
 // every session in it, torn down or not) in the store, and the returned
 // error names the failing session and repo so the user can retry.
 func deleteWorkspaceCmd(store storeOps, ops tmuxOps, workspaceName string, mode tmuxctl.LaunchMode) tea.Cmd {
-	return func() tea.Msg {
+	return workspaceMutationCmd(func() tea.Msg {
 		res := wsWorkspaceDeletedMsg{workspaceName: workspaceName}
 		if store == nil {
 			res.err = fmt.Errorf("workspace store is not available")
@@ -293,7 +297,7 @@ func deleteWorkspaceCmd(store storeOps, ops tmuxOps, workspaceName string, mode 
 			return res
 		}
 		return res
-	}
+	})
 }
 
 // wsDeleteConfirmCopy returns the title and confirm/cancel hint for the
@@ -304,16 +308,16 @@ func (m model) wsDeleteConfirmCopy() (title, hint string) {
 	switch m.prompt {
 	case promptConfirmDeleteWsSession:
 		return fmt.Sprintf("delete session %q?", m.wsDeleteSession),
-			"press y to continue, any other key cancels"
+			"y to continue · esc cancel (default: cancel)"
 	case promptConfirmDeleteWsSession2:
 		return fmt.Sprintf("PERMANENTLY delete session %q?", m.wsDeleteSession),
-			"y to delete · any other key cancels (default: cancel)"
+			"y to delete · esc cancel (default: cancel)"
 	case promptConfirmDeleteWorkspace:
 		return fmt.Sprintf("delete workspace %q and all its sessions?", m.wsDeleteWorkspace),
-			"press y to continue, any other key cancels"
+			"y to continue · esc cancel (default: cancel)"
 	case promptConfirmDeleteWorkspace2:
 		return fmt.Sprintf("PERMANENTLY delete workspace %q and all its sessions?", m.wsDeleteWorkspace),
-			"y to delete · any other key cancels (default: cancel)"
+			"y to delete · esc cancel (default: cancel)"
 	default:
 		return "", ""
 	}
@@ -326,19 +330,28 @@ func (m model) wsDeleteConfirmCopy() (title, hint string) {
 // hint for whichever of the two gates is active. Mirrors renderWsNamePrompt's
 // floating-box composition (workspace_cmd.go) but for a multi-repo
 // confirmation instead of a single text prompt.
-func (m model) renderWsDeleteConfirm() string {
+func (m model) renderWsDeleteConfirm(fieldW, fieldH int) string {
 	title, hint := m.wsDeleteConfirmCopy()
 	hintStyle := wtHintStyle
 	if m.prompt == promptConfirmDeleteWsSession2 || m.prompt == promptConfirmDeleteWorkspace2 {
 		hintStyle = attnErrStyle
 	}
 
+	contentW := min(72, max(1, fieldW-4))
+	title = ansi.Wrap(title, contentW, "")
+	hint = ansi.Wrap(hint, contentW, "")
+	listH := max(1, fieldH-5-strings.Count(title, "\n")-strings.Count(hint, "\n"))
+	cursor := clampIndex(m.wsDeleteCursor, len(m.wsDeleteMembers))
+	start := max(0, cursor-listH+1)
+	end := min(start+listH, len(m.wsDeleteMembers))
+
 	var b strings.Builder
 	b.WriteString(headerStyle.Render(title))
 	if len(m.wsDeleteMembers) == 0 {
 		b.WriteString("\n  " + dimStyle.Render("(no sessions to remove)"))
 	}
-	for _, mem := range m.wsDeleteMembers {
+	for i := start; i < end; i++ {
+		mem := m.wsDeleteMembers[i]
 		info := m.wsDeleteMergeInfo[mem.worktreePath]
 		if info == "" {
 			info = "checking merge status…"
@@ -350,8 +363,14 @@ func (m model) renderWsDeleteConfirm() string {
 			// so same-repo lines are distinguishable.
 			label = mem.session + "/" + label
 		}
-		b.WriteString(fmt.Sprintf("\n  %s [%s]: %s", label, mem.branch, info))
+		label = ansi.Truncate(fmt.Sprintf("  %s [%s]", label, mem.branch), max(0, contentW-ansi.StringWidth(info)-2), "…")
+		line := ansi.Truncate(label+": "+info, contentW, "…")
+		if i == cursor {
+			line = wtCursorStyle.Render(line)
+		}
+		b.WriteString("\n" + line)
 	}
+	b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("%d–%d of %d · ↑↓ scroll", min(start+1, end), end, len(m.wsDeleteMembers))))
 	b.WriteString("\n" + hintStyle.Render(hint))
 	return paletteBoxStyle.Render(b.String())
 }

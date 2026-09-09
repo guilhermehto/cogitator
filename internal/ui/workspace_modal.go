@@ -244,7 +244,7 @@ func excludeWorkspaceRootSubtree(paths []string, workspaceRoot string) []string 
 // member is refused at attach time instead of only surfacing when a session
 // is next assembled.
 func attachWorkspaceRepoCmd(store storeOps, workspaceName, path string, members []string) tea.Cmd {
-	return func() tea.Msg {
+	return workspaceMutationCmd(func() tea.Msg {
 		repoRoot, err := git.RepoRoot(path)
 		if err != nil {
 			return wsModalActionErrMsg{err: err}
@@ -263,14 +263,14 @@ func attachWorkspaceRepoCmd(store storeOps, workspaceName, path string, members 
 			return wsModalActionErrMsg{err: err}
 		}
 		return membershipChangedMsg{workspace: workspaceName, repo: repoRoot, attached: true}
-	}
+	})
 }
 
 // detachWorkspaceRepoCmd removes path from workspaceName's membership via the
 // store. It only forgets the repo; nothing on disk is touched, mirroring
 // removeRepoCmd (repofinder.go).
 func detachWorkspaceRepoCmd(store storeOps, workspaceName, path string) tea.Cmd {
-	return func() tea.Msg {
+	return workspaceMutationCmd(func() tea.Msg {
 		if store == nil {
 			return wsModalActionErrMsg{err: fmt.Errorf("workspace store is not available")}
 		}
@@ -278,7 +278,7 @@ func detachWorkspaceRepoCmd(store storeOps, workspaceName, path string) tea.Cmd 
 			return wsModalActionErrMsg{err: err}
 		}
 		return membershipChangedMsg{workspace: workspaceName, repo: path, attached: false}
-	}
+	})
 }
 
 // renderWorkspaceModal renders the floating repo-membership box shown while
