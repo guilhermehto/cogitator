@@ -17,7 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/guilhermehto/cogitator/internal/git"
-	"github.com/guilhermehto/cogitator/internal/workspace"
+	"github.com/guilhermehto/cogitator/internal/settings"
 )
 
 // repoFinderRoot returns the directory scanned for repositories when the finder
@@ -66,7 +66,7 @@ type repoRemoveMsg struct {
 // touched. The result is a repoRemoveMsg.
 func removeRepoCmd(path string) tea.Cmd {
 	return func() tea.Msg {
-		removed, err := workspace.RemoveRepo(path)
+		removed, err := settings.RemoveRepo(path)
 		if err != nil {
 			return repoRemoveMsg{repoPath: path, removeErr: err}
 		}
@@ -80,15 +80,25 @@ func removeRepoCmd(path string) tea.Cmd {
 // finder only offers something new to add.
 func scanReposCmd(root string) tea.Cmd {
 	return func() tea.Msg {
-		repos, err := workspace.DiscoverRepos(root)
+		repos, err := settings.DiscoverRepos(root)
 		if err != nil {
 			return repoScanMsg{err: err}
 		}
-		if cfg, cErr := workspace.LoadConfig(); cErr == nil {
-			repos = filterConfigured(repos, cfg.Repos)
+		if cfg, cErr := settings.LoadConfig(); cErr == nil {
+			repos = filterConfigured(repos, repoConfigPaths(cfg.Repos))
 		}
 		return repoScanMsg{repos: repos}
 	}
+}
+
+// repoConfigPaths extracts the canonical paths from configured, in order, so
+// they can be passed to filterConfigured's set-of-paths parameter.
+func repoConfigPaths(configured []settings.RepoConfig) []string {
+	paths := make([]string, len(configured))
+	for i, r := range configured {
+		paths[i] = r.Path
+	}
+	return paths
 }
 
 // addSelectedRepoCmd validates path as a git work tree and, when valid,
@@ -105,7 +115,7 @@ func addSelectedRepoCmd(path string) tea.Cmd {
 		if err != nil {
 			return repoAddMsg{repoPath: path, addErr: err}
 		}
-		added, err := workspace.AddRepo(repoRoot)
+		added, err := settings.AddRepo(repoRoot)
 		if err != nil {
 			return repoAddMsg{repoPath: repoRoot, addErr: err}
 		}
@@ -113,21 +123,26 @@ func addSelectedRepoCmd(path string) tea.Cmd {
 	}
 }
 
-// filterConfigured returns the discovered repos that are not already present in
-// configured, compared by canonical path. Both sides are canonical
-// (DiscoverRepos and LoadConfig each canonicalize), so a plain string match is
-// sufficient.
-func filterConfigured(discovered []string, configured []workspace.RepoConfig) []string {
-	if len(configured) == 0 {
+// filterConfigured returns the discovered repos that are not already present
+// in have, compared by canonical path. Both sides are canonical — discovered
+// always is (DiscoverRepos canonicalizes), and callers are expected to pass
+// an already-canonical have set (e.g. settings.RepoConfig.Path via
+// repoConfigPaths, or workspace.MemberRepo.Path) — so a plain string match is
+// sufficient. Shared by the "add repo" finder ('A', excluding
+// settings-configured repos) and the repo-membership modal ('e',
+// workspace_modal.go, excluding a workspace's own members): the exclusion
+// logic is identical, only the membership set differs.
+func filterConfigured(discovered []string, have []string) []string {
+	if len(have) == 0 {
 		return discovered
 	}
-	have := make(map[string]bool, len(configured))
-	for _, r := range configured {
-		have[r.Path] = true
+	seen := make(map[string]bool, len(have))
+	for _, p := range have {
+		seen[p] = true
 	}
 	out := make([]string, 0, len(discovered))
 	for _, d := range discovered {
-		if !have[d] {
+		if !seen[d] {
 			out = append(out, d)
 		}
 	}

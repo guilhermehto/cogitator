@@ -11,7 +11,9 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
+	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
@@ -39,9 +41,9 @@ func openSearch(t *testing.T, m model) model {
 	return m2
 }
 
-func TestSlash_OpensSearchOnlyWhenSessionsFocused(t *testing.T) {
-	rows := []workspace.Row{
-		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
+func TestSlash_OpensSearchOnlyInSessionsView(t *testing.T) {
+	rows := []settings.Row{
+		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", settings.StateStopped, state.AttnInactive, fixedNow),
 	}
 	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, rows)
 
@@ -53,15 +55,14 @@ func TestSlash_OpensSearchOnlyWhenSessionsFocused(t *testing.T) {
 		t.Errorf("placeholder = %q, want %q", m2.input.Placeholder, "search sessions")
 	}
 
-	m.focus = focusTasks
-	m.tasksActive = true
+	m.view = viewWorkspaces
 	updated, cmd := m.Update(keyMsg("/"))
 	m3 := updated.(model)
 	if m3.prompt != promptIdle {
-		t.Errorf("'/' with tasks focused must stay idle; prompt = %v", m3.prompt)
+		t.Errorf("'/' in Workspaces view must stay idle; prompt = %v", m3.prompt)
 	}
 	if cmd != nil {
-		t.Error("'/' with tasks focused must return a nil cmd")
+		t.Error("'/' in Workspaces view must return a nil cmd")
 	}
 }
 
@@ -84,11 +85,11 @@ func TestSlash_NoRowsSetsHintAndStaysIdle(t *testing.T) {
 
 func TestSessionSearch_EnterMovesCursorWithoutJumping(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: true}
-	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []workspace.Row{
+	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []settings.Row{
 		// The scattered match appears first in list order, while fuzzy ranking
 		// should put the contiguous match first after typing "abc".
-		makeRow("/r", "/r/xaybzc", "xaybzc", "scattered", workspace.StateRunning, state.AttnActive, fixedNow),
-		makeRow("/r", "/r/abc", "abc", "contiguous", workspace.StateRunning, state.AttnActive, fixedNow),
+		makeRow("/r", "/r/xaybzc", "xaybzc", "scattered", settings.StateRunning, state.AttnActive, fixedNow),
+		makeRow("/r", "/r/abc", "abc", "contiguous", settings.StateRunning, state.AttnActive, fixedNow),
 	})
 	m = openSearch(t, m)
 
@@ -120,9 +121,9 @@ func TestSessionSearch_EnterMovesCursorWithoutJumping(t *testing.T) {
 }
 
 func TestSessionSearch_EscKeepsOriginalCursor(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/r", "/r/a", "alpha", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/r", "/r/b", "beta", "b", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/r", "/r/a", "alpha", "a", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/r", "/r/b", "beta", "b", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 	m.sessionCursor = 1
 	m = openSearch(t, m)
@@ -135,9 +136,9 @@ func TestSessionSearch_EscKeepsOriginalCursor(t *testing.T) {
 }
 
 func TestCtrlP_OpensPaletteWithAllRows(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", workspace.StateRunning, state.AttnActive, fixedNow),
+	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", settings.StateRunning, state.AttnActive, fixedNow),
 	})
 
 	m2 := openPalette(t, m)
@@ -171,9 +172,9 @@ func TestCtrlP_NoRowsSetsHintAndStaysIdle(t *testing.T) {
 }
 
 func TestSessionPalette_FiltersOnType(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", workspace.StateRunning, state.AttnActive, fixedNow),
+	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", settings.StateRunning, state.AttnActive, fixedNow),
 	})
 	m = openPalette(t, m)
 
@@ -215,9 +216,9 @@ func TestSessionPalette_EnterJumpsAndSyncsCursor(t *testing.T) {
 		findWindowResult: "beta:1",
 		processAlive:     true,
 	}
-	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", workspace.StateRunning, state.AttnActive, fixedNow),
+	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", settings.StateRunning, state.AttnActive, fixedNow),
 	})
 	m = openPalette(t, m)
 
@@ -246,8 +247,8 @@ func TestSessionPalette_EnterJumpsAndSyncsCursor(t *testing.T) {
 
 func TestSessionPalette_EnterTmuxUnavailableSetsHint(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: false}
-	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/r", "/r/a", "main", "a", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 	m = openPalette(t, m)
 
@@ -267,8 +268,8 @@ func TestSessionPalette_EnterTmuxUnavailableSetsHint(t *testing.T) {
 
 func TestSessionPalette_EnterMissingRowSetsHint(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: true}
-	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "a", workspace.StateMissing, state.AttnInactive, fixedNow),
+	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/r", "/r/a", "main", "a", settings.StateMissing, state.AttnInactive, fixedNow),
 	})
 	m = openPalette(t, m)
 
@@ -300,10 +301,10 @@ func jumpTo(t *testing.T, m model, filter string) model {
 
 func TestSessionPalette_OrdersByMostRecentlySwitched(t *testing.T) {
 	tmuxFake := &fakeTmuxOps{available: true}
-	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/home/me/gamma", "/home/me/gamma", "wip", "g", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/home/me/gamma", "/home/me/gamma", "wip", "g", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 
 	// Jump to beta, then gamma — gamma is now the current session, beta the previous.
@@ -325,10 +326,10 @@ func TestSessionPalette_OrdersByMostRecentlySwitched(t *testing.T) {
 }
 
 func TestSessionPalette_TypingResetsCursorToTop(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/home/me/gamma", "/home/me/gamma", "wip", "g", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/home/me/gamma", "/home/me/gamma", "wip", "g", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 
 	// Seed a previous session so the palette opens on row 1, then search.
@@ -346,9 +347,9 @@ func TestSessionPalette_TypingResetsCursorToTop(t *testing.T) {
 }
 
 func TestSessionPalette_CursorStartsAtTopWithoutHistory(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 
 	m = openPalette(t, m)
@@ -360,10 +361,10 @@ func TestSessionPalette_CursorStartsAtTopWithoutHistory(t *testing.T) {
 }
 
 func TestSessionPalette_FixedHeightWhileFiltering(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", workspace.StateStopped, state.AttnInactive, fixedNow),
-		makeRow("/home/me/gamma", "/home/me/gamma", "wip", "g", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", settings.StateStopped, state.AttnInactive, fixedNow),
+		makeRow("/home/me/gamma", "/home/me/gamma", "wip", "g", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 	m = openPalette(t, m)
 
@@ -386,9 +387,91 @@ func TestSessionPalette_FixedHeightWhileFiltering(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Workspace sessions in the ctrl+P switcher (step 12)
+// ---------------------------------------------------------------------------
+
+func TestCtrlP_IncludesWorkspaceSessionsAlongsideRows(t *testing.T) {
+	tmuxFake := &fakeTmuxOps{
+		available:          true,
+		findWindowErr:      tmuxctl.ErrWindowNotFound,
+		ensureWindowResult: "payments/Feature X:0",
+	}
+	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{argv: []string{"fake", "/root/payments/feature-x"}}, []settings.Row{
+		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", settings.StateStopped, state.AttnInactive, fixedNow),
+	})
+	m.wsStatuses = []workspace.WorkspaceStatus{
+		wsStatusWithSession("payments", wsSession("Feature X", "feature-x", "/root/payments/feature-x", "fake", settings.StateStopped)),
+	}
+
+	m2 := openPalette(t, m)
+
+	if len(m2.sessionPaletteLabels) != 2 {
+		t.Fatalf("expected 2 candidates (1 row + 1 workspace session), got %v", m2.sessionPaletteLabels)
+	}
+	want := map[string]bool{"alpha main": false, "payments/Feature X": false}
+	for _, l := range m2.sessionPaletteLabels {
+		if _, ok := want[l]; ok {
+			want[l] = true
+		}
+	}
+	for label, found := range want {
+		if !found {
+			t.Errorf("missing expected label %q in %v", label, m2.sessionPaletteLabels)
+		}
+	}
+
+	// Filter to the workspace session alone ('f' appears only in "Feature",
+	// not in "alpha main") and jump to it.
+	updated, _ := m2.Update(keyMsg("f"))
+	m2 = updated.(model)
+	if len(m2.sessionPaletteMatches) != 1 {
+		t.Fatalf("filtering to 'f' should leave one match; got %d", len(m2.sessionPaletteMatches))
+	}
+
+	updated, cmd := m2.Update(keyMsg("enter"))
+	m3 := updated.(model)
+	if m3.prompt != promptIdle {
+		t.Errorf("enter must close the palette; prompt = %v", m3.prompt)
+	}
+	if cmd == nil {
+		t.Fatal("enter on a workspace session must dispatch a launch cmd")
+	}
+	if _, ok := runCmd(cmd).(launchResultMsg); !ok {
+		t.Fatal("expected launchResultMsg")
+	}
+	if len(tmuxFake.ensureWindowCalls) != 1 {
+		t.Fatalf("expected 1 EnsureWindowMode call, got %d", len(tmuxFake.ensureWindowCalls))
+	}
+	ensure := tmuxFake.ensureWindowCalls[0]
+	if ensure.dir != "/root/payments/feature-x" || ensure.name != "payments/Feature X" {
+		t.Errorf("EnsureWindowMode = dir %q name %q, want session dir and \"payments/Feature X\"", ensure.dir, ensure.name)
+	}
+}
+
+func TestCtrlP_ExcludesPendingWorkspaceSessionPlaceholder(t *testing.T) {
+	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, nil)
+	m.wsStatuses = []workspace.WorkspaceStatus{
+		wsStatusWithSession("payments", wsSession("Feature X", "", "", "", settings.StateCreating)),
+	}
+
+	updated, cmd := m.Update(keyMsg("ctrl+p"))
+	m2 := updated.(model)
+
+	if m2.prompt != promptIdle {
+		t.Errorf("a pending-only workspace session must not open the palette; prompt = %v", m2.prompt)
+	}
+	if cmd != nil {
+		t.Error("no jumpable candidates must return a nil cmd")
+	}
+	if !strings.Contains(m2.tmuxHint, "no sessions") {
+		t.Errorf("hint must explain there is nothing to switch to, got %q", m2.tmuxHint)
+	}
+}
+
 func TestSessionPalette_EscCloses(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []workspace.Row{
-		makeRow("/r", "/r/a", "main", "a", workspace.StateStopped, state.AttnInactive, fixedNow),
+	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/r", "/r/a", "main", "a", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 	m = openPalette(t, m)
 

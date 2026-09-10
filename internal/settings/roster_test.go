@@ -1,4 +1,4 @@
-package workspace_test
+package settings_test
 
 import (
 	"os"
@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 // withStateEnv sets XDG_STATE_HOME to dir for the duration of the test and
@@ -47,7 +47,7 @@ func TestRoster_LoadSaveRoundTrip(t *testing.T) {
 	}
 
 	now := time.Now().Truncate(time.Millisecond)
-	m := map[string]workspace.RosterEntry{
+	m := map[string]settings.RosterEntry{
 		canonicalWorktree: {
 			Dir:          canonicalWorktree,
 			Harness:      "opencode",
@@ -57,7 +57,7 @@ func TestRoster_LoadSaveRoundTrip(t *testing.T) {
 		},
 	}
 
-	if err := workspace.Save(m); err != nil {
+	if err := settings.Save(m); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -78,7 +78,7 @@ func TestRoster_LoadSaveRoundTrip(t *testing.T) {
 		}
 	}
 
-	loaded, err := workspace.Load()
+	loaded, err := settings.Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestRoster_Load_NoFile(t *testing.T) {
 	tmp := t.TempDir()
 	withStateEnv(t, tmp)
 
-	m, err := workspace.Load()
+	m, err := settings.Load()
 	if err != nil {
 		t.Fatalf("Load with no file: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestRoster_Load_PrunesMissingWorktrees(t *testing.T) {
 	}
 
 	now := time.Now()
-	m := map[string]workspace.RosterEntry{
+	m := map[string]settings.RosterEntry{
 		absent: {
 			Dir:          absent,
 			Harness:      "opencode",
@@ -149,11 +149,11 @@ func TestRoster_Load_PrunesMissingWorktrees(t *testing.T) {
 			LastActivity: now,
 		},
 	}
-	if err := workspace.Save(m); err != nil {
+	if err := settings.Save(m); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
-	loaded, err := workspace.Load()
+	loaded, err := settings.Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestRecorder_TwoSnapshotsSameDirLatestWins(t *testing.T) {
 	// Close the channel so RunSync exits after draining both snapshots.
 	close(snapCh)
 
-	rec := workspace.NewRecorder()
+	rec := settings.NewRecorder()
 
 	// RunSync drives the recorder synchronously in a goroutine; we wait for
 	// it to finish via the done channel.
@@ -231,7 +231,7 @@ func TestRecorder_TwoSnapshotsSameDirLatestWins(t *testing.T) {
 	<-done
 
 	// Verify the roster on disk.
-	loaded, err := workspace.Load()
+	loaded, err := settings.Load()
 	if err != nil {
 		t.Fatalf("Load after recorder: %v", err)
 	}
@@ -323,7 +323,7 @@ func TestRoster_AttentionPersistsAndReverts(t *testing.T) {
 	snapCh <- snapReverted
 	close(snapCh)
 
-	rec := workspace.NewRecorder()
+	rec := settings.NewRecorder()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -331,7 +331,7 @@ func TestRoster_AttentionPersistsAndReverts(t *testing.T) {
 	}()
 	<-done
 
-	loaded, err := workspace.Load()
+	loaded, err := settings.Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -346,14 +346,14 @@ func TestRoster_AttentionPersistsAndReverts(t *testing.T) {
 
 	// (c) Load a roster.json written without the "attention" field.
 	legacyJSON := `{"entries":[{"dir":"` + canonicalWorktree + `","harness":"opencode","lastActivity":"` + ts.Format(time.RFC3339Nano) + `"}]}`
-	rosterPath, err := workspace.RosterPath()
+	rosterPath, err := settings.RosterPath()
 	if err != nil {
 		t.Fatalf("RosterPath: %v", err)
 	}
 	if err := os.WriteFile(rosterPath, []byte(legacyJSON), 0o644); err != nil {
 		t.Fatalf("write legacy roster: %v", err)
 	}
-	legacyLoaded, err := workspace.Load()
+	legacyLoaded, err := settings.Load()
 	if err != nil {
 		t.Fatalf("Load legacy roster: %v", err)
 	}
@@ -380,7 +380,7 @@ func TestRoster_ProviderPersistsWithStaleHarness(t *testing.T) {
 	}
 
 	ts := time.Now().Truncate(time.Millisecond)
-	seed := map[string]workspace.RosterEntry{
+	seed := map[string]settings.RosterEntry{
 		canonicalWorktree: {
 			Dir:          canonicalWorktree,
 			Harness:      "opencode",
@@ -389,7 +389,7 @@ func TestRoster_ProviderPersistsWithStaleHarness(t *testing.T) {
 			Attention:    string(state.AttnFinished),
 		},
 	}
-	if err := workspace.Save(seed); err != nil {
+	if err := settings.Save(seed); err != nil {
 		t.Fatalf("Save seed: %v", err)
 	}
 
@@ -403,10 +403,10 @@ func TestRoster_ProviderPersistsWithStaleHarness(t *testing.T) {
 	}}}
 	close(snapCh)
 
-	rec := workspace.NewRecorder()
+	rec := settings.NewRecorder()
 	rec.RunSync(snapCh)
 
-	loaded, err := workspace.Load()
+	loaded, err := settings.Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -469,7 +469,7 @@ func TestRoster_AttentionFinishedPersists(t *testing.T) {
 	snapCh <- snapB
 	close(snapCh)
 
-	rec := workspace.NewRecorder()
+	rec := settings.NewRecorder()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -477,7 +477,7 @@ func TestRoster_AttentionFinishedPersists(t *testing.T) {
 	}()
 	<-done
 
-	loaded, err := workspace.Load()
+	loaded, err := settings.Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -495,7 +495,7 @@ func TestRoster_AttentionFinishedPersists(t *testing.T) {
 }
 
 // mapKeys returns the keys of m as a slice, for diagnostic messages.
-func mapKeys(m map[string]workspace.RosterEntry) []string {
+func mapKeys(m map[string]settings.RosterEntry) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
@@ -530,7 +530,7 @@ func TestRecorder_SubagentSessionsIgnored(t *testing.T) {
 	snapCh <- snap
 	close(snapCh)
 
-	rec := workspace.NewRecorder()
+	rec := settings.NewRecorder()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -538,7 +538,7 @@ func TestRecorder_SubagentSessionsIgnored(t *testing.T) {
 	}()
 	<-done
 
-	loaded, err := workspace.Load()
+	loaded, err := settings.Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}

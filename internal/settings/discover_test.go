@@ -1,4 +1,4 @@
-package workspace_test
+package settings_test
 
 import (
 	"os"
@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
-	"github.com/guilhermehto/cogitator/internal/workspace"
+	"github.com/guilhermehto/cogitator/internal/settings"
 )
 
 // mkRepo creates dir (and parents) and marks it as a git repo by creating a
@@ -50,7 +50,7 @@ func TestDiscoverRepos_FindsReposAndSkipsPlainDirs(t *testing.T) {
 	mkRepo(t, filepath.Join(root, "work", "beta"))
 	mkDir(t, filepath.Join(root, "src", "notarepo"))
 
-	got, err := workspace.DiscoverRepos(root)
+	got, err := settings.DiscoverRepos(root)
 	if err != nil {
 		t.Fatalf("DiscoverRepos: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestDiscoverRepos_DoesNotDescendIntoRepos(t *testing.T) {
 	// outer is identified as a repo, discovery stops descending.
 	mkRepo(t, filepath.Join(outer, "nested"))
 
-	got, err := workspace.DiscoverRepos(root)
+	got, err := settings.DiscoverRepos(root)
 	if err != nil {
 		t.Fatalf("DiscoverRepos: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestDiscoverRepos_SkipsNoiseAndHiddenDirs(t *testing.T) {
 	mkRepo(t, filepath.Join(root, ".cache", "thing"))
 	mkRepo(t, filepath.Join(root, "keep"))
 
-	got, err := workspace.DiscoverRepos(root)
+	got, err := settings.DiscoverRepos(root)
 	if err != nil {
 		t.Fatalf("DiscoverRepos: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestDiscoverRepos_FindsHiddenRepo(t *testing.T) {
 	// report hidden repos but do not crawl hidden trees.
 	mkRepo(t, filepath.Join(root, ".config", "buried"))
 
-	got, err := workspace.DiscoverRepos(root)
+	got, err := settings.DiscoverRepos(root)
 	if err != nil {
 		t.Fatalf("DiscoverRepos: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestDiscoverRepos_RespectsDepthCap(t *testing.T) {
 	// A shallow repo for contrast.
 	mkRepo(t, filepath.Join(root, "shallow"))
 
-	got, err := workspace.DiscoverRepos(root)
+	got, err := settings.DiscoverRepos(root)
 	if err != nil {
 		t.Fatalf("DiscoverRepos: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestDiscoverRepos_SortedAndDeduped(t *testing.T) {
 	mkRepo(t, filepath.Join(root, "zeta"))
 	mkRepo(t, filepath.Join(root, "alpha"))
 
-	got, err := workspace.DiscoverRepos(root)
+	got, err := settings.DiscoverRepos(root)
 	if err != nil {
 		t.Fatalf("DiscoverRepos: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestDiscoverRepos_SortedAndDeduped(t *testing.T) {
 }
 
 func TestDiscoverRepos_MissingRootReturnsError(t *testing.T) {
-	_, err := workspace.DiscoverRepos(filepath.Join(t.TempDir(), "does-not-exist"))
+	_, err := settings.DiscoverRepos(filepath.Join(t.TempDir(), "does-not-exist"))
 	if err == nil {
 		t.Errorf("expected error for missing root")
 	}

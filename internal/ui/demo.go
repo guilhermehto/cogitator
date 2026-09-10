@@ -9,16 +9,16 @@ import (
 	"github.com/muesli/termenv"
 
 	"github.com/guilhermehto/cogitator/internal/config"
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
 // RunDemo starts the TUI populated with a curated synthetic worktree roster —
 // the merged worktree/tmux view that is cogitator's headline feature. No mDNS
-// discovery, no git/tmux shell-outs, and no Taskwarrior pane: the workspace
-// rows are injected directly and the background row build is suppressed (the
-// model.demo flag) so the capture is deterministic. Intended for the README
-// screenshot / asciinema captures.
+// discovery and no git/tmux shell-outs: the workspace rows are injected
+// directly and the background row build is suppressed (the model.demo flag)
+// so the capture is deterministic. Intended for the README screenshot /
+// asciinema captures.
 func RunDemo(cfg *config.Config, logger *slog.Logger) error {
 	if cfg == nil {
 		cfg = config.Default()
@@ -46,8 +46,7 @@ func RunDemo(cfg *config.Config, logger *slog.Logger) error {
 	snaps := make(chan state.Snapshot, 1)
 	snaps <- snap
 
-	// nil tw suppresses the Tasks pane (twAvail=false).
-	m := newModel(snaps, cfg, false, false, nil)
+	m := newModel(snaps, cfg, false, false)
 	m.demo = true
 	m.workspaceRows = rows
 
@@ -63,58 +62,58 @@ func RunDemo(cfg *config.Config, logger *slog.Logger) error {
 // error), a stopped worktree, and one whose status is unknown (a tmux window
 // exists but the harness can't be probed). Branches and titles read like real
 // in-flight work so the screenshot tells a story.
-func demoWorktrees(now time.Time) []workspace.Row {
+func demoWorktrees(now time.Time) []settings.Row {
 	mins := func(n int) time.Time { return now.Add(time.Duration(-n) * time.Minute) }
 	hours := func(n int) time.Time { return now.Add(time.Duration(-n) * time.Hour) }
 
 	const cog = "~/src/cogitator"
 	const api = "~/src/api-gateway"
 
-	return []workspace.Row{
+	return []settings.Row{
 		{
 			Repo: cog, Worktree: cog, Branch: "main", IsRoot: true,
 			Harness: "opencode", Title: "Watch local opencode instances",
-			SessionID: "ses_main", State: workspace.StateRunning,
+			SessionID: "ses_main", State: settings.StateRunning,
 			Attention: state.AttnActive, LastActivity: mins(0),
 		},
 		{
 			Repo: cog, Worktree: cog + "/.wt/tmux-launcher", Branch: "feat/tmux-launcher",
 			Harness: "opencode", Title: "Launch worktrees into tmux windows",
-			SessionID: "ses_w1", State: workspace.StateRunning,
+			SessionID: "ses_w1", State: settings.StateRunning,
 			Attention: state.AttnPermissionPending, LastActivity: mins(0),
 		},
 		{
 			Repo: cog, Worktree: cog + "/.wt/mdns-race", Branch: "fix/mdns-race",
 			Harness: "codex", Title: "Resolve discovery race on darwin-arm64",
-			SessionID: "ses_w2", State: workspace.StateRunning,
+			SessionID: "ses_w2", State: settings.StateRunning,
 			Attention: state.AttnQuestionPending, LastActivity: mins(1),
 		},
 		{
 			Repo: cog, Worktree: cog + "/.wt/release", Branch: "chore/release",
 			Harness: "opencode", Title: "Publish to homebrew tap via goreleaser",
-			SessionID: "ses_w3", State: workspace.StateRunning,
+			SessionID: "ses_w3", State: settings.StateRunning,
 			Attention: state.AttnFinished, LastActivity: mins(2),
 		},
 		{
 			Repo: cog, Worktree: cog + "/.wt/bell", Branch: "spike/bell-ratelimit",
 			Harness: "opencode", Title: "Terminal-bell rate limiter",
-			SessionID: "ses_w4", State: workspace.StateStopped, LastActivity: hours(3),
+			SessionID: "ses_w4", State: settings.StateStopped, LastActivity: hours(3),
 		},
 		{
 			Repo: api, Worktree: api, Branch: "main", IsRoot: true,
 			Harness: "claude-code", Title: "Gateway service baseline",
-			SessionID: "ses_g0", State: workspace.StateRunning,
+			SessionID: "ses_g0", State: settings.StateRunning,
 			Attention: state.AttnActive, LastActivity: mins(1),
 		},
 		{
 			Repo: api, Worktree: api + "/.wt/oauth-pkce", Branch: "feat/oauth-pkce",
 			Harness: "claude-code", Title: "Implement OAuth2 PKCE flow",
-			SessionID: "ses_g1", State: workspace.StateRunning,
+			SessionID: "ses_g1", State: settings.StateRunning,
 			Attention: state.AttnErrored, LastActivity: mins(4),
 		},
 		{
 			Repo: api, Worktree: api + "/.wt/rate-limit", Branch: "fix/rate-limit",
-			State: workspace.StateUnknown, LastActivity: hours(6),
+			State: settings.StateUnknown, LastActivity: hours(6),
 		},
 	}
 }
@@ -122,10 +121,10 @@ func demoWorktrees(now time.Time) []workspace.Row {
 // liveSessionsFor synthesises one live SessionView per running worktree so the
 // header's live count matches the rendered roster. These never appear in the
 // worktree view itself; they exist only to populate the header summary.
-func liveSessionsFor(rows []workspace.Row) []state.SessionView {
+func liveSessionsFor(rows []settings.Row) []state.SessionView {
 	var sessions []state.SessionView
 	for _, r := range rows {
-		if r.State != workspace.StateRunning {
+		if r.State != settings.StateRunning {
 			continue
 		}
 		sessions = append(sessions, state.SessionView{

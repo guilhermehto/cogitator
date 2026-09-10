@@ -19,7 +19,6 @@ type Config struct {
 	HTTPTimeout             time.Duration
 	EventBackoffMax         time.Duration
 	PermissionSyncTimeout   time.Duration
-	TaskwarriorTimeout      time.Duration
 	RecentSyncTimeout       time.Duration
 	SessionLookupTimeout    time.Duration
 	UnreachableThreshold    int
@@ -152,7 +151,6 @@ func Default() *Config {
 		HTTPTimeout:             10 * time.Second,
 		EventBackoffMax:         5 * time.Second,
 		PermissionSyncTimeout:   5 * time.Second,
-		TaskwarriorTimeout:      5 * time.Second,
 		RecentSyncTimeout:       8 * time.Second,
 		SessionLookupTimeout:    5 * time.Second,
 		UnreachableThreshold:    3,
