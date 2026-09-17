@@ -22,11 +22,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
+	"github.com/guilhermehto/cogitator/internal/sessioncache"
 )
 
 // Session holds the parsed summary of a single Codex rollout transcript.
@@ -67,6 +69,12 @@ const maxTitleRunes = 80
 //     returned if the meta line was already parsed.
 //   - A file with no parseable session_meta line → skipped entirely.
 func ReadSessions(codexHome string) ([]Session, error) {
+	return readSessions(codexHome, nil)
+}
+
+func readSessions(codexHome string, cache *sessioncache.Cache[Session]) ([]Session, error) {
+	cache.BeginScan()
+	defer cache.EndScan()
 	root, err := resolveCodexHome(codexHome)
 	if err != nil || root == "" {
 		return nil, nil //nolint:nilerr // absent/empty home is not an error
@@ -90,7 +98,7 @@ func ReadSessions(codexHome string) ([]Session, error) {
 		if !isRolloutFile(d.Name()) {
 			return nil
 		}
-		s, ok := parseRolloutFile(path)
+		s, ok := cache.Read(path, parseRolloutFile)
 		if ok {
 			sessions = append(sessions, s)
 		}
@@ -232,12 +240,9 @@ func parseTimestamp(s string) (time.Time, bool) {
 
 // sortByLastActivityDesc sorts sessions in-place, most-recent first.
 func sortByLastActivityDesc(sessions []Session) {
-	// Insertion sort is fine for the typical small number of sessions.
-	for i := 1; i < len(sessions); i++ {
-		for j := i; j > 0 && sessions[j].LastActivity.After(sessions[j-1].LastActivity); j-- {
-			sessions[j], sessions[j-1] = sessions[j-1], sessions[j]
-		}
-	}
+	sort.SliceStable(sessions, func(i, j int) bool {
+		return sessions[i].LastActivity.After(sessions[j].LastActivity)
+	})
 }
 
 // rawLine is the top-level shape of every rollout JSONL line.

@@ -30,6 +30,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
+	"github.com/guilhermehto/cogitator/internal/sessioncache"
 )
 
 // Session holds the parsed summary of a single Claude Code session transcript.
@@ -82,6 +83,12 @@ const (
 //   - Lines exceeding 1 MiB → the scanner falls back to a buffered Reader
 //     so the rest of the file is still processed.
 func ReadSessions(claudeHome string) ([]Session, error) {
+	return readSessions(claudeHome, nil)
+}
+
+func readSessions(claudeHome string, cache *sessioncache.Cache[Session]) ([]Session, error) {
+	cache.BeginScan()
+	defer cache.EndScan()
 	root, err := resolveClaudeHome(claudeHome)
 	if err != nil || root == "" {
 		return nil, nil //nolint:nilerr // absent/empty home is not an error
@@ -112,7 +119,9 @@ func ReadSessions(claudeHome string) ([]Session, error) {
 				continue
 			}
 			sessionID := strings.TrimSuffix(f.Name(), ".jsonl")
-			s, ok := parseSessionFile(filepath.Join(projectDir, f.Name()), sessionID)
+			s, ok := cache.Read(filepath.Join(projectDir, f.Name()), func(path string) (Session, bool) {
+				return parseSessionFile(path, sessionID)
+			})
 			if ok {
 				sessions = append(sessions, s)
 			}

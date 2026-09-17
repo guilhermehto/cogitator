@@ -10,6 +10,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/hookipc"
 	"github.com/guilhermehto/cogitator/internal/provider"
+	"github.com/guilhermehto/cogitator/internal/sessioncache"
 )
 
 // InstanceID is the synthetic instance identifier used for all Codex sessions.
@@ -45,6 +46,7 @@ type Provider struct {
 	pollInterval  time.Duration
 	recencyWindow time.Duration
 	logger        *slog.Logger
+	transcripts   sessioncache.Cache[Session]
 
 	// mu guards sessions and overlays.
 	mu       sync.Mutex
@@ -125,7 +127,7 @@ func (p *Provider) Start(ctx context.Context, sink provider.Sink) error {
 //     a hook that arrives before the rollout file is flushed from being wiped
 //     by the next poll.
 func (p *Provider) poll(sink provider.Sink) {
-	sessions, err := ReadSessions(p.codexHome)
+	sessions, err := readSessions(p.codexHome, &p.transcripts)
 	if err != nil {
 		p.logger.Warn("codex: failed to read sessions", "err", err)
 		return
