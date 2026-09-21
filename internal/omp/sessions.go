@@ -21,11 +21,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
+	"github.com/guilhermehto/cogitator/internal/sessioncache"
 )
 
 // Session holds the parsed summary of a single omp session transcript.
@@ -69,6 +71,12 @@ const maxTitleRunes = 80
 //     entirely (this excludes subagent transcripts and other non-session
 //     JSONL, mirroring omp's own loader).
 func ReadSessions(ompHome string) ([]Session, error) {
+	return readSessions(ompHome, nil)
+}
+
+func readSessions(ompHome string, cache *sessioncache.Cache[Session]) ([]Session, error) {
+	cache.BeginScan()
+	defer cache.EndScan()
 	agentDir, err := resolveOmpAgentDir(ompHome)
 	if err != nil || agentDir == "" {
 		return nil, nil //nolint:nilerr // absent/empty home is not an error
@@ -92,7 +100,7 @@ func ReadSessions(ompHome string) ([]Session, error) {
 		if !isSessionFile(d.Name()) {
 			return nil
 		}
-		s, ok := parseSessionFile(path)
+		s, ok := cache.Read(path, parseSessionFile)
 		if ok {
 			sessions = append(sessions, s)
 		}
@@ -270,13 +278,9 @@ func parseTimestamp(s string) (time.Time, bool) {
 
 // sortByLastActivityDesc sorts sessions in-place, most-recent first.
 func sortByLastActivityDesc(sessions []Session) {
-	// Insertion sort keeps the dependency surface minimal; session counts are
-	// small (one file per worktree session).
-	for i := 1; i < len(sessions); i++ {
-		for j := i; j > 0 && sessions[j].LastActivity.After(sessions[j-1].LastActivity); j-- {
-			sessions[j], sessions[j-1] = sessions[j-1], sessions[j]
-		}
-	}
+	sort.SliceStable(sessions, func(i, j int) bool {
+		return sessions[i].LastActivity.After(sessions[j].LastActivity)
+	})
 }
 
 // rawLine is the top-level shape of every session JSONL line. It carries both

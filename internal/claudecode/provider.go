@@ -10,6 +10,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
 	"github.com/guilhermehto/cogitator/internal/provider"
+	"github.com/guilhermehto/cogitator/internal/sessioncache"
 )
 
 // InstanceID is the synthetic instance identifier used for all Claude Code
@@ -49,6 +50,7 @@ type Provider struct {
 	pollInterval  time.Duration
 	recencyWindow time.Duration
 	logger        *slog.Logger
+	transcripts   sessioncache.Cache[Session]
 
 	// mu guards sessions and overlays.
 	mu       sync.Mutex
@@ -129,7 +131,7 @@ func (p *Provider) Start(ctx context.Context, sink provider.Sink) error {
 //     before the transcript file is flushed from being wiped by the next poll,
 //     while ensuring stale phantom sessions do not leak for process lifetime.
 func (p *Provider) poll(sink provider.Sink) {
-	sessions, err := ReadSessions(p.claudeHome)
+	sessions, err := readSessions(p.claudeHome, &p.transcripts)
 	if err != nil {
 		p.logger.Warn("claude-code: failed to read sessions", "err", err)
 		return
