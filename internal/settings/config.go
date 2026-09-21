@@ -69,6 +69,7 @@ type Config struct {
 	// effective, validated value with ResolveWorkspaceRoot rather than
 	// reading this field directly.
 	WorkspaceRoot string `json:"workspaceRoot,omitempty"`
+	WorktreeRoot  string `json:"worktreeRoot,omitempty"`
 }
 
 // ForceDeleteEnabled reports whether worktree deletion should pass
@@ -86,6 +87,7 @@ type configFile struct {
 	LaunchMode          LaunchMode `json:"launchMode,omitempty"`
 	ForceDeleteWorktree *bool      `json:"forceDeleteWorktree,omitempty"`
 	WorkspaceRoot       string     `json:"workspaceRoot,omitempty"`
+	WorktreeRoot        string     `json:"worktreeRoot,omitempty"`
 }
 
 // configDir returns the directory that holds cogitator's config file.
@@ -102,11 +104,7 @@ func configDir() (string, error) {
 	return filepath.Join(base, "cogitator"), nil
 }
 
-// workspaceRootDefault returns the default workspace root: it honours
-// $XDG_DATA_HOME and falls back to ~/.local/share/cogitator/workspaces,
-// mirroring how configDir handles $XDG_CONFIG_HOME and rosterDir handles
-// $XDG_STATE_HOME.
-func workspaceRootDefault() (string, error) {
+func dataRootDefault(directory string) (string, error) {
 	base := os.Getenv("XDG_DATA_HOME")
 	if base == "" {
 		home, err := os.UserHomeDir()
@@ -115,7 +113,7 @@ func workspaceRootDefault() (string, error) {
 		}
 		base = filepath.Join(home, ".local", "share")
 	}
-	return filepath.Join(base, "cogitator", "workspaces"), nil
+	return filepath.Join(base, "cogitator", directory), nil
 }
 
 // expandHome expands a leading "~" or "~/" in p to the user's home directory.
@@ -156,28 +154,22 @@ func nestedGitWorkTree(candidate string) (string, bool) {
 	}
 }
 
-// canonicalizeWorkspaceRoot makes path absolute and passes it through
-// pathnorm.Canonical, so both the default and configured branches of
-// ResolveWorkspaceRoot return a value in the exact form every other consumer
-// of a workspace root (settings.PathUnderRoot, git worktree paths, tmux/
-// OpenCode session directories) already compares against. label identifies
-// the input for error messages.
-func canonicalizeWorkspaceRoot(path, label string) (string, error) {
+func canonicalizeRoot(path, label, field string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return "", fmt.Errorf("resolve workspaceRoot %q to an absolute path: %w", label, err)
+		return "", fmt.Errorf("resolve %s %q to an absolute path: %w", field, label, err)
 	}
 
 	canonical, err := pathnorm.Canonical(abs)
 	if err != nil {
-		return "", fmt.Errorf("canonicalize workspaceRoot %q: %w", label, err)
+		return "", fmt.Errorf("canonicalize %s %q: %w", field, label, err)
 	}
 	return canonical, nil
 }
 
 // ResolveWorkspaceRoot returns the effective, validated workspace root for
 // cfg. An empty cfg.WorkspaceRoot resolves to the XDG default (see
-// workspaceRootDefault); a non-empty value has its leading "~" expanded
+// dataRootDefault); a non-empty value has its leading "~" expanded
 // first. Either way the result is made absolute and canonicalized via
 // pathnorm.Canonical, so callers can compare it against other canonical paths
 // (e.g. settings.PathUnderRoot) without a caller-side canonicalization step.
@@ -190,28 +182,35 @@ func canonicalizeWorkspaceRoot(path, label string) (string, error) {
 // holds git worktrees) nested inside another working tree would corrupt
 // both.
 func ResolveWorkspaceRoot(cfg Config) (string, error) {
-	if cfg.WorkspaceRoot == "" {
-		defaultRoot, err := workspaceRootDefault()
+	return resolveRoot(cfg.WorkspaceRoot, "workspaceRoot", "workspaces")
+}
+
+func ResolveWorktreeRoot(cfg Config) (string, error) {
+	return resolveRoot(cfg.WorktreeRoot, "worktreeRoot", "worktrees")
+}
+
+func resolveRoot(configured, field, directory string) (string, error) {
+	if configured == "" {
+		root, err := dataRootDefault(directory)
 		if err != nil {
 			return "", err
 		}
-		return canonicalizeWorkspaceRoot(defaultRoot, defaultRoot)
+		return canonicalizeRoot(root, root, field)
 	}
 
-	expanded, err := expandHome(cfg.WorkspaceRoot)
+	expanded, err := expandHome(configured)
 	if err != nil {
 		return "", err
 	}
 
-	canonical, err := canonicalizeWorkspaceRoot(expanded, cfg.WorkspaceRoot)
+	canonical, err := canonicalizeRoot(expanded, configured, field)
 	if err != nil {
 		return "", err
 	}
 
 	if repo, nested := nestedGitWorkTree(canonical); nested {
-		return "", fmt.Errorf("workspaceRoot %q resolves inside the git working tree at %q; choose a path outside any repository", cfg.WorkspaceRoot, repo)
+		return "", fmt.Errorf("%s %q resolves inside the git working tree at %q; choose a path outside any repository", field, configured, repo)
 	}
-
 	return canonical, nil
 }
 
@@ -274,6 +273,7 @@ func LoadConfig() (Config, error) {
 		LaunchMode:          normalizeLaunchMode(raw.LaunchMode),
 		ForceDeleteWorktree: raw.ForceDeleteWorktree,
 		WorkspaceRoot:       raw.WorkspaceRoot,
+		WorktreeRoot:        raw.WorktreeRoot,
 		Repos:               make([]RepoConfig, 0, len(raw.Repos)),
 	}
 
@@ -315,6 +315,7 @@ func SaveConfig(cfg Config) error {
 		LaunchMode:          normalizeLaunchMode(cfg.LaunchMode),
 		ForceDeleteWorktree: cfg.ForceDeleteWorktree,
 		WorkspaceRoot:       cfg.WorkspaceRoot,
+		WorktreeRoot:        cfg.WorktreeRoot,
 		Repos:               make([]string, 0, len(cfg.Repos)),
 	}
 	for _, r := range cfg.Repos {

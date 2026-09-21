@@ -690,3 +690,107 @@ func TestSetLaunchMode_PreservesOtherFields(t *testing.T) {
 		t.Errorf("SetLaunchMode must preserve DefaultHarness; got %q", cfg.DefaultHarness)
 	}
 }
+
+func TestResolveWorktreeRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, tc := range []struct{ name, configured, dataHome, want string }{
+		{"xdg", "", home, filepath.Join(home, "cogitator", "worktrees")},
+		{"fallback", "", "", filepath.Join(home, ".local", "share", "cogitator", "worktrees")},
+		{"custom", filepath.Join(home, "custom"), home, filepath.Join(home, "custom")},
+		{"tilde", "~/custom", home, filepath.Join(home, "custom")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_DATA_HOME", tc.dataHome)
+			got, err := settings.ResolveWorktreeRoot(settings.Config{WorktreeRoot: tc.configured})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := pathnorm.Canonical(tc.want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != want {
+				t.Fatalf("root = %q, want %q", got, want)
+			}
+			if _, err := os.Stat(got); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("resolution created directory or stat failed: %v", err)
+			}
+		})
+	}
+}
+
+func TestResolveWorktreeRootResolvesSymlinksAndRejectsNestedRepositories(t *testing.T) {
+	parent := t.TempDir()
+	target := t.TempDir()
+	link := filepath.Join(parent, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	cfg := settings.Config{WorktreeRoot: filepath.Join(link, "worktrees")}
+	got, err := settings.ResolveWorktreeRoot(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := pathnorm.Canonical(filepath.Join(target, "worktrees"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("root = %q, want %q", got, want)
+	}
+	for _, marker := range []string{"directory", "file"} {
+		t.Run(marker, func(t *testing.T) {
+			markerPath := filepath.Join(target, ".git")
+			if marker == "directory" {
+				if err := os.Mkdir(markerPath, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(markerPath, []byte("gitdir: elsewhere"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := os.Remove(markerPath); err != nil {
+					t.Error(err)
+				}
+			})
+			for _, root := range []string{link, cfg.WorktreeRoot} {
+				_, err := settings.ResolveWorktreeRoot(settings.Config{WorktreeRoot: root})
+				if err == nil || !strings.Contains(err.Error(), "worktreeRoot") {
+					t.Fatalf("expected worktreeRoot validation error, got %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestWorktreeRootPersistsAcrossConfigUpdates(t *testing.T) {
+	withConfigEnv(t, t.TempDir())
+	if err := settings.SaveConfig(settings.Config{WorktreeRoot: "~/worktrees", WorkspaceRoot: "~/workspaces"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := settings.SetDefaultHarness("codex"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := settings.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorktreeRoot != "~/worktrees" || cfg.WorkspaceRoot != "~/workspaces" {
+		t.Fatalf("roots lost after update: %+v", cfg)
+	}
+	if err := settings.SaveConfig(settings.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	path, err := settings.ConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(contents), "worktreeRoot") {
+		t.Fatalf("empty root must be omitted: %s", contents)
+	}
+}

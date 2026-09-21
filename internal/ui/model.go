@@ -935,8 +935,8 @@ func worktreeAddFn(gitOp gitOps, fromRemote bool) func(string, string, string) (
 // When fromRemote is true the branch is fetched from origin and checked out
 // (git.FetchAndAddWorktree); otherwise a fresh branch is created off the
 // current HEAD (git.AddWorktree). Both paths share the same launch flow.
-func newWorktreeCmd(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, branch, harnessKind string, mode tmuxctl.LaunchMode, fromRemote bool) tea.Cmd {
-	inner := newWorktreeInner(ops, gitOp, harnOp, repoPath, branch, harnessKind, mode, fromRemote)
+func newWorktreeCmd(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, branch, dest, harnessKind string, mode tmuxctl.LaunchMode, fromRemote bool) tea.Cmd {
+	inner := newWorktreeInner(ops, gitOp, harnOp, repoPath, branch, dest, harnessKind, mode, fromRemote)
 	return func() tea.Msg {
 		// Stamp repo+branch on every result (including error paths) so the
 		// Update handler can clear the matching pending-create spinner row.
@@ -947,13 +947,11 @@ func newWorktreeCmd(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, bran
 	}
 }
 
-func newWorktreeInner(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, branch, harnessKind string, mode tmuxctl.LaunchMode, fromRemote bool) func() worktreeCreatedMsg {
+func newWorktreeInner(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, branch, dest, harnessKind string, mode tmuxctl.LaunchMode, fromRemote bool) func() worktreeCreatedMsg {
 	return func() worktreeCreatedMsg {
 		if ops == nil || !ops.Available() {
 			return worktreeCreatedMsg{err: tmuxctl.ErrNotAvailable}
 		}
-
-		dest := worktreeDest(repoPath, branch)
 
 		addFn := worktreeAddFn(gitOp, fromRemote)
 
@@ -1166,12 +1164,8 @@ func createKey(repo, branch string) string {
 	return repo + "\x00" + branch
 }
 
-// worktreeDest derives a new worktree's destination path: a sibling of the repo
-// named after the branch (e.g. /home/user/myrepo + "feat" → /home/user/myrepo-feat).
-// Shared by newWorktreeCmd and the dispatch site so the placeholder row's path
-// matches the path the worktree is actually created at.
-func worktreeDest(repoPath, branch string) string {
-	return filepath.Join(filepath.Dir(repoPath), filepath.Base(repoPath)+"-"+branch)
+func worktreeDest(root, repoPath, branch string) (string, error) {
+	return pathnorm.Canonical(filepath.Join(root, filepath.Base(repoPath)+"-"+branch))
 }
 
 // addPendingCreate records an in-flight creation so injectPendingCreates can
@@ -3294,19 +3288,35 @@ func (m model) startNewWorktree(repoPath, branch, harnessKind string, fromRemote
 	m.worktreeFromRemote = false
 	m.harnessChooserKinds = nil
 	m.harnessChooserCursor = 0
-	launchMode := m.launchMode
-	if wsCfg, err := settings.LoadConfig(); err == nil {
-		launchMode = launchModeFor(wsCfg.LaunchMode)
+
+	cfg, err := settings.LoadConfig()
+	if err != nil {
+		m.tmuxHint = err.Error()
+		return m, nil
 	}
+
+	root, err := settings.ResolveWorktreeRoot(cfg)
+	if err != nil {
+		m.tmuxHint = err.Error()
+		return m, nil
+	}
+
+	dest, err := worktreeDest(root, repoPath, branch)
+	if err != nil {
+		m.tmuxHint = err.Error()
+		return m, nil
+	}
+
+	launchMode := launchModeFor(cfg.LaunchMode)
 	// Optimistic spinner row for the duration of the create/fetch.
-	m.addPendingCreate(repoPath, worktreeDest(repoPath, branch), branch, fromRemote)
+	m.addPendingCreate(repoPath, dest, branch, fromRemote)
 	m.workspaceRows = injectPendingCreates(m.workspaceRows, m.pendingCreates)
 	var spinnerC tea.Cmd
 	if !m.spinnerActive {
 		m.spinnerActive = true
 		spinnerC = spinnerTickCmd()
 	}
-	actionCmd := newWorktreeCmd(m.tmux, m.gitOp, m.harnOp, repoPath, branch, harnessKind, launchMode, fromRemote)
+	actionCmd := newWorktreeCmd(m.tmux, m.gitOp, m.harnOp, repoPath, branch, dest, harnessKind, launchMode, fromRemote)
 	return m, tea.Batch(actionCmd, spinnerC)
 }
 

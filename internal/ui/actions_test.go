@@ -717,7 +717,7 @@ func TestNewWorktreeCmdCallsAddWorktreeAndLaunch(t *testing.T) {
 	gitFake := &fakeGitOps{addResult: "/r-feat"}
 	harnFake := &fakeHarnessOps{argv: []string{"fake", "/r-feat"}}
 
-	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake", tmuxctl.ModeWindow, false)
+	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "/r-feat", "fake", tmuxctl.ModeWindow, false)
 	msg := runCmd(cmd)
 
 	result, ok := msg.(worktreeCreatedMsg)
@@ -755,7 +755,7 @@ func TestNewWorktreeCmdSessionModePropagates(t *testing.T) {
 	gitFake := &fakeGitOps{addResult: "/r-feat"}
 	harnFake := &fakeHarnessOps{argv: []string{"fake", "/r-feat"}}
 
-	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake", tmuxctl.ModeSession, false)
+	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "/r-feat", "fake", tmuxctl.ModeSession, false)
 	if _, ok := runCmd(cmd).(worktreeCreatedMsg); !ok {
 		t.Fatal("expected worktreeCreatedMsg")
 	}
@@ -772,7 +772,7 @@ func TestNewWorktreeCmdGitErrorReturnsMsg(t *testing.T) {
 	gitFake := &fakeGitOps{addErr: errors.New("branch already exists")}
 	harnFake := &fakeHarnessOps{}
 
-	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake", tmuxctl.ModeWindow, false)
+	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "/r-feat", "fake", tmuxctl.ModeWindow, false)
 	msg := runCmd(cmd)
 
 	result, ok := msg.(worktreeCreatedMsg)
@@ -792,7 +792,7 @@ func TestNewWorktreeCmdTmuxUnavailableReturnsMsg(t *testing.T) {
 	gitFake := &fakeGitOps{}
 	harnFake := &fakeHarnessOps{}
 
-	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake", tmuxctl.ModeWindow, false)
+	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "/r-feat", "fake", tmuxctl.ModeWindow, false)
 	msg := runCmd(cmd)
 
 	result, ok := msg.(worktreeCreatedMsg)
@@ -815,7 +815,7 @@ func TestNewWorktreeCmdFromRemoteFetches(t *testing.T) {
 	gitFake := &fakeGitOps{fetchAddResult: "/r-feat"}
 	harnFake := &fakeHarnessOps{argv: []string{"fake", "/r-feat"}}
 
-	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "fake", tmuxctl.ModeWindow, true)
+	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "/r-feat", "fake", tmuxctl.ModeWindow, true)
 	msg := runCmd(cmd)
 
 	result, ok := msg.(worktreeCreatedMsg)
