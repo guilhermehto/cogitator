@@ -279,9 +279,14 @@ func (m model) startWorkspaceSessionCreate(workspaceName, sessionName, harnessKi
 // but is composited as a centered overlay (via overlayBox, render.go) rather
 // than a pinned footer line, since the Workspaces view's own renderer
 // (workspace_view.go) has no footer budget to grow into.
-func (m model) renderWsNamePrompt(title, label string) string {
-	return paletteBoxStyle.Render(
-		headerStyle.Render(title) + "\n" + wtHintStyle.Render(label) + m.input.View(),
+func (m model) renderWsNamePrompt(title string) string {
+	const nameInputW = 40
+	in := m.input
+	in.Width = nameInputW
+	return modalBoxStyle.Render(
+		headerStyle.Render(title) + "\n\n" +
+			padToWidth(promptMarker()+in.View(), nameInputW+3) + "\n\n" +
+			dimStyle.Render("enter confirm · esc cancel"),
 	)
 }
 

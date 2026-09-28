@@ -421,7 +421,7 @@ type wsDeleteConfirmLayout struct {
 
 func (m model) layoutWsDeleteConfirm(fieldW, fieldH int) wsDeleteConfirmLayout {
 	title, hint := m.wsDeleteConfirmCopy()
-	contentW := min(72, max(1, fieldW-4))
+	contentW := min(72, max(1, fieldW-6))
 	l := wsDeleteConfirmLayout{
 		title: ansi.Wrap(title, contentW, ""),
 		hint:  ansi.Wrap(hint, contentW, ""),
@@ -500,5 +500,5 @@ func (m model) renderWsDeleteConfirm(fieldW, fieldH int) string {
 		b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("%d–%d of %d · ↑↓ scroll", start+1, end, len(l.body))))
 	}
 	b.WriteString("\n" + hintStyle.Render(l.hint))
-	return paletteBoxStyle.Render(b.String())
+	return modalBoxStyle.Render(b.String())
 }

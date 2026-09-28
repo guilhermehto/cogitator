@@ -2980,10 +2980,10 @@ func (m model) View() string {
 		sessionContent = m.renderHarnessChooser(paneW, sessionsInnerH)
 	case m.prompt == promptNewWorkspace:
 		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
-		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsNamePrompt("New workspace", "workspace name: "))
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsNamePrompt("New workspace"))
 	case m.prompt == promptNewWorkspaceSession:
 		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
-		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsNamePrompt("New session", "session name: "))
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsNamePrompt("New session in "+m.wsCreateTarget))
 	case wsDeletePromptActive(m.prompt):
 		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsDeleteConfirm(paneW, sessionsInnerH))
@@ -3034,6 +3034,9 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 	// mechanism, since the sessions pane's various prompts set their own
 	// placeholder and don't want it clobbered.
 	ti.KeyMap.AcceptSuggestion = key.NewBinding(key.WithDisabled())
+	// Every prompt draws its own label and promptMarker; the default "> "
+	// would double up with them.
+	ti.Prompt = ""
 	// Width is intentionally left at zero here; it is recomputed in Update
 	// on the first tea.WindowSizeMsg so it tracks the actual terminal width.
 

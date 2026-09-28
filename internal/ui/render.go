@@ -115,7 +115,19 @@ var (
 	paletteBoxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("63"))
+	// modalBoxStyle frames floating dialogs whose content is not pre-padded
+	// (name prompts, confirmations, pickers), keeping text off the border.
+	modalBoxStyle = paletteBoxStyle.Padding(0, 1)
+	// promptMarkerStyle colours the caret that leads every text-entry line.
+	promptMarkerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Bold(true)
 )
+
+// promptMarker leads every text-entry line so typed input reads the same in
+// every prompt; the shared textinput's own prompt is blanked in newModel.
+// Rendered per call so it honours the colour profile active at draw time.
+func promptMarker() string {
+	return promptMarkerStyle.Render("❯ ")
+}
 
 // spinnerFrames are the braille glyphs cycled (one per spinnerTickMsg) on a
 // pending-create row to signal an in-flight worktree create/fetch.
@@ -674,7 +686,7 @@ func (m model) worktreePromptLine() string {
 func (m model) renderRepoFinder(width, height int) string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Add repo") + "\n")
-	b.WriteString("add repo > " + m.input.View())
+	b.WriteString(promptMarker() + m.input.View())
 
 	switch {
 	case m.repoFinderErr != "":
@@ -754,7 +766,7 @@ func (m model) renderSessionPalette(fieldW, fieldH int) string {
 	}
 	lines := []string{
 		padToWidth(" "+headerStyle.Render(title), contentW),
-		padToWidth(ansi.Truncate(" "+dimStyle.Render("> ")+m.input.View(), contentW, ""), contentW),
+		padToWidth(ansi.Truncate(" "+promptMarker()+m.input.View(), contentW, ""), contentW),
 		"",
 	}
 

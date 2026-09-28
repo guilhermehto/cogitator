@@ -303,7 +303,7 @@ func (m model) renderWorkspaceModal(fieldW, fieldH int) string {
 
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Repo membership: " + m.wsModalWorkspace))
-	b.WriteString("\n" + dimStyle.Render("filter > ") + m.input.View())
+	b.WriteString("\n" + promptMarker() + m.input.View())
 
 	switch {
 	case m.wsModalErr != "":
