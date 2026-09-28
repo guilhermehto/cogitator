@@ -3,10 +3,10 @@ package ui
 // workspace_modal_test.go — tests for step 14's repo-membership modal ('e' in
 // the Workspaces view): the scan/attach/detach Cmds, the combined
 // member+candidate list's pure helpers, the 'e' key + wsModalScanMsg/
-// wsModalActionErrMsg Update wiring, and the AttachRepo/DetachRepo round trip
-// against a real store. membershipChangedMsg's Update handling belongs to
-// step 15 (workspace_backfill_test.go); this file only asserts it is emitted
-// with the right shape (attach vs. detach, workspace, repo).
+// wsModalActionErrMsg Update wiring, in-modal commits for workspaces without
+// sessions, and the AttachRepo/DetachRepo round trip against a real store.
+// The backfill hand-off of membershipChangedMsg belongs to step 15
+// (workspace_backfill_test.go).
 
 import (
 	"errors"
@@ -473,12 +473,20 @@ func TestWorkspaceModal_EnterWithNoMatchesNoop(t *testing.T) {
 	}
 }
 
-func TestWorkspaceModal_EnterOnCandidateDispatchesAttachAndCloses(t *testing.T) {
+// wsWithSession is a wsStatuses fixture for "payments" holding one session,
+// so a membership commit must hand off to the backfill prompt.
+func wsWithSession() []workspace.WorkspaceStatus {
+	return []workspace.WorkspaceStatus{
+		makeWsStatus("payments", makeSessionStatus("s1", "s1", settings.StateStopped, "/repo/a")),
+	}
+}
+
+func TestWorkspaceModal_EnterOnCandidateWithSessionsDispatchesAttachAndCloses(t *testing.T) {
 	repo := initGitRepoForUI(t)
 	store := &fakeModalStoreOps{}
 	m := model{
 		width: 120, prompt: promptWorkspaceModal, input: newTestInput(),
-		wsModalWorkspace: "payments", store: store,
+		wsModalWorkspace: "payments", store: store, wsStatuses: wsWithSession(),
 	}
 	m.wsModalEntries = []wsModalEntry{{path: repo}}
 	m.wsModalMatches = []int{0}
@@ -486,7 +494,7 @@ func TestWorkspaceModal_EnterOnCandidateDispatchesAttachAndCloses(t *testing.T) 
 	updated, cmd := m.Update(keyMsg("enter"))
 	m2 := updated.(model)
 	if m2.prompt != promptIdle {
-		t.Errorf("enter must close the modal; prompt = %v", m2.prompt)
+		t.Errorf("enter must close the modal so the backfill prompt can open; prompt = %v", m2.prompt)
 	}
 	if cmd == nil {
 		t.Fatal("enter on a candidate must dispatch a cmd")
@@ -500,11 +508,11 @@ func TestWorkspaceModal_EnterOnCandidateDispatchesAttachAndCloses(t *testing.T) 
 	}
 }
 
-func TestWorkspaceModal_EnterOnMemberDispatchesDetachAndCloses(t *testing.T) {
+func TestWorkspaceModal_EnterOnMemberWithSessionsDispatchesDetachAndCloses(t *testing.T) {
 	store := &fakeModalStoreOps{}
 	m := model{
 		width: 120, prompt: promptWorkspaceModal, input: newTestInput(),
-		wsModalWorkspace: "payments", store: store,
+		wsModalWorkspace: "payments", store: store, wsStatuses: wsWithSession(),
 	}
 	m.wsModalEntries = []wsModalEntry{{path: "/repo/a", member: true}}
 	m.wsModalMatches = []int{0}
@@ -512,7 +520,7 @@ func TestWorkspaceModal_EnterOnMemberDispatchesDetachAndCloses(t *testing.T) {
 	updated, cmd := m.Update(keyMsg("enter"))
 	m2 := updated.(model)
 	if m2.prompt != promptIdle {
-		t.Errorf("enter must close the modal; prompt = %v", m2.prompt)
+		t.Errorf("enter must close the modal so the backfill prompt can open; prompt = %v", m2.prompt)
 	}
 	if cmd == nil {
 		t.Fatal("enter on a member must dispatch a cmd")
@@ -523,6 +531,83 @@ func TestWorkspaceModal_EnterOnMemberDispatchesDetachAndCloses(t *testing.T) {
 	}
 	if len(store.attachCalls) != 0 {
 		t.Error("enter on a member must never call AttachRepo")
+	}
+}
+
+func TestWorkspaceModal_EnterWithoutSessionsKeepsModalOpenForMoreToggles(t *testing.T) {
+	store := &fakeModalStoreOps{}
+	m := model{
+		width: 120, prompt: promptWorkspaceModal, input: newTestInput(),
+		wsModalWorkspace: "payments", store: store,
+		wsStatuses: []workspace.WorkspaceStatus{makeWsStatus("payments")},
+	}
+	m.wsModalEntries = []wsModalEntry{{path: "/repo/a", member: true}, {path: "/repo/b"}}
+	m.wsModalMatches = []int{0, 1}
+
+	updated, cmd := m.Update(keyMsg("enter"))
+	m2 := updated.(model)
+	if m2.prompt != promptWorkspaceModal {
+		t.Fatalf("a workspace without sessions must keep the modal open; prompt = %v", m2.prompt)
+	}
+	if m2.wsModalBusy != "/repo/a" {
+		t.Errorf("the toggled row must be marked busy; got %q", m2.wsModalBusy)
+	}
+	runCmd(cmd)
+	if len(store.detachCalls) != 1 {
+		t.Errorf("enter on a member must call DetachRepo; got %v", store.detachCalls)
+	}
+
+	_, again := m2.Update(keyMsg("enter"))
+	if again != nil {
+		t.Error("enter while a commit is in flight must not dispatch another")
+	}
+}
+
+func TestWorkspaceModal_CommitLandsInOpenModalWithoutClosing(t *testing.T) {
+	m := model{
+		width: 120, prompt: promptWorkspaceModal, input: newTestInput(),
+		wsModalWorkspace: "payments", wsModalBusy: "/repo/b",
+		wsStatuses: []workspace.WorkspaceStatus{makeWsStatus("payments")},
+	}
+	m.wsModalEntries = []wsModalEntry{{path: "/repo/a", member: true}, {path: "/repo/b"}}
+	m.wsModalMatches = []int{0, 1}
+	m.wsModalCursor = 1
+
+	updated, cmd := m.Update(membershipChangedMsg{workspace: "payments", repo: "/repo/b", attached: true})
+	m2 := updated.(model)
+	if m2.prompt != promptWorkspaceModal {
+		t.Fatalf("the modal must stay open after its own commit lands; prompt = %v", m2.prompt)
+	}
+	if !m2.wsModalEntries[1].member {
+		t.Error("the attached row must now read as a member")
+	}
+	if m2.wsModalBusy != "" || m2.wsModalCursor != 1 {
+		t.Errorf("busy must clear and the cursor stay on the row; busy=%q cursor=%d", m2.wsModalBusy, m2.wsModalCursor)
+	}
+	if !strings.Contains(m2.wsModalNotice, "added b") {
+		t.Errorf("the modal must confirm what changed; got %q", m2.wsModalNotice)
+	}
+	if m2.wsHint != "" {
+		t.Errorf("an in-modal commit must not raise the backfill-dropped hint; got %q", m2.wsHint)
+	}
+	if cmd == nil {
+		t.Error("the Workspaces view behind the modal must reload")
+	}
+}
+
+func TestWorkspaceModal_CommitFailureShowsInsideOpenModal(t *testing.T) {
+	m := model{
+		width: 120, prompt: promptWorkspaceModal, input: newTestInput(),
+		wsModalWorkspace: "payments", wsModalBusy: "/repo/b",
+	}
+
+	updated, _ := m.Update(wsModalActionErrMsg{err: errWorkspaceModalTest})
+	m2 := updated.(model)
+	if m2.prompt != promptWorkspaceModal || m2.wsModalBusy != "" {
+		t.Errorf("a failed commit must keep the modal open and free the row; prompt=%v busy=%q", m2.prompt, m2.wsModalBusy)
+	}
+	if !m2.wsModalNoticeErr || !strings.Contains(m2.wsModalNotice, "boom") {
+		t.Errorf("the failure must be reported inside the modal; got %q", m2.wsModalNotice)
 	}
 }
 

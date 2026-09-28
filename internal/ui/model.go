@@ -707,21 +707,25 @@ type model struct {
 	// only while prompt == promptWorkspaceModal. wsModalWorkspace is the
 	// target workspace's name, captured when the modal opens.
 	// wsModalScanning is true between opening and the scan result arriving.
-	// wsModalEntries is the combined, alphabetically sorted set of the
-	// workspace's current members (offered for removal) and freshly
-	// discovered non-member candidates (offered for addition) — see
-	// wsModalEntry (workspace_modal.go). wsModalMatches is its current
-	// fuzzy-filtered view (what is rendered), indices into wsModalEntries;
-	// wsModalCursor indexes wsModalMatches. wsModalErr holds a scan error to
-	// surface in the modal body (a failed commit is reported via wsHint
-	// instead, since the modal has already closed by then). Zero values are
-	// safe (modal closed).
+	// wsModalEntries is the workspace's current members (offered for
+	// removal) followed by freshly discovered non-member candidates (offered
+	// for addition) — see wsModalEntry (workspace_modal.go). wsModalMatches
+	// is its current fuzzy-filtered view (what is rendered), indices into
+	// wsModalEntries; wsModalCursor indexes wsModalMatches. wsModalErr holds a
+	// scan error to surface in the modal body. For a workspace without
+	// sessions the modal stays open across commits: wsModalBusy is the path
+	// whose attach/detach is in flight, and wsModalNotice/wsModalNoticeErr
+	// report the last commit's outcome inside the modal. Zero values are safe
+	// (modal closed).
 	wsModalWorkspace string
 	wsModalScanning  bool
 	wsModalEntries   []wsModalEntry
 	wsModalMatches   []int
 	wsModalCursor    int
 	wsModalErr       string
+	wsModalBusy      string
+	wsModalNotice    string
+	wsModalNoticeErr bool
 
 	// Membership-backfill prompt ('promptWorkspaceBackfill') state, opened
 	// when a membershipChangedMsg lands for a workspace that has at least one
@@ -1379,7 +1383,7 @@ func (m model) paneHeights() (sessionsOuterH, sessionsInnerH int) {
 		extraFooterRows++
 	}
 
-	// The application header and legend always reserve one row each.
+	// The application header and key hint bar always reserve one row each.
 	sessionsOuterH = max(6, m.height-2-extraFooterRows)
 	sessionsInnerH = max(1, sessionsOuterH-2)
 	return sessionsOuterH, sessionsInnerH
@@ -2313,10 +2317,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case wsModalActionErrMsg:
-		// A committed attach/detach failed validation or persistence; report
-		// it in wsHint since the modal has already closed by the time this
-		// arrives. membershipChangedMsg (the success case) is handled below,
-		// by workspace_backfill.go's handleMembershipChanged.
+		// A committed attach/detach failed validation or persistence. The
+		// modal reports it inline when it is still open on this commit;
+		// otherwise it has closed and the failure goes to wsHint.
+		// membershipChangedMsg (the success case) is handled below.
+		if m.wsModalAwaitingCommit() {
+			return m.failWsModalCommit(msg.err), nil
+		}
 		m.wsHint = fmt.Sprintf("membership change failed: %v", msg.err)
 		return m, nil
 
@@ -2336,6 +2343,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// user has no way to know the backfill never happened otherwise, so
 		// name the repo and workspace and point at the recovery (re-add the
 		// repo to be offered the backfill again).
+		if m.wsModalAwaitingCommit() && msg.workspace == m.wsModalWorkspace {
+			return m.applyWsModalCommit(msg)
+		}
 		if m.prompt != promptIdle {
 			m.wsHint = fmt.Sprintf(
 				"%s: existing sessions in %s were not updated — re-add the repo to offer the backfill again",
@@ -2838,34 +2848,57 @@ func (m model) orderedSessionCandidates() (candidates []sessionCandidate, startO
 	return candidates, startOnPrevious
 }
 
-// renderHarnessChooser renders the harness-selection list shown in the sessions
-// pane while prompt == promptChooseHarness. The user moves the cursor with
-// up/down and confirms with enter; esc cancels the whole new-worktree flow.
-func (m model) renderHarnessChooser(width, height int) string {
-	var b strings.Builder
-	b.WriteString(headerStyle.Render("Choose harness") + "\n")
+// renderHarnessChooser renders the floating harness-selection box drawn over
+// the active view while prompt == promptChooseHarness. The user moves the
+// cursor with up/down and confirms with enter; esc cancels the whole
+// new-worktree/new-session flow. fieldW is the pane width handed to
+// overlayBox.
+func (m model) renderHarnessChooser(fieldW int) string {
+	contentW := min(48, max(20, fieldW-8))
+	subject := fmt.Sprintf("worktree %s / %s", filepath.Base(m.newWorktreeRepo), m.newWorktreeBranch)
 	if m.wsCreateTarget != "" {
-		b.WriteString(dimStyle.Render(fmt.Sprintf("new session: %s / %s", m.wsCreateTarget, m.wsCreateSessionName)) + "\n")
-	} else {
-		b.WriteString(dimStyle.Render(fmt.Sprintf("new worktree: %s / %s", filepath.Base(m.newWorktreeRepo), m.newWorktreeBranch)) + "\n")
+		subject = fmt.Sprintf("session %s / %s", m.wsCreateTarget, m.wsCreateSessionName)
 	}
 
+	lines := []string{
+		headerStyle.Render("Choose harness"),
+		dimStyle.Render("for new " + subject),
+		"",
+	}
 	if len(m.harnessChooserKinds) == 0 {
-		b.WriteString(dimStyle.Render("(no harnesses registered)"))
-		return b.String()
+		lines = append(lines, dimStyle.Render("(no harnesses registered)"))
 	}
-
 	cursor := clampIndex(m.harnessChooserCursor, len(m.harnessChooserKinds))
 	for i, k := range m.harnessChooserKinds {
-		line := ansi.Truncate("  "+string(k), width-2, "…")
+		line := padToWidth(" "+agentColor(string(k)).UnsetItalic().Render(string(k)), contentW)
 		if i == cursor {
-			line = wtCursorStyle.Render(line)
+			line = highlightSelectedRow(line)
 		}
-		b.WriteString(line + "\n")
+		lines = append(lines, line)
 	}
+	lines = append(lines, "", dimStyle.Render("enter select · ↑↓ move · esc cancel"))
 
-	b.WriteString(dimStyle.Render("↑↓ move · enter select · esc cancel"))
-	return b.String()
+	for i, line := range lines {
+		lines[i] = padToWidth(ansi.Truncate(line, contentW, "…"), contentW)
+	}
+	return modalBoxStyle.Render(strings.Join(lines, "\n"))
+}
+
+// activeViewBackdrop renders the active view as the backdrop that floating
+// dialogs are composited over, so the pane stays visible behind them.
+func (m model) activeViewBackdrop(paneW, innerH int, rows []state.SessionView, recentByInstance map[string]int) string {
+	switch {
+	case m.view == viewWorkspaces:
+		return m.renderWorkspacesView(paneW, innerH)
+	case len(m.workspaceRows) > 0:
+		now := m.tickNow
+		if now.IsZero() {
+			now = time.Now()
+		}
+		return m.renderWorkspaceRowsViewport(paneW, innerH, m.workspaceRows, m.sessionCursor, now)
+	default:
+		return m.renderAllSessions(paneW, rows, recentByInstance)
+	}
 }
 
 func (m model) View() string {
@@ -2899,13 +2932,13 @@ func (m model) View() string {
 		}
 	}
 
-	recentMins := int(cfg.RecentWindow.Minutes())
+	header := renderHeader(m.width, m.view, headerSummary{
+		live:         live,
+		recent:       recent,
+		recentWindow: cfg.RecentWindow,
+		updatedAt:    m.snap.UpdatedAt,
+	})
 
-	headerHint := fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  ? help",
-		live, recent, recentMins, m.snap.UpdatedAt.Format("15:04:05"))
-	header := titleStyle.Render("cogitator") + dimStyle.Render(headerHint)
-
-	legend := legendLine()
 	// The unreachable footer is gated behind --debug because transient
 	// "instance unreachable" warnings (laptop sleep, network blips,
 	// short-lived opencode processes) are noisy during normal operation
@@ -2926,7 +2959,8 @@ func (m model) View() string {
 	var sessionContent string
 	switch {
 	case m.prompt == promptAddRepo:
-		sessionContent = m.renderRepoFinder(paneW, sessionsInnerH)
+		backdrop := m.activeViewBackdrop(paneW, sessionsInnerH, rows, recentByInstance)
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderRepoFinder(paneW, sessionsInnerH))
 	case m.prompt == promptSwitchSession || m.prompt == promptSearchSession:
 		// Render whichever view (Sessions or Workspaces) is active as the
 		// backdrop, then composite the floating palette box centred over it
@@ -2943,47 +2977,20 @@ func (m model) View() string {
 		}
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderSessionPalette(paneW, sessionsInnerH))
 	case m.prompt == promptHelp:
-		// Render whichever view is active as the backdrop, then composite the
-		// floating help box centred over it so the pane stays visible behind.
-		now := m.tickNow
-		if now.IsZero() {
-			now = time.Now()
-		}
-		var backdrop string
-		switch {
-		case m.view == viewWorkspaces:
-			backdrop = m.renderWorkspacesView(paneW, sessionsInnerH)
-		case len(m.workspaceRows) > 0:
-			backdrop = m.renderWorkspaceRowsViewport(paneW, sessionsInnerH, m.workspaceRows, m.sessionCursor, now)
-		default:
-			backdrop = m.renderAllSessions(paneW, rows, recentByInstance)
-		}
-		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, renderHelp(paneW))
+		backdrop := m.activeViewBackdrop(paneW, sessionsInnerH, rows, recentByInstance)
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, renderHelp(paneW, m.view))
 	case m.prompt == promptSettings:
-		// Render whichever view is active as the backdrop, then composite the
-		// settings modal centred over it so the pane stays visible behind.
-		now := m.tickNow
-		if now.IsZero() {
-			now = time.Now()
-		}
-		var backdrop string
-		switch {
-		case m.view == viewWorkspaces:
-			backdrop = m.renderWorkspacesView(paneW, sessionsInnerH)
-		case len(m.workspaceRows) > 0:
-			backdrop = m.renderWorkspaceRowsViewport(paneW, sessionsInnerH, m.workspaceRows, m.sessionCursor, now)
-		default:
-			backdrop = m.renderAllSessions(paneW, rows, recentByInstance)
-		}
+		backdrop := m.activeViewBackdrop(paneW, sessionsInnerH, rows, recentByInstance)
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderSettings(paneW))
 	case m.prompt == promptChooseHarness:
-		sessionContent = m.renderHarnessChooser(paneW, sessionsInnerH)
+		backdrop := m.activeViewBackdrop(paneW, sessionsInnerH, rows, recentByInstance)
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderHarnessChooser(paneW))
 	case m.prompt == promptNewWorkspace:
 		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
-		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsNamePrompt("New workspace", "workspace name: "))
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsNamePrompt("New workspace"))
 	case m.prompt == promptNewWorkspaceSession:
 		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
-		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsNamePrompt("New session", "session name: "))
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsNamePrompt("New session in "+m.wsCreateTarget))
 	case wsDeletePromptActive(m.prompt):
 		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsDeleteConfirm(paneW, sessionsInnerH))
@@ -3006,7 +3013,7 @@ func (m model) View() string {
 	}
 	sessionsPane := sessionsStyle.Width(paneW).Height(sessionsInnerH).Render(sessionContent)
 
-	parts := []string{header, sessionsPane, legend}
+	parts := []string{header, sessionsPane}
 	// The Workspaces view's own renderer (workspace_view.go) has no pinned
 	// footer line to grow into (unlike renderWorkspaceRowsViewport's tmuxHint),
 	// so wsHint is appended here instead — below the pane, same as the debug
@@ -3019,7 +3026,21 @@ func (m model) View() string {
 	if footer != "" {
 		parts = append(parts, footer)
 	}
+	parts = append(parts, m.renderHintBar())
 	return strings.Join(parts, "\n")
+}
+
+// renderHintBar is the bottom line: the idle view's contextual bindings, or
+// just the way out while a prompt (which draws its own hints) is open.
+func (m model) renderHintBar() string {
+	switch m.prompt {
+	case promptIdle:
+		return renderKeyHints(m.keyHints(), helpHint, m.width)
+	case promptHelp:
+		return renderKeyHints([]keyHint{{"any key", "close"}}, keyHint{}, m.width)
+	default:
+		return renderKeyHints([]keyHint{{"esc", "cancel"}}, keyHint{}, m.width)
+	}
 }
 
 // newModel constructs the TUI model. debug enables diagnostic UI elements
@@ -3034,6 +3055,9 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 	// mechanism, since the sessions pane's various prompts set their own
 	// placeholder and don't want it clobbered.
 	ti.KeyMap.AcceptSuggestion = key.NewBinding(key.WithDisabled())
+	// Every prompt draws its own label and promptMarker; the default "> "
+	// would double up with them.
+	ti.Prompt = ""
 	// Width is intentionally left at zero here; it is recomputed in Update
 	// on the first tea.WindowSizeMsg so it tracks the actual terminal width.
 

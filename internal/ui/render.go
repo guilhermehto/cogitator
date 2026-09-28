@@ -115,7 +115,19 @@ var (
 	paletteBoxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("63"))
+	// modalBoxStyle frames floating dialogs whose content is not pre-padded
+	// (name prompts, confirmations, pickers), keeping text off the border.
+	modalBoxStyle = paletteBoxStyle.Padding(0, 1)
+	// promptMarkerStyle colours the caret that leads every text-entry line.
+	promptMarkerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Bold(true)
 )
+
+// promptMarker leads every text-entry line so typed input reads the same in
+// every prompt; the shared textinput's own prompt is blanked in newModel.
+// Rendered per call so it honours the colour profile active at draw time.
+func promptMarker() string {
+	return promptMarkerStyle.Render("❯ ")
+}
 
 // spinnerFrames are the braille glyphs cycled (one per spinnerTickMsg) on a
 // pending-create row to signal an in-flight worktree create/fetch.
@@ -181,27 +193,13 @@ func styledStatus(s string) string {
 	}
 }
 
-// legendLine renders the status-icon legend for the sessions pane's attention
-// glyphs.
-func legendLine() string {
-	sessionParts := []string{
-		dimStyle.Render("legend:"),
-		attnActiveStyle.Render(glyphActive) + " " + dimStyle.Render("active"),
-		attnFinishedStyle.Render(glyphFinished) + " " + dimStyle.Render("finished"),
-		attnInactiveStyle.Render(glyphInactive) + " " + dimStyle.Render("inactive"),
-		recentStyle.Render(glyphRecent) + " " + dimStyle.Render("recent"),
-		attnQuestionStyle.Render(glyphQuestion) + " " + dimStyle.Render("question"),
-		attnPermStyle.Render(glyphPermission) + " " + dimStyle.Render("permission"),
-		attnErrStyle.Render(glyphError) + " " + dimStyle.Render("error"),
-	}
-	return strings.Join(sessionParts, "  ")
-}
-
 func (m model) renderAllSessions(width int, rows []state.SessionView, recentByInstance map[string]int) string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Sessions") + "\n")
 	if len(rows) == 0 && len(recentByInstance) == 0 {
-		b.WriteString(dimStyle.Render("(no live or recent sessions on discovered instances)"))
+		b.WriteString("\n  " + wtRepoStyle.Render("No repos tracked yet") + "\n\n")
+		b.WriteString("  " + dimStyle.Render("Press ") + hintKeyStyle.Render("A") + dimStyle.Render(" to pick a git repo — its worktrees appear here, ready to") + "\n")
+		b.WriteString("  " + dimStyle.Render("launch or resume in tmux. Live agent sessions show up here too."))
 		return b.String()
 	}
 	b.WriteString(columnHeader(width-2) + "\n")
@@ -666,60 +664,133 @@ func (m model) worktreePromptLine() string {
 	return wtHintStyle.Render(label) + m.input.View()
 }
 
-// renderRepoFinder renders the embedded "add repo" fuzzy finder shown in the
-// sessions pane while prompt == promptAddRepo. It draws a query line, the
-// fuzzy-matched repository list (cursor row highlighted, windowed to fit the
-// pane), and a status/help footer. height is the pane's inner content height,
-// used to window the list so a long result set never overflows the pane.
-func (m model) renderRepoFinder(width, height int) string {
-	var b strings.Builder
-	b.WriteString(headerStyle.Render("Add repo") + "\n")
-	b.WriteString("add repo > " + m.input.View())
+// renderRepoFinder renders the floating "track a repo" picker shown over the
+// Repos view while prompt == promptAddRepo, composited by View via
+// overlayBox. It shares the pickerBox layout and row style with the
+// workspace repo-membership modal so both repo pickers read the same.
+// fieldW/fieldH are the pane's dimensions, used to size the box and window
+// the list so a long result set never overflows the pane.
+func (m model) renderRepoFinder(fieldW, fieldH int) string {
+	contentW := pickerContentW(fieldW)
+	listH := max(1, min(len(m.repoFinderAll), fieldH-pickerChromeLines))
 
+	var body []string
 	switch {
 	case m.repoFinderErr != "":
-		b.WriteString("\n" + wtHintStyle.Render(m.repoFinderErr))
-		return b.String()
+		body = []string{wtHintStyle.Render(m.repoFinderErr)}
 	case m.repoFinderScanning:
-		b.WriteString("\n" + dimStyle.Render("scanning "+shortenDirectory(repoFinderRoot())+" …"))
-		return b.String()
+		body = []string{dimStyle.Render("scanning " + shortenDirectory(repoFinderRoot()) + " …")}
+	case len(m.repoFinderAll) == 0:
+		body = []string{dimStyle.Render("no untracked git repositories under " + shortenDirectory(repoFinderRoot()))}
 	case len(m.repoFinderMatches) == 0:
-		if len(m.repoFinderAll) == 0 {
-			b.WriteString("\n" + dimStyle.Render("no git repositories found under "+shortenDirectory(repoFinderRoot())))
-		} else {
-			b.WriteString("\n" + dimStyle.Render("no match"))
-		}
-		return b.String()
+		body = []string{dimStyle.Render("no match")}
+	default:
+		body = m.repoFinderRows(contentW, listH)
 	}
 
-	// Window the match list around the cursor. Reserve three lines for the
-	// title, query, and footer so the rendered block fits in height exactly.
-	listH := height - 3
-	if listH < 1 {
-		listH = 1
-	}
+	return m.renderPickerBox(pickerBox{
+		title:  "Track a repo",
+		aside:  pluralize(len(m.repoFinderAll), "repo") + " found",
+		body:   body,
+		listH:  listH,
+		footer: "enter track · ↑↓ move · type to filter · esc cancel",
+	}, contentW)
+}
+
+// repoFinderRows renders the cursor-windowed candidate rows of the 'A'
+// finder.
+func (m model) repoFinderRows(contentW, listH int) []string {
+	nameW := repoPickNameW(m.repoFinderAll, contentW)
 	cursor := clampIndex(m.repoFinderCursor, len(m.repoFinderMatches))
-	start := 0
-	if cursor >= listH {
-		start = cursor - listH + 1
-	}
-	end := start + listH
-	if end > len(m.repoFinderMatches) {
-		end = len(m.repoFinderMatches)
-	}
+	start := max(0, cursor-listH+1)
+	end := min(start+listH, len(m.repoFinderMatches))
+	query := m.input.Value()
 
+	rows := make([]string, 0, end-start)
 	for i := start; i < end; i++ {
-		// Lines are plain text, so the reverse highlight can wrap them
-		// directly (no embedded colour resets to strip, unlike worktree rows).
-		line := ansi.Truncate("  "+shortenDirectory(m.repoFinderMatches[i]), width-2, "…")
+		row := padToWidth(formatRepoPickRow(dimStyle.Render("○"), m.repoFinderMatches[i], query, nameW, lipgloss.NewStyle()), contentW)
 		if i == cursor {
-			line = wtCursorStyle.Render(line)
+			row = highlightSelectedRow(row)
 		}
-		b.WriteString("\n" + line)
+		rows = append(rows, row)
 	}
+	return rows
+}
 
-	b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("%d repos · ↑↓ move · enter add · esc cancel", len(m.repoFinderMatches))))
-	return b.String()
+// pickerChromeLines is the number of non-list lines a pickerBox draws:
+// title, blank, filter, blank, blank, notice, footer, and the two border rows.
+const pickerChromeLines = 9
+
+// pickerContentW sizes a pickerBox's text area to the pane: capped for
+// readability and kept clear of the pane edge (fieldW is the width handed
+// to overlayBox, two wider than the pane's text area, and the box adds four
+// for border and padding).
+func pickerContentW(fieldW int) int {
+	return min(72, max(20, fieldW-8))
+}
+
+// pickerBox describes a floating filter-and-pick dialog: a title with a
+// right-aligned aside (counts), the shared text input, a list area of listH
+// rows (or a single status line), a one-line notice, and a key hint footer.
+type pickerBox struct {
+	title, aside   string
+	body           []string
+	listH          int
+	notice, footer string
+}
+
+// renderPickerBox draws p at a fixed size so the box does not jump while the
+// filter narrows results: the list area is padded to listH rows and every
+// line to contentW cells.
+func (m model) renderPickerBox(p pickerBox, contentW int) string {
+	title := headerStyle.Render(p.title)
+	aside := dimStyle.Render(p.aside)
+	in := m.input
+	in.Width = max(1, contentW-3)
+
+	lines := []string{
+		title + strings.Repeat(" ", max(1, contentW-lipgloss.Width(title)-lipgloss.Width(aside))) + aside,
+		"",
+		promptMarker() + in.View(),
+		"",
+	}
+	lines = append(lines, p.body...)
+	for range p.listH - len(p.body) {
+		lines = append(lines, "")
+	}
+	lines = append(lines, "", p.notice, dimStyle.Render(p.footer))
+
+	for i, line := range lines {
+		lines[i] = padToWidth(ansi.Truncate(line, contentW, "…"), contentW)
+	}
+	return modalBoxStyle.Render(strings.Join(lines, "\n"))
+}
+
+// repoPickNameW is the repo-name column width for a repo picker: the widest
+// basename in paths, capped at half the row so the parent path stays visible.
+func repoPickNameW(paths []string, contentW int) int {
+	nameW := 0
+	for _, p := range paths {
+		nameW = max(nameW, lipgloss.Width(filepath.Base(p)))
+	}
+	return min(nameW, contentW/2)
+}
+
+// formatRepoPickRow renders one repo picker row: marker, the repo's basename
+// in nameStyle with the query's fuzzy matches highlighted, and its dimmed
+// parent directory. Matches are computed against the full path (what the
+// pickers rank on) and mapped onto the basename.
+func formatRepoPickRow(marker, path, query string, nameW int, nameStyle lipgloss.Style) string {
+	name := filepath.Base(path)
+	positions, _ := fuzzyMatchPositions(query, path)
+	matched := make(map[int]bool, len(positions))
+	for _, p := range positions {
+		matched[p] = true
+	}
+	nameOffset := len([]rune(path)) - len([]rune(name))
+
+	nameCell := padCell(highlightSegment(name, nameStyle, matched, nameOffset), nameW, lipgloss.Left)
+	return " " + marker + " " + nameCell + "  " + wtPathStyle.Render(shortenDirectory(filepath.Dir(path)))
 }
 
 // sessionPaletteRowsVisible is the fixed number of result rows the session
@@ -754,7 +825,7 @@ func (m model) renderSessionPalette(fieldW, fieldH int) string {
 	}
 	lines := []string{
 		padToWidth(" "+headerStyle.Render(title), contentW),
-		padToWidth(ansi.Truncate(" "+dimStyle.Render("> ")+m.input.View(), contentW, ""), contentW),
+		padToWidth(ansi.Truncate(" "+promptMarker()+m.input.View(), contentW, ""), contentW),
 		"",
 	}
 
@@ -936,42 +1007,43 @@ type helpSection struct {
 	bindings [][2]string // {keys, description}
 }
 
-// helpSections is the full keybinding reference shown by the '?' overlay,
-// grouped so related actions read together. Kept in one place so the overlay
-// stays in sync with the Update key handlers.
-var helpSections = []helpSection{
-	{"Repos", [][2]string{
-		{"j / k · ↑ / ↓", "move cursor"},
-		{"gg / < · G / >", "jump to top / bottom"},
-		{"ctrl+u / ctrl+d", "prev / next repo"},
-		{"enter", "jump to / resume session"},
-		{"/", "search sessions (move cursor)"},
-		{"ctrl+P", "switch session (fuzzy find)"},
-		{"a", "show / hide recent sessions"},
-	}},
-	{"Worktrees", [][2]string{
+// The '?' overlay's keybinding reference, grouped so related actions read
+// together. Kept in one place so the overlay stays in sync with the Update
+// key handlers. renderHelp shows the active view's section beside the shared
+// ones.
+var (
+	helpNavigate = helpSection{"Navigate", [][2]string{
+		{"j / k", "move"},
+		{"gg / G", "top / bottom"},
+		{"ctrl+u/d", "prev / next repo"},
+		{"/", "search sessions"},
+		{"ctrl+P", "switch session"},
+	}}
+	helpRepos = helpSection{"Repos", [][2]string{
+		{"enter", "jump / resume"},
 		{"n", "new worktree"},
-		{"F", "fetch branch from origin"},
-		{"P", "pull (fast-forward)"},
+		{"F", "fetch remote branch"},
+		{"P", "pull (ff-only)"},
 		{"D", "delete worktree"},
 		{"A", "add repo"},
-		{"R", "remove (untrack) repo"},
-	}},
-	{"Workspaces", [][2]string{
-		{"tab", "switch repos / workspaces"},
+		{"R", "untrack repo"},
+		{"a", "toggle recent"},
+	}}
+	helpWorkspaces = helpSection{"Workspaces", [][2]string{
+		{"enter", "launch / jump"},
 		{"N", "new workspace"},
-		{"n", "new session in workspace"},
-		{"e", "edit repo membership"},
-		{"D", "delete session / workspace"},
-		{"P", "pull (fast-forward)"},
-		{"enter", "launch session"},
-	}},
-	{"General", [][2]string{
-		{"?", "toggle this help"},
+		{"n", "new session"},
+		{"e", "add / remove repos"},
+		{"D", "delete selection"},
+		{"P", "pull (ff-only)"},
+	}}
+	helpGeneral = helpSection{"General", [][2]string{
+		{"tab", "switch view"},
 		{"S", "settings"},
-		{"q / ctrl+C", "quit"},
-	}},
-}
+		{"?", "toggle help"},
+		{"q", "quit"},
+	}}
+)
 
 // helpKeyStyle / helpSectionStyle colour the two columns of the help overlay:
 // the key column in the accent colour, section titles bold.
@@ -980,59 +1052,91 @@ var (
 	helpSectionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("141"))
 )
 
+// statusLegend pairs each status glyph with its meaning for the help
+// overlay's Status block. Rendered per call so styles honour the active
+// colour profile.
+func statusLegend() [][2]string {
+	return [][2]string{
+		{attnActiveStyle.Render(glyphActive), "active"},
+		{attnFinishedStyle.Render(glyphFinished), "finished"},
+		{attnQuestionStyle.Render(glyphQuestion), "question"},
+		{attnPermStyle.Render(glyphPermission), "permission"},
+		{attnErrStyle.Render(glyphError), "error"},
+		{attnInactiveStyle.Render(glyphInactive), "stopped"},
+		{recentStyle.Render(glyphRecent), "recent"},
+		{wtMissingStyle.Render(glyphWtMissing), "missing"},
+	}
+}
+
 // renderHelp builds the floating keybinding-reference box drawn over the
 // sessions pane while prompt == promptHelp. It is composited (centred) by the
-// View via overlayBox, mirroring the ctrl+P switcher. The sections are laid out
-// in two columns so the box stays short enough to fit a typical pane. fieldW is
-// the sessions pane's inner width, used to size the box so it fits.
-func renderHelp(fieldW int) string {
-	// Widest key cell across all bindings, so descriptions align in a column.
-	keyW := 0
-	for _, sec := range helpSections {
+// View via overlayBox, mirroring the ctrl+P switcher. The left column holds
+// the active view's actions and the general keys, the right column shared
+// navigation and the status-glyph legend, so the box fits a 80x24 terminal.
+// It is sized to its content and only truncates when fieldW (the pane width
+// handed to overlayBox, two wider than the text area) is too narrow.
+func renderHelp(fieldW int, view viewMode) string {
+	viewSection := helpRepos
+	if view == viewWorkspaces {
+		viewSection = helpWorkspaces
+	}
+	leftSections := []helpSection{viewSection, helpGeneral}
+	rightSections := []helpSection{helpNavigate}
+
+	keyW, descW := 0, 0
+	for _, sec := range append(append([]helpSection{}, leftSections...), rightSections...) {
 		for _, b := range sec.bindings {
-			if w := lipgloss.Width(b[0]); w > keyW {
-				keyW = w
-			}
+			keyW = max(keyW, lipgloss.Width(b[0]))
+			descW = max(descW, lipgloss.Width(b[1]))
 		}
 	}
 
-	contentW := fieldW - 10
-	if contentW > 76 {
-		contentW = 76
-	}
-	if contentW < 16 {
-		contentW = max(1, fieldW-4)
-	}
-
-	// Split the sections across two columns: Repos+Worktrees on the left,
-	// Workspaces+General on the right. This is the most balanced whole-section
-	// split for four sections of uneven length. The columns are rendered
-	// independently then zipped row-for-row so the box reads top-to-bottom in
-	// two streams.
 	const gap = 3
-	colW := max(1, (contentW-gap)/2)
-	left := helpColumn(helpSections[:2], keyW, colW)
-	right := helpColumn(helpSections[2:], keyW, colW)
+	colW := keyW + 2 + descW
+	contentW := min(1+colW*2+gap+1, max(1, fieldW-8))
+	colW = max(1, (contentW-2-gap)/2)
 
-	var lines []string
-	lines = append(lines, padToWidth(" "+headerStyle.Render("Keybindings"), contentW))
-	lines = append(lines, padToWidth("", contentW))
-	for i := 0; i < max(len(left), len(right)); i++ {
-		l, r := "", ""
+	left := helpColumn(leftSections, keyW, colW)
+	right := append(helpColumn(rightSections, keyW, colW), padToWidth("", colW))
+	right = append(right, legendColumn(colW)...)
+
+	title := helpSectionStyle.Render("Keybindings")
+	closeHint := dimStyle.Render("any key to close")
+	titleGap := max(1, contentW-2-lipgloss.Width(title)-lipgloss.Width(closeHint))
+
+	lines := []string{
+		padToWidth(" "+title+strings.Repeat(" ", titleGap)+closeHint, contentW),
+		padToWidth("", contentW),
+	}
+	for i := range max(len(left), len(right)) {
+		l := padToWidth("", colW)
 		if i < len(left) {
 			l = left[i]
-		} else {
-			l = padToWidth("", colW)
 		}
+		r := ""
 		if i < len(right) {
 			r = right[i]
 		}
 		lines = append(lines, padToWidth(" "+l+strings.Repeat(" ", gap)+r, contentW))
 	}
-	lines = append(lines, padToWidth("", contentW))
-	lines = append(lines, padToWidth(" "+dimStyle.Render("any key to close"), contentW))
 
 	return paletteBoxStyle.Render(strings.Join(lines, "\n"))
+}
+
+// legendColumn renders the Status block: a section title, then the status
+// glyphs two per line so the block stays short.
+func legendColumn(colW int) []string {
+	lines := []string{padToWidth(helpSectionStyle.Render("Status"), colW)}
+	legend := statusLegend()
+	half := colW / 2
+	for i := 0; i < len(legend); i += 2 {
+		row := padToWidth(legend[i][0]+" "+dimStyle.Render(legend[i][1]), half)
+		if i+1 < len(legend) {
+			row += legend[i+1][0] + " " + dimStyle.Render(legend[i+1][1])
+		}
+		lines = append(lines, padToWidth(ansi.Truncate(row, colW, "…"), colW))
+	}
+	return lines
 }
 
 // helpColumn renders sections into a slice of fixed-width (colW) lines: a bold

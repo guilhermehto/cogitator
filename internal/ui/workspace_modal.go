@@ -2,26 +2,27 @@ package ui
 
 // workspace_modal.go — the repo-membership modal ('e' on a workspace in the
 // Workspaces view): a fresh $HOME scan offers not-yet-member repos to add,
-// combined with the workspace's current members offered for removal, in one
-// fuzzy-filterable list (mirroring renderRepoFinder's/scanReposCmd's shape,
-// repofinder.go, but keyed on workspace membership rather than
+// listed after the workspace's current members (offered for removal), in one
+// fuzzy-filterable checklist (mirroring renderRepoFinder's/scanReposCmd's
+// shape, repofinder.go, but keyed on workspace membership rather than
 // settings-configured repos). Committing either action persists it
-// immediately (Store.AttachRepo/DetachRepo) and closes the modal — this file
-// changes membership only. Backfilling that change into the workspace's
-// existing sessions is step 15's job (workspace_backfill.go), reached only
-// through the membershipChangedMsg emitted below and handled in model.go;
-// nothing in this file consumes it. Kept separate from workspace_view.go
-// (pure navigation) and workspace_cmd.go (session creation), per the phase
-// convention that every workspace mode routes its key handling through its
-// own method rather than adding arms to Update.
+// immediately (Store.AttachRepo/DetachRepo). For a workspace without
+// sessions the modal stays open so several repos can be toggled in one go;
+// the outcome lands back here via applyWsModalCommit/failWsModalCommit. For a
+// workspace with sessions it closes, because backfilling the change into
+// those sessions is workspace_backfill.go's job, reached through the
+// membershipChangedMsg emitted below and handled in model.go. Kept separate
+// from workspace_view.go (pure navigation) and workspace_cmd.go (session
+// creation), per the phase convention that every workspace mode routes its
+// key handling through its own method rather than adding arms to Update.
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
-	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/guilhermehto/cogitator/internal/git"
 	"github.com/guilhermehto/cogitator/internal/settings"
@@ -81,15 +82,11 @@ func (m model) updateWorkspaceModal(msg tea.KeyMsg) (model, tea.Cmd, bool) {
 // openWorkspaceModal resets the modal state for ws and dispatches the
 // background scan.
 func (m model) openWorkspaceModal(ws workspace.Workspace) (model, tea.Cmd, bool) {
+	m.closeWorkspaceModal()
 	m.wsModalWorkspace = ws.Name
 	m.wsModalScanning = true
-	m.wsModalEntries = nil
-	m.wsModalMatches = nil
-	m.wsModalCursor = 0
-	m.wsModalErr = ""
 	m.prompt = promptWorkspaceModal
 	m.input.Placeholder = "filter repos"
-	m.input.SetValue("")
 	cmd := scanWorkspaceModalCmd(repoFinderRoot(), ws.Name, memberPaths(ws.Members), m.workspaceRoot)
 	return m, tea.Batch(m.input.Focus(), cmd), true
 }
@@ -104,28 +101,18 @@ func memberPaths(members []workspace.MemberRepo) []string {
 }
 
 // updateWorkspaceModalActive handles every key while the repo-membership
-// modal is open: enter commits the highlighted row (attaching a candidate or
+// modal is open: enter toggles the highlighted row (attaching a candidate or
 // detaching a member), the arrow keys (and ctrl+n/p) move the selection, esc
-// cancels with no change, and everything else edits the filter query and
-// re-ranks matches — mirroring promptAddRepo's embedded-finder key handling
-// (model.go), applied to the combined member+candidate list.
+// closes, and everything else edits the filter query and re-ranks matches —
+// mirroring promptAddRepo's embedded-finder key handling (model.go), applied
+// to the combined member+candidate list.
 func (m model) updateWorkspaceModalActive(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.closeWorkspaceModal()
 		return m, nil
 	case "enter":
-		if len(m.wsModalMatches) == 0 {
-			return m, nil
-		}
-		sel := m.wsModalEntries[m.wsModalMatches[clampIndex(m.wsModalCursor, len(m.wsModalMatches))]]
-		workspaceName := m.wsModalWorkspace
-		members := memberEntryPaths(m.wsModalEntries)
-		m.closeWorkspaceModal()
-		if sel.member {
-			return m, detachWorkspaceRepoCmd(m.store, workspaceName, sel.path)
-		}
-		return m, attachWorkspaceRepoCmd(m.store, workspaceName, sel.path, members)
+		return m.toggleWsModalSelection()
 	case "up", "ctrl+p":
 		m.wsModalCursor = clampIndex(m.wsModalCursor-1, len(m.wsModalMatches))
 		return m, nil
@@ -141,6 +128,88 @@ func (m model) updateWorkspaceModalActive(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+// toggleWsModalSelection commits the highlighted row: detach for a member,
+// attach for a candidate. A workspace with sessions closes the modal so the
+// backfill prompt can ask which sessions follow the change; otherwise the
+// modal stays open with the row marked busy until the commit lands. Ignored
+// while a previous commit is still in flight.
+func (m model) toggleWsModalSelection() (tea.Model, tea.Cmd) {
+	if len(m.wsModalMatches) == 0 || m.wsModalBusy != "" {
+		return m, nil
+	}
+	sel := m.wsModalEntries[m.wsModalMatches[clampIndex(m.wsModalCursor, len(m.wsModalMatches))]]
+	workspaceName := m.wsModalWorkspace
+
+	var cmd tea.Cmd
+	if sel.member {
+		cmd = detachWorkspaceRepoCmd(m.store, workspaceName, sel.path)
+	} else {
+		cmd = attachWorkspaceRepoCmd(m.store, workspaceName, sel.path, memberEntryPaths(m.wsModalEntries))
+	}
+
+	if m.wsModalHandsOffToBackfill() {
+		m.closeWorkspaceModal()
+		return m, cmd
+	}
+	m.wsModalBusy = sel.path
+	m.wsModalNotice = ""
+	m.wsModalNoticeErr = false
+	return m, cmd
+}
+
+// wsModalHandsOffToBackfill reports whether committing a change must close
+// the modal: the target workspace has sessions that may need backfilling.
+func (m model) wsModalHandsOffToBackfill() bool {
+	return len(workspaceSessionNames(m.wsStatuses, m.wsModalWorkspace)) > 0
+}
+
+// wsModalAwaitingCommit reports whether the open modal dispatched the
+// attach/detach whose outcome is arriving, so it should be shown in place.
+func (m model) wsModalAwaitingCommit() bool {
+	return m.prompt == promptWorkspaceModal && m.wsModalBusy != ""
+}
+
+// applyWsModalCommit flips the committed row in place — keeping its position
+// so the list does not jump under the cursor — and reloads the Workspaces
+// view behind the modal. The attach result carries the resolved repo root,
+// which becomes the row's path so a later detach names the stored member.
+func (m model) applyWsModalCommit(msg membershipChangedMsg) (model, tea.Cmd) {
+	for i := range m.wsModalEntries {
+		if m.wsModalEntries[i].path == m.wsModalBusy {
+			m.wsModalEntries[i] = wsModalEntry{path: msg.repo, member: msg.attached}
+		}
+	}
+	selected := -1
+	if len(m.wsModalMatches) > 0 {
+		selected = m.wsModalMatches[clampIndex(m.wsModalCursor, len(m.wsModalMatches))]
+	}
+	m.wsModalMatches = fuzzyMatchIndices(m.input.Value(), wsModalEntryPaths(m.wsModalEntries))
+	for i, idx := range m.wsModalMatches {
+		if idx == selected {
+			m.wsModalCursor = i
+		}
+	}
+	m.wsModalCursor = clampIndex(m.wsModalCursor, len(m.wsModalMatches))
+
+	verb := "removed"
+	if msg.attached {
+		verb = "added"
+	}
+	m.wsModalBusy = ""
+	m.wsModalNotice = fmt.Sprintf("%s %s", verb, filepath.Base(msg.repo))
+	m.wsModalNoticeErr = false
+	return m.reloadWsStatuses()
+}
+
+// failWsModalCommit reports a failed attach/detach inside the open modal and
+// frees the row for another attempt.
+func (m model) failWsModalCommit(err error) model {
+	m.wsModalBusy = ""
+	m.wsModalNotice = err.Error()
+	m.wsModalNoticeErr = true
+	return m
+}
+
 // closeWorkspaceModal resets the modal back to the idle state, mirroring
 // closeRepoFinder (model.go).
 func (m *model) closeWorkspaceModal() {
@@ -151,6 +220,9 @@ func (m *model) closeWorkspaceModal() {
 	m.wsModalMatches = nil
 	m.wsModalCursor = 0
 	m.wsModalErr = ""
+	m.wsModalBusy = ""
+	m.wsModalNotice = ""
+	m.wsModalNoticeErr = false
 	m.input.Blur()
 	m.input.SetValue("")
 }
@@ -180,8 +252,8 @@ func memberEntryPaths(entries []wsModalEntry) []string {
 // wsModalScanMsg carries the result of the background repo scan started when
 // the repo-membership modal opens. workspace guards against a stale result
 // landing after the modal was closed, or reopened for a different workspace,
-// in the meantime. entries is the combined, alphabetically sorted
-// member+candidate set; err is set when the scan itself failed.
+// in the meantime. entries is the member+candidate set ordered by
+// sortWsModalEntries; err is set when the scan itself failed.
 type wsModalScanMsg struct {
 	workspace string
 	entries   []wsModalEntry
@@ -212,9 +284,24 @@ func scanWorkspaceModalCmd(root, workspaceName string, members []string, workspa
 		for _, p := range candidates {
 			entries = append(entries, wsModalEntry{path: p})
 		}
-		sort.Slice(entries, func(i, j int) bool { return entries[i].path < entries[j].path })
+		sortWsModalEntries(entries)
 		return wsModalScanMsg{workspace: workspaceName, entries: entries}
 	}
+}
+
+// sortWsModalEntries orders the checklist members first, then by repo
+// basename (what the modal shows most prominently), then by full path.
+func sortWsModalEntries(entries []wsModalEntry) {
+	sort.SliceStable(entries, func(i, j int) bool {
+		a, b := entries[i], entries[j]
+		if a.member != b.member {
+			return a.member
+		}
+		if ab, bb := filepath.Base(a.path), filepath.Base(b.path); ab != bb {
+			return ab < bb
+		}
+		return a.path < b.path
+	})
 }
 
 // excludeWorkspaceRootSubtree drops any discovered path that falls under
@@ -281,67 +368,94 @@ func detachWorkspaceRepoCmd(store storeOps, workspaceName, path string) tea.Cmd 
 	})
 }
 
-// renderWorkspaceModal renders the floating repo-membership box shown while
-// prompt == promptWorkspaceModal, composited (centred) over the Workspaces
-// view by View via overlayBox (render.go) — mirroring renderWsNamePrompt/
-// renderWsDeleteConfirm (workspace_cmd.go/workspace_delete.go) rather than
-// renderRepoFinder's full-pane takeover, since the Workspaces view keeps
-// rendering behind it. The query line, scanning indicator, empty states, and
-// windowed/cursor-highlighted list mirror renderRepoFinder's structure
-// (render.go) — the same embedded fuzzy-finder shape, applied to a combined
-// member+candidate list instead of a single candidate list. fieldW/fieldH
-// are the Workspaces pane's inner dimensions, used to cap the box width and
-// window the list so the whole modal fits the pane.
+// wsModalMemberStyle colours the checked marker of an attached repo.
+var wsModalMemberStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("78")).Bold(true)
+
+// renderWorkspaceModal renders the floating repo-membership checklist shown
+// while prompt == promptWorkspaceModal, composited (centred) over the
+// Workspaces view by View via overlayBox (render.go), using the pickerBox
+// layout shared with the 'A' repo finder. Each row is a checkbox (●
+// attached, ○ not), the repo name with the filter's matched characters
+// highlighted, and its parent directory. fieldW/fieldH are the Workspaces
+// pane's dimensions, used to cap the box width and window the list so the
+// whole modal fits the pane.
 func (m model) renderWorkspaceModal(fieldW, fieldH int) string {
-	contentW := fieldW - 10
-	if contentW > 72 {
-		contentW = 72
-	}
-	if contentW < 20 {
-		contentW = max(1, fieldW-4)
-	}
+	contentW := pickerContentW(fieldW)
+	listH := max(1, min(len(m.wsModalEntries), fieldH-pickerChromeLines))
+	return m.renderPickerBox(pickerBox{
+		title:  "Repos in " + m.wsModalWorkspace,
+		aside:  pluralize(len(memberEntryPaths(m.wsModalEntries)), "repo") + " attached",
+		body:   m.wsModalBodyLines(contentW, listH),
+		listH:  listH,
+		notice: m.wsModalNoticeLine(),
+		footer: m.wsModalFooter(),
+	}, contentW)
+}
 
-	var b strings.Builder
-	b.WriteString(headerStyle.Render("Repo membership: " + m.wsModalWorkspace))
-	b.WriteString("\n" + dimStyle.Render("filter > ") + m.input.View())
-
+// wsModalBodyLines renders the list area: a status line while scanning or
+// when nothing matches, otherwise the cursor-windowed checklist rows.
+func (m model) wsModalBodyLines(contentW, listH int) []string {
 	switch {
 	case m.wsModalErr != "":
-		b.WriteString("\n" + wtHintStyle.Render(m.wsModalErr))
-		return paletteBoxStyle.Render(b.String())
+		return []string{wtHintStyle.Render(m.wsModalErr)}
 	case m.wsModalScanning:
-		b.WriteString("\n" + dimStyle.Render("scanning "+shortenDirectory(repoFinderRoot())+" …"))
-		return paletteBoxStyle.Render(b.String())
+		return []string{dimStyle.Render("scanning " + shortenDirectory(repoFinderRoot()) + " …")}
+	case len(m.wsModalEntries) == 0:
+		return []string{dimStyle.Render("no git repositories found under " + shortenDirectory(repoFinderRoot()))}
 	case len(m.wsModalMatches) == 0:
-		if len(m.wsModalEntries) == 0 {
-			b.WriteString("\n" + dimStyle.Render("no git repositories found under "+shortenDirectory(repoFinderRoot())))
-		} else {
-			b.WriteString("\n" + dimStyle.Render("no match"))
-		}
-		return paletteBoxStyle.Render(b.String())
+		return []string{dimStyle.Render("no match")}
 	}
 
-	listH := max(1, fieldH-8)
+	nameW := repoPickNameW(wsModalEntryPaths(m.wsModalEntries), contentW)
 	cursor := clampIndex(m.wsModalCursor, len(m.wsModalMatches))
-	start := 0
-	if cursor >= listH {
-		start = cursor - listH + 1
-	}
+	start := max(0, cursor-listH+1)
 	end := min(start+listH, len(m.wsModalMatches))
+	query := m.input.Value()
 
+	rows := make([]string, 0, end-start)
 	for i := start; i < end; i++ {
-		entry := m.wsModalEntries[m.wsModalMatches[i]]
-		tag := "add"
-		if entry.member {
-			tag = "member"
-		}
-		line := ansi.Truncate(fmt.Sprintf("  [%s] %s", tag, shortenDirectory(entry.path)), contentW, "…")
+		row := padToWidth(m.formatWsModalRow(m.wsModalEntries[m.wsModalMatches[i]], query, nameW), contentW)
 		if i == cursor {
-			line = wtCursorStyle.Render(line)
+			row = highlightSelectedRow(row)
 		}
-		b.WriteString("\n" + line)
+		rows = append(rows, row)
 	}
+	return rows
+}
 
-	b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("%d repos · ↑↓ move · enter attach/detach · esc cancel", len(m.wsModalMatches))))
-	return paletteBoxStyle.Render(b.String())
+// formatWsModalRow renders one checklist row: the membership marker (or an
+// ellipsis while its commit is in flight) before the shared repo picker row.
+func (m model) formatWsModalRow(entry wsModalEntry, query string, nameW int) string {
+	marker := dimStyle.Render("○")
+	nameStyle := lipgloss.NewStyle()
+	switch {
+	case entry.path == m.wsModalBusy:
+		marker = dimStyle.Render("…")
+	case entry.member:
+		marker = wsModalMemberStyle.Render("●")
+		nameStyle = nameStyle.Bold(true)
+	}
+	return formatRepoPickRow(marker, entry.path, query, nameW, nameStyle)
+}
+
+// wsModalNoticeLine reports the last in-modal commit: what was added or
+// removed, or why it failed.
+func (m model) wsModalNoticeLine() string {
+	switch {
+	case m.wsModalNotice == "":
+		return ""
+	case m.wsModalNoticeErr:
+		return attnErrStyle.Render("✗ " + m.wsModalNotice)
+	default:
+		return wsModalMemberStyle.Render("✓ ") + dimStyle.Render(m.wsModalNotice)
+	}
+}
+
+// wsModalFooter is the key hint line. When the workspace has sessions, a
+// toggle hands off to the backfill prompt, so the hint says what comes next.
+func (m model) wsModalFooter() string {
+	if m.wsModalHandsOffToBackfill() {
+		return "enter toggle, then pick sessions · ↑↓ move · esc close"
+	}
+	return "enter toggle · ↑↓ move · type to filter · esc done"
 }

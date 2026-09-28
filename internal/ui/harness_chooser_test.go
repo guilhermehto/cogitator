@@ -457,7 +457,7 @@ func TestRenderHarnessChooserShowsKindsAndCursor(t *testing.T) {
 		harnessChooserKinds:  []harness.Kind{"codex", "opencode"},
 		harnessChooserCursor: 0,
 	}
-	got := m.renderHarnessChooser(200, 20)
+	got := m.renderHarnessChooser(200)
 	if !strings.Contains(got, "codex") {
 		t.Errorf("chooser must show codex, got %q", got)
 	}

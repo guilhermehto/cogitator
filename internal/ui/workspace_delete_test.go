@@ -817,12 +817,12 @@ func TestWorkspaceDelete_WorkspaceConfirmGroupsMembersUnderSessions(t *testing.T
 	}
 }
 
-// boxText strips styling and the border from a rendered box, leaving its
-// lines with trailing padding trimmed.
+// boxText strips styling, the border, and the one-cell modal padding from a
+// rendered box, leaving its lines with trailing padding trimmed.
 func boxText(box string) string {
 	lines := strings.Split(ansi.Strip(box), "\n")
 	for i, line := range lines {
-		lines[i] = strings.TrimRight(strings.Trim(line, "│╭╮╰╯─"), " ")
+		lines[i] = strings.TrimRight(strings.TrimPrefix(strings.Trim(line, "│╭╮╰╯─"), " "), " ")
 	}
 	return strings.Join(lines, "\n")
 }

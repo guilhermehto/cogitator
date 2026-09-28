@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
 )
@@ -50,25 +52,19 @@ func TestView_HelpOverlaysBoxOverSessions(t *testing.T) {
 	}
 }
 
-func TestView_HeaderPointsAtHelp(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, nil)
-	m.width, m.height = 100, 30
+func TestView_HintBarKeepsHelpWhenContextHintsOverflow(t *testing.T) {
+	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []settings.Row{
+		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", settings.StateStopped, state.AttnInactive, fixedNow),
+	})
+	m.width, m.height = 60, 20
 
-	if !strings.Contains(m.View(), "? help") {
-		t.Error("header must advertise the '?' help overlay")
+	lines := strings.Split(m.View(), "\n")
+	bar := ansi.Strip(lines[len(lines)-1])
+	if !strings.HasSuffix(strings.TrimRight(bar, " "), "? help") {
+		t.Errorf("the hint bar must keep '? help' even when context hints are dropped; got %q", bar)
 	}
-}
-
-func TestHelpSections_NoTasksSectionOrTBinding(t *testing.T) {
-	for _, sec := range helpSections {
-		if sec.title == "Tasks" {
-			t.Fatal("helpSections must not contain a Tasks section (Taskwarrior removed)")
-		}
-		for _, b := range sec.bindings {
-			if b[0] == "T" {
-				t.Fatalf("helpSections must not bind 'T' (Taskwarrior removed); found in section %q: %q", sec.title, b[1])
-			}
-		}
+	if w := ansi.StringWidth(bar); w > m.width {
+		t.Errorf("the hint bar must fit the terminal width %d; got %d cells: %q", m.width, w, bar)
 	}
 }
 
