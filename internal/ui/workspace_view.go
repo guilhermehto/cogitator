@@ -188,6 +188,7 @@ func (m model) renderWorkspacesView(width, height int) string {
 		listHeight = max(0, height-1)
 	}
 	start, end := wsWindow(lines, m.wsCursor, m.wsScroll, listHeight)
+	spinnerGlyph := spinnerFrames[m.spinnerFrame%len(spinnerFrames)]
 
 	for _, dl := range lines[start:end] {
 		ws := m.wsStatuses[dl.wsIndex]
@@ -198,10 +199,17 @@ func (m model) renderWorkspacesView(width, height int) string {
 
 		var line string
 		if dl.kind == wsLineHeader {
-			line = wtRepoStyle.Render("  "+ws.Workspace.Name) + "  " +
-				wtPathStyle.Render(fmt.Sprintf("%d sessions", len(ws.Sessions)))
+			detail := fmt.Sprintf("%d sessions", len(ws.Sessions))
+			if m.wsDeletePending(ws.Workspace.Name, "") {
+				detail = spinnerGlyph + " deleting…"
+			}
+			line = wtRepoStyle.Render("  "+ws.Workspace.Name) + "  " + wtPathStyle.Render(detail)
 		} else {
-			line = formatWsSessionRow(ws.Sessions[dl.sessIndex], width-2)
+			sess := ws.Sessions[dl.sessIndex]
+			if m.wsDeletePending(ws.Workspace.Name, sess.Session.Name) {
+				sess = deletingWsSession(sess, spinnerGlyph)
+			}
+			line = formatWsSessionRow(sess, width-2)
 		}
 		if dl.entry == m.wsCursor {
 			line = highlightSelectedRow(line)

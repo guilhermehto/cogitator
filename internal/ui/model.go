@@ -662,12 +662,18 @@ type model struct {
 	// keyed by its worktree path, filled in as the concurrent per-member
 	// probes (wsMergeStatusCmd) return; a member with no entry yet renders as
 	// "checking…", mirroring deleteMergeInfo's role for the single-worktree
-	// flow. Zero values are safe (no delete in progress).
+	// flow. wsDeleteScroll is the first visible line of the confirm's
+	// read-only member list. Zero values are safe (no delete in progress).
 	wsDeleteWorkspace string
 	wsDeleteSession   string
 	wsDeleteMembers   []wsDeleteMember
 	wsDeleteMergeInfo map[string]string
-	wsDeleteCursor    int
+	wsDeleteScroll    int
+	// wsPendingDeletes tracks confirmed workspace/session deletes still
+	// tearing down (startWsDelete); their rows render "deleting…" and refuse
+	// another 'D'. Entries clear on failure, or once a reload no longer lists
+	// the target (pruneWsPendingDeletes).
+	wsPendingDeletes map[wsDeleteTarget]struct{}
 
 	// Repo-membership modal ('e' in the Workspaces view) state, meaningful
 	// only while prompt == promptWorkspaceModal. wsModalWorkspace is the
@@ -1321,6 +1327,12 @@ func paneInnerWidth(w int) int {
 	return inner
 }
 
+// paneWidth is the sessions pane's content width, floored at 30 columns.
+// Shared by Update and View for the same reason as paneHeights.
+func (m model) paneWidth() int {
+	return max(30, m.width-2)
+}
+
 // paneHeights returns the total and inner heights for the sessions pane under
 // the model's current terminal and footer state. Keeping this calculation
 // shared between Update and View lets cursor movement adjust the sessions
@@ -1370,10 +1382,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if wsDeletePromptActive(m.prompt) {
 				switch msg.String() {
 				case "up", "ctrl+p":
-					m.wsDeleteCursor = clampIndex(m.wsDeleteCursor-1, len(m.wsDeleteMembers))
+					m.scrollWsDeleteConfirm(-1)
 					return m, nil
 				case "down", "ctrl+n":
-					m.wsDeleteCursor = clampIndex(m.wsDeleteCursor+1, len(m.wsDeleteMembers))
+					m.scrollWsDeleteConfirm(1)
 					return m, nil
 				}
 			}
@@ -1627,9 +1639,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// explicit 'y' proceeds; every other key (including
 				// esc/enter) aborts.
 				if msg.String() == "y" || msg.String() == "Y" {
-					wsName, sessName := m.wsDeleteWorkspace, m.wsDeleteSession
-					m.clearWsDeleteTarget()
-					return m, deleteWsSessionCmd(m.store, m.tmux, wsName, sessName, m.launchMode)
+					return m.startWsDelete()
 				}
 				m.clearWsDeleteTarget()
 				return m, nil
@@ -1648,9 +1658,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Second (last) confirmation. Default is cancel: only an
 				// explicit 'y' proceeds.
 				if msg.String() == "y" || msg.String() == "Y" {
-					wsName := m.wsDeleteWorkspace
-					m.clearWsDeleteTarget()
-					return m, deleteWorkspaceCmd(m.store, m.tmux, wsName, m.launchMode)
+					return m.startWsDelete()
 				}
 				m.clearWsDeleteTarget()
 				return m, nil
@@ -2467,6 +2475,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the spinner row until assembleWorkspaceSessionCmd completes.
 		m.wsStatuses = injectPendingWsSessions(msg.statuses, m.wsPendingSessions, m.spinnerFrame)
 		m.clampWsCursor()
+		m.pruneWsPendingDeletes()
 		m.wsBuilding = false
 		if m.wsDirty {
 			m.wsDirty = false
@@ -2517,8 +2526,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// disappears without waiting for the next snapshot; on failure
 		// nothing was dropped (deleteWsSessionCmd only calls RemoveSession
 		// once TeardownSession reports no per-repo failures), so the row
-		// stays exactly as it was and the error is surfaced instead.
+		// stays exactly as it was and the error is surfaced instead. A
+		// success stays pending until the reload drops the row.
 		if msg.err != nil {
+			delete(m.wsPendingDeletes, wsDeleteTarget{workspace: msg.workspaceName, session: msg.sessionName})
 			m.wsHint = fmt.Sprintf("delete session %q failed: %v", msg.sessionName, msg.err)
 			return m, nil
 		}
@@ -2537,6 +2548,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// torn down or not — are left in the store when any session's
 		// teardown failed).
 		if msg.err != nil {
+			delete(m.wsPendingDeletes, wsDeleteTarget{workspace: msg.workspaceName})
 			m.wsHint = fmt.Sprintf("delete workspace %q failed: %v", msg.workspaceName, msg.err)
 			return m, nil
 		}
@@ -2555,11 +2567,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickCmd()
 
 	case spinnerTickMsg:
-		// Advance the spinner shared by pending creates, in-flight pulls, and
-		// pending workspace-session creates. Stop re-arming once none remain
-		// so the ticker costs nothing when idle; reset the frame so the next
-		// operation starts from the first glyph.
-		if len(m.pendingCreates) == 0 && len(m.pulling) == 0 && len(m.wsPendingSessions) == 0 {
+		// Advance the spinner shared by pending creates, in-flight pulls,
+		// pending workspace-session creates, and pending workspace/session
+		// deletes. Stop re-arming once none remain so the ticker costs nothing
+		// when idle; reset the frame so the next operation starts from the
+		// first glyph.
+		if len(m.pendingCreates) == 0 && len(m.pulling) == 0 && len(m.wsPendingSessions) == 0 && len(m.wsPendingDeletes) == 0 {
 			m.spinnerActive = false
 			m.spinnerFrame = 0
 			return m, nil
@@ -2819,10 +2832,7 @@ func (m model) View() string {
 	// the one call site that filters — visibleSessions itself is untouched.
 	sessions := excludeWorkspaceOwnedSessions(m.snap.Sessions, m.workspaceRoot)
 	rows, recentByInstance := visibleSessions(sessions, m.recentCollapsed, m.snap.UpdatedAt, cfg.InactiveHideAfter)
-	paneW := m.width - 2
-	if paneW < 30 {
-		paneW = 30
-	}
+	paneW := m.paneWidth()
 
 	live, recent := 0, 0
 	for _, sv := range rows {
