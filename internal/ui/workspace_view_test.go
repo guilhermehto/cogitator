@@ -109,14 +109,14 @@ func TestWorkspaceViewListsWorkspacesWithSessionCountAndDetails(t *testing.T) {
 	}
 
 	out := m.View()
-	for _, want := range []string{"payments", "infra", "feature-x", "upgrade", "api", "web", "1 sessions"} {
+	for _, want := range []string{"payments", "infra", "feature-x", "upgrade", "api", "web", "1 session"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("Workspaces view missing %q; got:\n%s", want, out)
 		}
 	}
 }
 
-func TestWorkspaceViewEmptyWorkspaceShowsCreateHint(t *testing.T) {
+func TestWorkspaceViewEmptyWorkspaceWithoutReposPointsAtAddRepos(t *testing.T) {
 	m := model{
 		width: 120, height: 40,
 		view:       viewWorkspaces,
@@ -124,8 +124,26 @@ func TestWorkspaceViewEmptyWorkspaceShowsCreateHint(t *testing.T) {
 	}
 
 	out := m.View()
+	if !strings.Contains(out, "press e") {
+		t.Errorf("a workspace with no member repos must hint that e adds repos; got:\n%s", out)
+	}
+}
+
+func TestWorkspaceViewEmptyWorkspaceWithReposShowsCreateHint(t *testing.T) {
+	ws := makeWsStatus("empty-ws")
+	ws.Workspace.Members = []workspace.MemberRepo{{Path: "/repo/api"}, {Path: "/repo/web"}}
+	m := model{
+		width: 120, height: 40,
+		view:       viewWorkspaces,
+		wsStatuses: []workspace.WorkspaceStatus{ws},
+	}
+
+	out := m.View()
 	if !strings.Contains(out, "press n") {
-		t.Errorf("empty workspace must hint that n creates a session; got:\n%s", out)
+		t.Errorf("a workspace with repos but no sessions must hint that n creates a session; got:\n%s", out)
+	}
+	if !strings.Contains(out, "api · web") {
+		t.Errorf("the workspace header must list its member repos; got:\n%s", out)
 	}
 }
 
@@ -133,11 +151,8 @@ func TestWorkspaceViewEmptyStateWhenNoWorkspacesConfigured(t *testing.T) {
 	m := model{width: 120, height: 40, view: viewWorkspaces}
 
 	out := m.View()
-	if !strings.Contains(out, "no workspaces configured") {
+	if !strings.Contains(out, "No workspaces yet") {
 		t.Errorf("no-workspaces state must render an empty-state hint, not a blank pane; got:\n%s", out)
-	}
-	if strings.TrimSpace(out) == "" {
-		t.Error("no-workspaces state must not render a blank pane")
 	}
 }
 
@@ -148,7 +163,7 @@ func TestNewModelOpensOnWorkspacesEvenWithNone(t *testing.T) {
 	if m.view != viewWorkspaces {
 		t.Fatalf("launch view = %v, want viewWorkspaces", m.view)
 	}
-	if out := m.View(); !strings.Contains(out, "press N") {
+	if out := m.View(); !strings.Contains(out, "create a workspace") {
 		t.Errorf("zero workspaces must still open on Workspaces with the create hint; got:\n%s", out)
 	}
 }
