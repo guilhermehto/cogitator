@@ -421,7 +421,7 @@ type wsDeleteConfirmLayout struct {
 
 func (m model) layoutWsDeleteConfirm(fieldW, fieldH int) wsDeleteConfirmLayout {
 	title, hint := m.wsDeleteConfirmCopy()
-	contentW := min(72, max(1, fieldW-6))
+	contentW := min(72, max(1, fieldW-8))
 	l := wsDeleteConfirmLayout{
 		title: ansi.Wrap(title, contentW, ""),
 		hint:  ansi.Wrap(hint, contentW, ""),

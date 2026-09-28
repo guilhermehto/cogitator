@@ -193,22 +193,6 @@ func styledStatus(s string) string {
 	}
 }
 
-// legendLine renders the status-icon legend for the sessions pane's attention
-// glyphs.
-func legendLine() string {
-	sessionParts := []string{
-		dimStyle.Render("legend:"),
-		attnActiveStyle.Render(glyphActive) + " " + dimStyle.Render("active"),
-		attnFinishedStyle.Render(glyphFinished) + " " + dimStyle.Render("finished"),
-		attnInactiveStyle.Render(glyphInactive) + " " + dimStyle.Render("inactive"),
-		recentStyle.Render(glyphRecent) + " " + dimStyle.Render("recent"),
-		attnQuestionStyle.Render(glyphQuestion) + " " + dimStyle.Render("question"),
-		attnPermStyle.Render(glyphPermission) + " " + dimStyle.Render("permission"),
-		attnErrStyle.Render(glyphError) + " " + dimStyle.Render("error"),
-	}
-	return strings.Join(sessionParts, "  ")
-}
-
 func (m model) renderAllSessions(width int, rows []state.SessionView, recentByInstance map[string]int) string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Sessions") + "\n")
@@ -948,42 +932,43 @@ type helpSection struct {
 	bindings [][2]string // {keys, description}
 }
 
-// helpSections is the full keybinding reference shown by the '?' overlay,
-// grouped so related actions read together. Kept in one place so the overlay
-// stays in sync with the Update key handlers.
-var helpSections = []helpSection{
-	{"Repos", [][2]string{
-		{"j / k · ↑ / ↓", "move cursor"},
-		{"gg / < · G / >", "jump to top / bottom"},
-		{"ctrl+u / ctrl+d", "prev / next repo"},
-		{"enter", "jump to / resume session"},
-		{"/", "search sessions (move cursor)"},
-		{"ctrl+P", "switch session (fuzzy find)"},
-		{"a", "show / hide recent sessions"},
-	}},
-	{"Worktrees", [][2]string{
+// The '?' overlay's keybinding reference, grouped so related actions read
+// together. Kept in one place so the overlay stays in sync with the Update
+// key handlers. renderHelp shows the active view's section beside the shared
+// ones.
+var (
+	helpNavigate = helpSection{"Navigate", [][2]string{
+		{"j / k", "move"},
+		{"gg / G", "top / bottom"},
+		{"ctrl+u/d", "prev / next repo"},
+		{"/", "search sessions"},
+		{"ctrl+P", "switch session"},
+	}}
+	helpRepos = helpSection{"Repos", [][2]string{
+		{"enter", "jump / resume"},
 		{"n", "new worktree"},
-		{"F", "fetch branch from origin"},
-		{"P", "pull (fast-forward)"},
+		{"F", "fetch remote branch"},
+		{"P", "pull (ff-only)"},
 		{"D", "delete worktree"},
 		{"A", "add repo"},
-		{"R", "remove (untrack) repo"},
-	}},
-	{"Workspaces", [][2]string{
-		{"tab", "switch repos / workspaces"},
+		{"R", "untrack repo"},
+		{"a", "toggle recent"},
+	}}
+	helpWorkspaces = helpSection{"Workspaces", [][2]string{
+		{"enter", "launch / jump"},
 		{"N", "new workspace"},
-		{"n", "new session in workspace"},
-		{"e", "edit repo membership"},
-		{"D", "delete session / workspace"},
-		{"P", "pull (fast-forward)"},
-		{"enter", "launch session"},
-	}},
-	{"General", [][2]string{
-		{"?", "toggle this help"},
+		{"n", "new session"},
+		{"e", "add / remove repos"},
+		{"D", "delete selection"},
+		{"P", "pull (ff-only)"},
+	}}
+	helpGeneral = helpSection{"General", [][2]string{
+		{"tab", "switch view"},
 		{"S", "settings"},
-		{"q / ctrl+C", "quit"},
-	}},
-}
+		{"?", "toggle help"},
+		{"q", "quit"},
+	}}
+)
 
 // helpKeyStyle / helpSectionStyle colour the two columns of the help overlay:
 // the key column in the accent colour, section titles bold.
@@ -992,59 +977,91 @@ var (
 	helpSectionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("141"))
 )
 
+// statusLegend pairs each status glyph with its meaning for the help
+// overlay's Status block. Rendered per call so styles honour the active
+// colour profile.
+func statusLegend() [][2]string {
+	return [][2]string{
+		{attnActiveStyle.Render(glyphActive), "active"},
+		{attnFinishedStyle.Render(glyphFinished), "finished"},
+		{attnQuestionStyle.Render(glyphQuestion), "question"},
+		{attnPermStyle.Render(glyphPermission), "permission"},
+		{attnErrStyle.Render(glyphError), "error"},
+		{attnInactiveStyle.Render(glyphInactive), "stopped"},
+		{recentStyle.Render(glyphRecent), "recent"},
+		{wtMissingStyle.Render(glyphWtMissing), "missing"},
+	}
+}
+
 // renderHelp builds the floating keybinding-reference box drawn over the
 // sessions pane while prompt == promptHelp. It is composited (centred) by the
-// View via overlayBox, mirroring the ctrl+P switcher. The sections are laid out
-// in two columns so the box stays short enough to fit a typical pane. fieldW is
-// the sessions pane's inner width, used to size the box so it fits.
-func renderHelp(fieldW int) string {
-	// Widest key cell across all bindings, so descriptions align in a column.
-	keyW := 0
-	for _, sec := range helpSections {
+// View via overlayBox, mirroring the ctrl+P switcher. The left column holds
+// the active view's actions and the general keys, the right column shared
+// navigation and the status-glyph legend, so the box fits a 80x24 terminal.
+// It is sized to its content and only truncates when fieldW (the pane width
+// handed to overlayBox, two wider than the text area) is too narrow.
+func renderHelp(fieldW int, view viewMode) string {
+	viewSection := helpRepos
+	if view == viewWorkspaces {
+		viewSection = helpWorkspaces
+	}
+	leftSections := []helpSection{viewSection, helpGeneral}
+	rightSections := []helpSection{helpNavigate}
+
+	keyW, descW := 0, 0
+	for _, sec := range append(append([]helpSection{}, leftSections...), rightSections...) {
 		for _, b := range sec.bindings {
-			if w := lipgloss.Width(b[0]); w > keyW {
-				keyW = w
-			}
+			keyW = max(keyW, lipgloss.Width(b[0]))
+			descW = max(descW, lipgloss.Width(b[1]))
 		}
 	}
 
-	contentW := fieldW - 10
-	if contentW > 76 {
-		contentW = 76
-	}
-	if contentW < 16 {
-		contentW = max(1, fieldW-4)
-	}
-
-	// Split the sections across two columns: Repos+Worktrees on the left,
-	// Workspaces+General on the right. This is the most balanced whole-section
-	// split for four sections of uneven length. The columns are rendered
-	// independently then zipped row-for-row so the box reads top-to-bottom in
-	// two streams.
 	const gap = 3
-	colW := max(1, (contentW-gap)/2)
-	left := helpColumn(helpSections[:2], keyW, colW)
-	right := helpColumn(helpSections[2:], keyW, colW)
+	colW := keyW + 2 + descW
+	contentW := min(1+colW*2+gap+1, max(1, fieldW-8))
+	colW = max(1, (contentW-2-gap)/2)
 
-	var lines []string
-	lines = append(lines, padToWidth(" "+headerStyle.Render("Keybindings"), contentW))
-	lines = append(lines, padToWidth("", contentW))
-	for i := 0; i < max(len(left), len(right)); i++ {
-		l, r := "", ""
+	left := helpColumn(leftSections, keyW, colW)
+	right := append(helpColumn(rightSections, keyW, colW), padToWidth("", colW))
+	right = append(right, legendColumn(colW)...)
+
+	title := helpSectionStyle.Render("Keybindings")
+	closeHint := dimStyle.Render("any key to close")
+	titleGap := max(1, contentW-2-lipgloss.Width(title)-lipgloss.Width(closeHint))
+
+	lines := []string{
+		padToWidth(" "+title+strings.Repeat(" ", titleGap)+closeHint, contentW),
+		padToWidth("", contentW),
+	}
+	for i := range max(len(left), len(right)) {
+		l := padToWidth("", colW)
 		if i < len(left) {
 			l = left[i]
-		} else {
-			l = padToWidth("", colW)
 		}
+		r := ""
 		if i < len(right) {
 			r = right[i]
 		}
 		lines = append(lines, padToWidth(" "+l+strings.Repeat(" ", gap)+r, contentW))
 	}
-	lines = append(lines, padToWidth("", contentW))
-	lines = append(lines, padToWidth(" "+dimStyle.Render("any key to close"), contentW))
 
 	return paletteBoxStyle.Render(strings.Join(lines, "\n"))
+}
+
+// legendColumn renders the Status block: a section title, then the status
+// glyphs two per line so the block stays short.
+func legendColumn(colW int) []string {
+	lines := []string{padToWidth(helpSectionStyle.Render("Status"), colW)}
+	legend := statusLegend()
+	half := colW / 2
+	for i := 0; i < len(legend); i += 2 {
+		row := padToWidth(legend[i][0]+" "+dimStyle.Render(legend[i][1]), half)
+		if i+1 < len(legend) {
+			row += legend[i+1][0] + " " + dimStyle.Render(legend[i+1][1])
+		}
+		lines = append(lines, padToWidth(ansi.Truncate(row, colW, "…"), colW))
+	}
+	return lines
 }
 
 // helpColumn renders sections into a slice of fixed-width (colW) lines: a bold

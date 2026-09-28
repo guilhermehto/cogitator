@@ -59,19 +59,6 @@ func TestView_HeaderPointsAtHelp(t *testing.T) {
 	}
 }
 
-func TestHelpSections_NoTasksSectionOrTBinding(t *testing.T) {
-	for _, sec := range helpSections {
-		if sec.title == "Tasks" {
-			t.Fatal("helpSections must not contain a Tasks section (Taskwarrior removed)")
-		}
-		for _, b := range sec.bindings {
-			if b[0] == "T" {
-				t.Fatalf("helpSections must not bind 'T' (Taskwarrior removed); found in section %q: %q", sec.title, b[1])
-			}
-		}
-	}
-}
-
 func TestView_HelpOverlayAt80x24_FitsWithoutTruncatingKeys(t *testing.T) {
 	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, nil)
 	m.width, m.height = 80, 24

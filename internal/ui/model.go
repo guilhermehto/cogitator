@@ -1379,7 +1379,7 @@ func (m model) paneHeights() (sessionsOuterH, sessionsInnerH int) {
 		extraFooterRows++
 	}
 
-	// The application header and legend always reserve one row each.
+	// The application header and key hint bar always reserve one row each.
 	sessionsOuterH = max(6, m.height-2-extraFooterRows)
 	sessionsInnerH = max(1, sessionsOuterH-2)
 	return sessionsOuterH, sessionsInnerH
@@ -2899,13 +2899,13 @@ func (m model) View() string {
 		}
 	}
 
-	recentMins := int(cfg.RecentWindow.Minutes())
+	header := renderHeader(m.width, m.view, headerSummary{
+		live:         live,
+		recent:       recent,
+		recentWindow: cfg.RecentWindow,
+		updatedAt:    m.snap.UpdatedAt,
+	})
 
-	headerHint := fmt.Sprintf("  %d live · %d recent (≤%dm)  ·  updated %s  ·  ? help",
-		live, recent, recentMins, m.snap.UpdatedAt.Format("15:04:05"))
-	header := titleStyle.Render("cogitator") + dimStyle.Render(headerHint)
-
-	legend := legendLine()
 	// The unreachable footer is gated behind --debug because transient
 	// "instance unreachable" warnings (laptop sleep, network blips,
 	// short-lived opencode processes) are noisy during normal operation
@@ -2958,7 +2958,7 @@ func (m model) View() string {
 		default:
 			backdrop = m.renderAllSessions(paneW, rows, recentByInstance)
 		}
-		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, renderHelp(paneW))
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, renderHelp(paneW, m.view))
 	case m.prompt == promptSettings:
 		// Render whichever view is active as the backdrop, then composite the
 		// settings modal centred over it so the pane stays visible behind.
@@ -3006,7 +3006,7 @@ func (m model) View() string {
 	}
 	sessionsPane := sessionsStyle.Width(paneW).Height(sessionsInnerH).Render(sessionContent)
 
-	parts := []string{header, sessionsPane, legend}
+	parts := []string{header, sessionsPane}
 	// The Workspaces view's own renderer (workspace_view.go) has no pinned
 	// footer line to grow into (unlike renderWorkspaceRowsViewport's tmuxHint),
 	// so wsHint is appended here instead — below the pane, same as the debug
@@ -3019,7 +3019,23 @@ func (m model) View() string {
 	if footer != "" {
 		parts = append(parts, footer)
 	}
+	parts = append(parts, m.renderHintBar())
 	return strings.Join(parts, "\n")
+}
+
+// renderHintBar is the bottom line: the idle view's contextual bindings, or
+// just the way out while a prompt (which draws its own hints) is open.
+func (m model) renderHintBar() string {
+	var hints []keyHint
+	switch m.prompt {
+	case promptIdle:
+		hints = m.keyHints()
+	case promptHelp:
+		hints = []keyHint{{"any key", "close"}}
+	default:
+		hints = []keyHint{{"esc", "cancel"}}
+	}
+	return renderKeyHints(hints, m.width-1)
 }
 
 // newModel constructs the TUI model. debug enables diagnostic UI elements

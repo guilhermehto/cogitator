@@ -297,7 +297,7 @@ func (m model) renderWorkspaceBackfillPrompt(fieldW, fieldH int) string {
 		title = fmt.Sprintf("%s detached from %q — remove it from which sessions?", repoName, m.wsBackfillWorkspace)
 	}
 
-	contentW := min(72, max(1, fieldW-6))
+	contentW := min(72, max(1, fieldW-8))
 	title = ansi.Wrap(title, contentW, "")
 	hint := ansi.Wrap(fmt.Sprintf("%d sessions · ↑↓ move · space toggle · enter apply · esc skip", len(m.wsBackfillSessions)), contentW, "")
 	listH := max(1, fieldH-4-strings.Count(title, "\n")-strings.Count(hint, "\n"))

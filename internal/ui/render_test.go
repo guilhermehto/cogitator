@@ -204,16 +204,6 @@ func TestViewHidesUnreachableFooterWithoutDebug(t *testing.T) {
 	}
 }
 
-func TestLegendLineHasNoTaskGlyphs(t *testing.T) {
-	got := legendLine()
-	if strings.Contains(got, "high") || strings.Contains(got, "medium") || strings.Contains(got, "low") {
-		t.Fatalf("expected no task priority glyphs, got %q", got)
-	}
-	if !strings.Contains(got, "legend:") {
-		t.Fatalf("expected session legend prefix, got %q", got)
-	}
-}
-
 // TestStyledStatusCodexStrings verifies that every status string the Codex
 // provider emits renders legibly (non-blank for "busy"; blank for idle/empty)
 // and that the existing opencode strings are unaffected.
