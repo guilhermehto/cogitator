@@ -3033,16 +3033,14 @@ func (m model) View() string {
 // renderHintBar is the bottom line: the idle view's contextual bindings, or
 // just the way out while a prompt (which draws its own hints) is open.
 func (m model) renderHintBar() string {
-	var hints []keyHint
 	switch m.prompt {
 	case promptIdle:
-		hints = m.keyHints()
+		return renderKeyHints(m.keyHints(), helpHint, m.width)
 	case promptHelp:
-		hints = []keyHint{{"any key", "close"}}
+		return renderKeyHints([]keyHint{{"any key", "close"}}, keyHint{}, m.width)
 	default:
-		hints = []keyHint{{"esc", "cancel"}}
+		return renderKeyHints([]keyHint{{"esc", "cancel"}}, keyHint{}, m.width)
 	}
-	return renderKeyHints(hints, m.width-1)
 }
 
 // newModel constructs the TUI model. debug enables diagnostic UI elements

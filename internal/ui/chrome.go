@@ -69,10 +69,21 @@ type keyHint struct {
 	key, desc string
 }
 
-// renderKeyHints joins hints into one bar line, dropping trailing hints that
-// do not fit width rather than cutting one mid-word.
-func renderKeyHints(hints []keyHint, width int) string {
+// helpHint is pinned to the right end of the hint bar so the way to the full
+// reference survives narrow terminals.
+var helpHint = keyHint{"?", "help"}
+
+// renderKeyHints lays hints out left to right, dropping trailing hints that
+// do not fit rather than cutting one mid-word, with pinned (if set)
+// right-aligned.
+func renderKeyHints(hints []keyHint, pinned keyHint, width int) string {
 	const sep = "   "
+	var right string
+	if pinned.key != "" {
+		right = hintKeyStyle.Render(pinned.key) + " " + dimStyle.Render(pinned.desc)
+	}
+	budget := width - 1 - lipgloss.Width(right) - len(sep)
+
 	var b strings.Builder
 	used := 0
 	for i, h := range hints {
@@ -81,7 +92,7 @@ func renderKeyHints(hints []keyHint, width int) string {
 		if i > 0 {
 			cellW += len(sep)
 		}
-		if used+cellW > width {
+		if used+cellW > budget {
 			break
 		}
 		if i > 0 {
@@ -90,7 +101,11 @@ func renderKeyHints(hints []keyHint, width int) string {
 		b.WriteString(cell)
 		used += cellW
 	}
-	return " " + b.String()
+	gap := max(len(sep), width-1-used-lipgloss.Width(right))
+	if right == "" {
+		return " " + b.String()
+	}
+	return " " + b.String() + strings.Repeat(" ", gap) + right
 }
 
 // keyHints returns the bindings most relevant to what is under the cursor in
@@ -109,7 +124,6 @@ func (m model) keyHints() []keyHint {
 	return append(hints,
 		keyHint{"tab", next},
 		keyHint{"ctrl+p", "switch"},
-		keyHint{"?", "help"},
 		keyHint{"q", "quit"},
 	)
 }
