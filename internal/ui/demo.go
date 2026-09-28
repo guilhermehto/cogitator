@@ -46,14 +46,24 @@ func RunDemo(cfg *config.Config, logger *slog.Logger) error {
 	snaps := make(chan state.Snapshot, 1)
 	snaps <- snap
 
-	m := newModel(snaps, cfg, false, false)
-	m.demo = true
-	m.workspaceRows = rows
+	m := newDemoModel(snaps, cfg, rows)
 
 	logger.Info("running demo mode", "worktrees", len(rows))
 
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
+}
+
+// newDemoModel builds the --demo model: the curated rows injected directly,
+// background builds suppressed, and the Repos view selected — the capture
+// showcases the worktree roster, not the (empty) Workspaces view newModel
+// opens on.
+func newDemoModel(snaps <-chan state.Snapshot, cfg *config.Config, rows []settings.Row) model {
+	m := newModel(snaps, cfg, false, false)
+	m.demo = true
+	m.view = viewSessions
+	m.workspaceRows = rows
+	return m
 }
 
 // demoWorktrees returns a curated worktree roster across two repos that

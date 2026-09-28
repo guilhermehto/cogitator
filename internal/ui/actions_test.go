@@ -9,6 +9,7 @@ package ui
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -144,13 +145,23 @@ type fakeGitOps struct {
 	removeErr   error
 	removeCalls []removeWorktreeCall
 
-	mergeState git.MergeState
-	mergeBase  string
-	mergeCalls []mergeStatusCall
+	mergeState  git.MergeState
+	mergeBase   string
+	mergeByRepo map[string]git.MergeState // per-repo override of mergeState
+	mergeCalls  []mergeStatusCall
 
+	// mu guards pullCalls: workspace pulls run their members concurrently.
+	mu         sync.Mutex
 	pullResult string
 	pullErr    error
+	pullErrs   map[string]error // per-worktree override of pullErr
 	pullCalls  []pullCall
+
+	currentBranch    map[string]string // by path; "" means detached HEAD
+	currentBranchErr error
+	remoteBranches   map[string]bool // by repo path
+	dirty            map[string]bool // by worktree path
+	dirtyErr         error
 }
 
 type addWorktreeCall struct {
@@ -199,12 +210,32 @@ func (f *fakeGitOps) RemoveWorktree(repoPath, worktreePath, branch string, force
 
 func (f *fakeGitOps) BranchMergeStatus(repoPath, branch string) (git.MergeState, string) {
 	f.mergeCalls = append(f.mergeCalls, mergeStatusCall{repoPath: repoPath, branch: branch})
+	if s, ok := f.mergeByRepo[repoPath]; ok {
+		return s, f.mergeBase
+	}
 	return f.mergeState, f.mergeBase
 }
 
 func (f *fakeGitOps) Pull(worktreePath, branch string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.pullCalls = append(f.pullCalls, pullCall{worktreePath: worktreePath, branch: branch})
+	if err, ok := f.pullErrs[worktreePath]; ok {
+		return "", err
+	}
 	return f.pullResult, f.pullErr
+}
+
+func (f *fakeGitOps) CurrentBranch(path string) (string, error) {
+	return f.currentBranch[path], f.currentBranchErr
+}
+
+func (f *fakeGitOps) RemoteBranchExists(repoPath, _ string) bool {
+	return f.remoteBranches[repoPath]
+}
+
+func (f *fakeGitOps) IsDirty(path string) (bool, error) {
+	return f.dirty[path], f.dirtyErr
 }
 
 // fakeHarnessOps returns a fixed argv for any kind.

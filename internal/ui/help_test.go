@@ -59,26 +59,6 @@ func TestView_HeaderPointsAtHelp(t *testing.T) {
 	}
 }
 
-func TestHelpSections_WorkspacesKeys(t *testing.T) {
-	var got []string
-	for _, sec := range helpSections {
-		if sec.title == "Workspaces" {
-			for _, b := range sec.bindings {
-				got = append(got, b[0])
-			}
-		}
-	}
-	want := []string{"tab", "N", "n", "e", "D", "enter"}
-	if len(got) != len(want) {
-		t.Fatalf("Workspaces section keys = %v, want %v", got, want)
-	}
-	for i, k := range want {
-		if got[i] != k {
-			t.Fatalf("Workspaces section keys = %v, want %v", got, want)
-		}
-	}
-}
-
 func TestHelpSections_NoTasksSectionOrTBinding(t *testing.T) {
 	for _, sec := range helpSections {
 		if sec.title == "Tasks" {

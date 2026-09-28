@@ -100,6 +100,9 @@ var (
 	// new worktrees ('n') are created. Reuses the accent colour (63) used by the
 	// repo header so the tag reads as the repo's primary checkout.
 	wtBaseStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("63"))
+	// wsSafeStyle marks a workspace session whose every member branch is
+	// merged and whose worktrees are clean — nothing is lost by deleting it.
+	wsSafeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("71"))
 
 	// paletteMatchStyle highlights the query characters matched within a
 	// session-switcher row, so the user can see why a row matched (typing "cm"
@@ -510,11 +513,11 @@ func (m model) renderWorkspaceRows(width int, rows []settings.Row, cursor int, n
 }
 
 // renderWorkspaceRowsViewport renders the merged worktree list within height
-// rows. The Sessions title and active hint/prompt lines are pinned; only the
+// rows. The Repos title and active hint/prompt lines are pinned; only the
 // grouped repo/worktree lines scroll.
 func (m model) renderWorkspaceRowsViewport(width, height int, rows []settings.Row, cursor int, now time.Time) string {
 	var b strings.Builder
-	b.WriteString(headerStyle.Render("Sessions") + "\n")
+	b.WriteString(headerStyle.Render("Repos") + "\n")
 	if len(rows) == 0 {
 		b.WriteString(dimStyle.Render("(no worktrees configured)"))
 		if m.tmuxHint != "" {
@@ -937,7 +940,7 @@ type helpSection struct {
 // grouped so related actions read together. Kept in one place so the overlay
 // stays in sync with the Update key handlers.
 var helpSections = []helpSection{
-	{"Sessions", [][2]string{
+	{"Repos", [][2]string{
 		{"j / k · ↑ / ↓", "move cursor"},
 		{"gg / < · G / >", "jump to top / bottom"},
 		{"ctrl+u / ctrl+d", "prev / next repo"},
@@ -955,11 +958,12 @@ var helpSections = []helpSection{
 		{"R", "remove (untrack) repo"},
 	}},
 	{"Workspaces", [][2]string{
-		{"tab", "switch sessions / workspaces"},
+		{"tab", "switch repos / workspaces"},
 		{"N", "new workspace"},
 		{"n", "new session in workspace"},
 		{"e", "edit repo membership"},
 		{"D", "delete session / workspace"},
+		{"P", "pull (fast-forward)"},
 		{"enter", "launch session"},
 	}},
 	{"General", [][2]string{
@@ -1000,7 +1004,7 @@ func renderHelp(fieldW int) string {
 		contentW = max(1, fieldW-4)
 	}
 
-	// Split the sections across two columns: Sessions+Worktrees on the left,
+	// Split the sections across two columns: Repos+Worktrees on the left,
 	// Workspaces+General on the right. This is the most balanced whole-section
 	// split for four sections of uneven length. The columns are rendered
 	// independently then zipped row-for-row so the box reads top-to-bottom in

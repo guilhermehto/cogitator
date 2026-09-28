@@ -187,3 +187,48 @@ func TestMergeStatus_NoLiveOrRosterStillAppearsWithEmptyTitle(t *testing.T) {
 		t.Errorf("Title = %q, want empty", st.Title)
 	}
 }
+
+func TestWorkspaceStatusAttention(t *testing.T) {
+	running := func(a state.Attention) workspace.SessionStatus {
+		return workspace.SessionStatus{State: settings.StateRunning, Attention: a}
+	}
+	stopped := func(a state.Attention) workspace.SessionStatus {
+		return workspace.SessionStatus{State: settings.StateStopped, Attention: a}
+	}
+
+	tests := []struct {
+		name     string
+		sessions []workspace.SessionStatus
+		want     state.Attention
+		wantOK   bool
+	}{
+		{name: "no sessions", sessions: nil, wantOK: false},
+		{name: "nothing running", sessions: []workspace.SessionStatus{stopped(state.AttnPermissionPending)}, wantOK: false},
+		{name: "most urgent running label wins", sessions: []workspace.SessionStatus{
+			running(state.AttnActive), running(state.AttnFinished), running(state.AttnQuestionPending),
+		}, want: state.AttnQuestionPending, wantOK: true},
+		{name: "permission outranks question", sessions: []workspace.SessionStatus{
+			running(state.AttnQuestionPending), running(state.AttnPermissionPending),
+		}, want: state.AttnPermissionPending, wantOK: true},
+		{name: "errored outranks finished", sessions: []workspace.SessionStatus{
+			running(state.AttnFinished), running(state.AttnErrored),
+		}, want: state.AttnErrored, wantOK: true},
+		{name: "active outranks inactive", sessions: []workspace.SessionStatus{
+			running(state.AttnInactive), running(state.AttnActive),
+		}, want: state.AttnActive, wantOK: true},
+		{name: "stopped session's stale label is ignored", sessions: []workspace.SessionStatus{
+			stopped(state.AttnErrored), running(state.AttnInactive),
+		}, want: state.AttnInactive, wantOK: true},
+		{name: "unlabelled running session reads as active", sessions: []workspace.SessionStatus{
+			running(""),
+		}, want: state.AttnActive, wantOK: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := workspace.WorkspaceStatus{Sessions: tt.sessions}.Attention()
+			if ok != tt.wantOK || got != tt.want {
+				t.Errorf("Attention() = (%q, %v), want (%q, %v)", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}

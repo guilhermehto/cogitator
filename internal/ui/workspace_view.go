@@ -17,11 +17,13 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/guilhermehto/cogitator/internal/settings"
+	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
@@ -189,6 +191,10 @@ func (m model) renderWorkspacesView(width, height int) string {
 	}
 	start, end := wsWindow(lines, m.wsCursor, m.wsScroll, listHeight)
 	spinnerGlyph := spinnerFrames[m.spinnerFrame%len(spinnerFrames)]
+	now := m.tickNow
+	if now.IsZero() {
+		now = time.Now()
+	}
 
 	for _, dl := range lines[start:end] {
 		ws := m.wsStatuses[dl.wsIndex]
@@ -199,17 +205,16 @@ func (m model) renderWorkspacesView(width, height int) string {
 
 		var line string
 		if dl.kind == wsLineHeader {
-			detail := fmt.Sprintf("%d sessions", len(ws.Sessions))
-			if m.wsDeletePending(ws.Workspace.Name, "") {
-				detail = spinnerGlyph + " deleting…"
-			}
-			line = wtRepoStyle.Render("  "+ws.Workspace.Name) + "  " + wtPathStyle.Render(detail)
+			line = m.formatWsHeader(ws, spinnerGlyph)
 		} else {
 			sess := ws.Sessions[dl.sessIndex]
-			if m.wsDeletePending(ws.Workspace.Name, sess.Session.Name) {
-				sess = deletingWsSession(sess, spinnerGlyph)
+			switch {
+			case m.wsDeletePending(ws.Workspace.Name, sess.Session.Name):
+				sess = busyWsSession(sess, spinnerGlyph, "deleting")
+			case m.wsPullPending(wsTarget{workspace: ws.Workspace.Name, session: sess.Session.Name}):
+				sess = busyWsSession(sess, spinnerGlyph, "pulling")
 			}
-			line = formatWsSessionRow(sess, width-2)
+			line = formatWsSessionRow(now, sess, m.wsSafe[sess.Session.Dir], width-2)
 		}
 		if dl.entry == m.wsCursor {
 			line = highlightSelectedRow(line)
@@ -220,10 +225,42 @@ func (m model) renderWorkspacesView(width, height int) string {
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
-// formatWsSessionRow renders one session line: the live/roster status glyph
-// (via worktreeStatusCell, shared with the Sessions view's status
-// vocabulary), the session's branch, and its member repo basenames.
-func formatWsSessionRow(sess workspace.SessionStatus, width int) string {
+// formatWsHeader renders a workspace header line: its name, the rolled-up
+// attention badge of its running sessions (so a collapsed glance says whether
+// anything inside needs you), and either the session count or the in-flight
+// operation acting on the whole workspace.
+func (m model) formatWsHeader(ws workspace.WorkspaceStatus, spinnerGlyph string) string {
+	detail := wtPathStyle.Render(fmt.Sprintf("%d sessions", len(ws.Sessions)))
+	switch {
+	case m.wsDeletePending(ws.Workspace.Name, ""):
+		detail = wtPathStyle.Render(spinnerGlyph + " deleting…")
+	case m.wsPullPending(wsTarget{workspace: ws.Workspace.Name}):
+		detail = wtPathStyle.Render(spinnerGlyph + " pulling…")
+	}
+	line := wtRepoStyle.Render("  "+ws.Workspace.Name) + "  "
+	if attn, ok := ws.Attention(); ok {
+		line += attnLabel(attn, state.SourceLive)
+	}
+	return line + detail
+}
+
+// busyWsSession returns sess relabelled with an animated "<verb>…" marker
+// (deleting, pulling) for formatWsSessionRow.
+func busyWsSession(sess workspace.SessionStatus, glyph, verb string) workspace.SessionStatus {
+	label := sess.Session.Branch
+	if label == "" {
+		label = sess.Session.Name
+	}
+	sess.Session.Branch = fmt.Sprintf("%s %s %s…", glyph, verb, label)
+	return sess
+}
+
+// formatWsSessionRow renders one session line with the same status | session
+// | activity columns as the Repos view's formatWorktreeRow: the live/roster
+// status glyph, then the branch (with a "(safe to delete)" tag when safe), its
+// member repo basenames, and the muted session title; relative last activity
+// fills the right column for stopped sessions.
+func formatWsSessionRow(now time.Time, sess workspace.SessionStatus, safe bool, width int) string {
 	statusCell := worktreeStatusCell(settings.Row{State: sess.State, Attention: sess.Attention})
 	sessionW := worktreeSessionWidth(width)
 
@@ -241,13 +278,23 @@ func formatWsSessionRow(sess workspace.SessionStatus, width int) string {
 	if sess.State != settings.StateRunning {
 		titleStr = wtStoppedStyle.Render(branch)
 	}
+	if safe {
+		titleStr += " " + wsSafeStyle.Render("(safe to delete)")
+	}
 	if len(members) > 0 {
-		titleStr += "  " + wtPathStyle.Render(strings.Join(members, ", "))
+		titleStr += "  " + wtPathStyle.Render("["+strings.Join(members, ", ")+"]")
+	}
+	titleStr += sessionTitleSuffix(sess.Title)
+
+	var activityStr string
+	if !sess.LastActivity.IsZero() && sess.State == settings.StateStopped {
+		activityStr = dimStyle.Render(formatRelative(now, sess.LastActivity))
 	}
 
 	cells := []string{
 		padCell(statusCell, colStateW, lipgloss.Left),
 		padCell(titleStr, sessionW, lipgloss.Left),
+		padCell(activityStr, colActivityW, lipgloss.Right),
 	}
 	return strings.Join(cells, strings.Repeat(" ", colGap))
 }

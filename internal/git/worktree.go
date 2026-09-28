@@ -119,6 +119,39 @@ func BranchExists(repoPath, branch string) bool {
 	return err == nil
 }
 
+// RemoteBranchExists reports whether origin/<branch> is known locally as a
+// remote-tracking ref in the repository rooted at repoPath — i.e. whether the
+// branch has ever been pushed or fetched, and so has something to pull from.
+func RemoteBranchExists(repoPath, branch string) bool {
+	_, err := runGit(repoPath, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+branch)
+	return err == nil
+}
+
+// CurrentBranch returns the short name of the branch checked out in the
+// worktree at path, or "" when HEAD is detached.
+func CurrentBranch(path string) (string, error) {
+	out, err := runGit(path, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse: %w", err)
+	}
+	branch := strings.TrimSpace(out)
+	if branch == "HEAD" {
+		return "", nil
+	}
+	return branch, nil
+}
+
+// IsDirty reports whether the worktree at path has uncommitted changes to
+// tracked files or untracked (non-ignored) files — anything a worktree
+// removal would discard.
+func IsDirty(path string) (bool, error) {
+	out, err := runGit(path, "status", "--porcelain")
+	if err != nil {
+		return false, fmt.Errorf("git status: %w", err)
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 // PruneWorktrees removes administrative files for worktrees under repoPath
 // whose working directory is gone, by running `git worktree prune`. It is
 // best-effort rollback cleanup: callers that already have a primary error to

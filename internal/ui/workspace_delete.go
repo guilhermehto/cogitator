@@ -89,9 +89,9 @@ func (m *model) clearWsDeleteTarget() {
 	m.wsDeleteScroll = 0
 }
 
-// wsDeleteTarget identifies a dispatched delete: one session, or the whole
-// workspace when session is empty.
-type wsDeleteTarget struct {
+// wsTarget identifies the subject of an in-flight workspace operation
+// (delete, pull): one session, or the whole workspace when session is empty.
+type wsTarget struct {
 	workspace string
 	session   string
 }
@@ -103,10 +103,10 @@ type wsDeleteTarget struct {
 // the row looks untouched, inviting a retry that — once the first delete
 // lands and the cursor slides onto a neighbour — deletes the wrong thing.
 func (m model) startWsDelete() (model, tea.Cmd) {
-	target := wsDeleteTarget{workspace: m.wsDeleteWorkspace, session: m.wsDeleteSession}
+	target := wsTarget{workspace: m.wsDeleteWorkspace, session: m.wsDeleteSession}
 	m.clearWsDeleteTarget()
 	if m.wsPendingDeletes == nil {
-		m.wsPendingDeletes = map[wsDeleteTarget]struct{}{}
+		m.wsPendingDeletes = map[wsTarget]struct{}{}
 	}
 	m.wsPendingDeletes[target] = struct{}{}
 
@@ -128,13 +128,13 @@ func (m model) startWsDelete() (model, tea.Cmd) {
 // empty sessionName, the workspace itself — is being deleted, either directly
 // or because its whole workspace is.
 func (m model) wsDeletePending(workspaceName, sessionName string) bool {
-	if _, ok := m.wsPendingDeletes[wsDeleteTarget{workspace: workspaceName}]; ok {
+	if _, ok := m.wsPendingDeletes[wsTarget{workspace: workspaceName}]; ok {
 		return true
 	}
 	if sessionName == "" {
 		return false
 	}
-	_, ok := m.wsPendingDeletes[wsDeleteTarget{workspace: workspaceName, session: sessionName}]
+	_, ok := m.wsPendingDeletes[wsTarget{workspace: workspaceName, session: sessionName}]
 	return ok
 }
 
@@ -149,7 +149,7 @@ func (m *model) pruneWsPendingDeletes() {
 	}
 }
 
-func wsStatusesContain(statuses []workspace.WorkspaceStatus, target wsDeleteTarget) bool {
+func wsStatusesContain(statuses []workspace.WorkspaceStatus, target wsTarget) bool {
 	for _, ws := range statuses {
 		if ws.Workspace.Name != target.workspace {
 			continue
@@ -165,17 +165,6 @@ func wsStatusesContain(statuses []workspace.WorkspaceStatus, target wsDeleteTarg
 		return false
 	}
 	return false
-}
-
-// deletingWsSession returns sess relabelled with an animated "deleting…"
-// marker for formatWsSessionRow.
-func deletingWsSession(sess workspace.SessionStatus, glyph string) workspace.SessionStatus {
-	label := sess.Session.Branch
-	if label == "" {
-		label = sess.Session.Name
-	}
-	sess.Session.Branch = fmt.Sprintf("%s deleting %s…", glyph, label)
-	return sess
 }
 
 // updateWorkspaceDelete handles 'D' in the Workspaces view: it opens the

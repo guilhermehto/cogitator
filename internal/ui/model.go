@@ -38,10 +38,11 @@ type workspaceRowsMsg struct {
 	root string
 }
 
-// viewMode selects which top-level view occupies the full pane: Sessions
-// (worktrees merged across configured repos) or Workspaces (multi-repo
-// bundles and their sessions). Iota order is load-bearing: the zero value
-// maps to viewSessions, keeping existing model{} literals in tests valid
+// viewMode selects which top-level view occupies the full pane: Repos
+// (viewSessions: worktrees merged across configured repos) or Workspaces
+// (multi-repo bundles and their sessions). newModel opens on Workspaces — it
+// is the "what I'm working on" surface. Iota order is load-bearing: the zero
+// value maps to viewSessions, keeping existing model{} literals in tests valid
 // without explicit initialisation — the same convention promptMode documents
 // below.
 type viewMode int
@@ -338,6 +339,9 @@ type gitOps interface {
 	RemoveWorktree(repoPath, worktreePath, branch string, force bool) error
 	BranchMergeStatus(repoPath, branch string) (git.MergeState, string)
 	Pull(worktreePath, branch string) (string, error)
+	CurrentBranch(path string) (string, error)
+	RemoteBranchExists(repoPath, branch string) bool
+	IsDirty(path string) (bool, error)
 }
 
 // realGitOps delegates to the package-level git functions.
@@ -361,6 +365,18 @@ func (realGitOps) BranchMergeStatus(repoPath, branch string) (git.MergeState, st
 
 func (realGitOps) Pull(worktreePath, branch string) (string, error) {
 	return git.Pull(worktreePath, branch)
+}
+
+func (realGitOps) CurrentBranch(path string) (string, error) {
+	return git.CurrentBranch(path)
+}
+
+func (realGitOps) RemoteBranchExists(repoPath, branch string) bool {
+	return git.RemoteBranchExists(repoPath, branch)
+}
+
+func (realGitOps) IsDirty(path string) (bool, error) {
+	return git.IsDirty(path)
 }
 
 // harnessOps is the injectable seam for harness registry lookups.
@@ -673,7 +689,19 @@ type model struct {
 	// tearing down (startWsDelete); their rows render "deleting…" and refuse
 	// another 'D'. Entries clear on failure, or once a reload no longer lists
 	// the target (pruneWsPendingDeletes).
-	wsPendingDeletes map[wsDeleteTarget]struct{}
+	wsPendingDeletes map[wsTarget]struct{}
+	// wsPulling tracks in-flight 'P' pulls in the Workspaces view (a whole
+	// workspace's member base checkouts, or one session's member worktrees);
+	// their rows render "pulling…" and a repeated 'P' is ignored.
+	wsPulling map[wsTarget]struct{}
+	// wsSafe records, per session Dir, whether the last safe-to-delete probe
+	// (wsSafeCmd) found every member branch merged and every worktree clean.
+	// Derived live, never persisted. wsSafeProbing guards against overlapping
+	// probes; wsSafeDue marks a probe as wanted (periodic tick, finished pull,
+	// startup) and is honoured once no probe is in flight and statuses exist.
+	wsSafe        map[string]bool
+	wsSafeProbing bool
+	wsSafeDue     bool
 
 	// Repo-membership modal ('e' in the Workspaces view) state, meaningful
 	// only while prompt == promptWorkspaceModal. wsModalWorkspace is the
@@ -1299,11 +1327,12 @@ func (m model) Init() tea.Cmd {
 	// Gated behind !m.demo (mirroring the snapshotMsg row build below) so
 	// --demo never touches the workspaces store and its capture stays
 	// deterministic.
-	var wsC tea.Cmd
+	var wsC, safeC tea.Cmd
 	if !m.demo {
 		wsC = loadWorkspaceStatusCmd(m.store, m.snap)
+		safeC = wsSafeTickCmd()
 	}
-	return tea.Batch(waitSnapshot(m.snaps), tick, wsC)
+	return tea.Batch(waitSnapshot(m.snaps), tick, wsC, safeC)
 }
 
 func waitSnapshot(ch <-chan state.Snapshot) tea.Cmd {
@@ -1870,6 +1899,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return next, cmd
 			}
 			if next, cmd, handled := m.updateWorkspaceDelete(msg); handled {
+				next.wsPendingG = false
+				return next, cmd
+			}
+			if next, cmd, handled := m.updateWorkspacePull(msg); handled {
 				next.wsPendingG = false
 				return next, cmd
 			}
@@ -2477,12 +2510,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clampWsCursor()
 		m.pruneWsPendingDeletes()
 		m.wsBuilding = false
+		var reloadC tea.Cmd
 		if m.wsDirty {
 			m.wsDirty = false
 			m.wsBuilding = true
-			return m, loadWorkspaceStatusCmd(m.store, m.snap)
+			reloadC = loadWorkspaceStatusCmd(m.store, m.snap)
 		}
-		return m, nil
+		next, safeC := m.maybeProbeWsSafe()
+		return next, tea.Batch(reloadC, safeC)
+
+	case wsSafeTickMsg:
+		m.wsSafeDue = true
+		next, safeC := m.maybeProbeWsSafe()
+		return next, tea.Batch(safeC, wsSafeTickCmd())
+
+	case wsSafeMsg:
+		m.wsSafe = msg.safe
+		m.wsSafeProbing = false
+		return m.maybeProbeWsSafe()
+
+	case wsPullFinishedMsg:
+		delete(m.wsPulling, msg.target)
+		m.wsHint = wsPullHint(msg.target, msg.outcomes)
+		// A pulled base branch can newly contain a session's commits.
+		m.wsSafeDue = true
+		return m.maybeProbeWsSafe()
 
 	case wsWorkspaceCreatedMsg:
 		// Outcome of createWorkspaceCmd ('N'). On success, refresh from the
@@ -2529,7 +2581,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// stays exactly as it was and the error is surfaced instead. A
 		// success stays pending until the reload drops the row.
 		if msg.err != nil {
-			delete(m.wsPendingDeletes, wsDeleteTarget{workspace: msg.workspaceName, session: msg.sessionName})
+			delete(m.wsPendingDeletes, wsTarget{workspace: msg.workspaceName, session: msg.sessionName})
 			m.wsHint = fmt.Sprintf("delete session %q failed: %v", msg.sessionName, msg.err)
 			return m, nil
 		}
@@ -2548,7 +2600,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// torn down or not — are left in the store when any session's
 		// teardown failed).
 		if msg.err != nil {
-			delete(m.wsPendingDeletes, wsDeleteTarget{workspace: msg.workspaceName})
+			delete(m.wsPendingDeletes, wsTarget{workspace: msg.workspaceName})
 			m.wsHint = fmt.Sprintf("delete workspace %q failed: %v", msg.workspaceName, msg.err)
 			return m, nil
 		}
@@ -2572,7 +2624,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// deletes. Stop re-arming once none remain so the ticker costs nothing
 		// when idle; reset the frame so the next operation starts from the
 		// first glyph.
-		if len(m.pendingCreates) == 0 && len(m.pulling) == 0 && len(m.wsPendingSessions) == 0 && len(m.wsPendingDeletes) == 0 {
+		if len(m.pendingCreates) == 0 && len(m.pulling) == 0 && len(m.wsPendingSessions) == 0 && len(m.wsPendingDeletes) == 0 && len(m.wsPulling) == 0 {
 			m.spinnerActive = false
 			m.spinnerFrame = 0
 			return m, nil
@@ -2825,17 +2877,21 @@ func (m model) View() string {
 	if cfg == nil {
 		cfg = config.Default()
 	}
-	// Exclude workspace-owned session directories before visibleSessions runs:
-	// they already have their own row in workspaceRows (settings.Merge applies
-	// the same exclusion), so the live-only fallback and the header's
-	// live/recent counts must agree rather than double-counting them. This is
-	// the one call site that filters — visibleSessions itself is untouched.
+	// Exclude workspace-owned session directories from the live-only fallback
+	// list: they already have their own row in the Workspaces view
+	// (settings.Merge applies the same exclusion to workspaceRows). The
+	// header's live/recent counts summarise everything running — Repos and
+	// Workspaces alike — so they are taken over the unfiltered snapshot.
 	sessions := excludeWorkspaceOwnedSessions(m.snap.Sessions, m.workspaceRoot)
 	rows, recentByInstance := visibleSessions(sessions, m.recentCollapsed, m.snap.UpdatedAt, cfg.InactiveHideAfter)
+	countRows := rows
+	if len(sessions) != len(m.snap.Sessions) {
+		countRows, _ = visibleSessions(m.snap.Sessions, m.recentCollapsed, m.snap.UpdatedAt, cfg.InactiveHideAfter)
+	}
 	paneW := m.paneWidth()
 
 	live, recent := 0, 0
-	for _, sv := range rows {
+	for _, sv := range countRows {
 		if sv.Source == state.SourceRecent {
 			recent++
 		} else {
@@ -2955,8 +3011,10 @@ func (m model) View() string {
 	// footer line to grow into (unlike renderWorkspaceRowsViewport's tmuxHint),
 	// so wsHint is appended here instead — below the pane, same as the debug
 	// footer — whenever the Workspaces view is active and has something to say.
+	// Truncated to the terminal width: the pane height budget reserves exactly
+	// one line for it, and a multi-repo pull summary can run long.
 	if m.view == viewWorkspaces && m.wsHint != "" {
-		parts = append(parts, wtHintStyle.Render(m.wsHint))
+		parts = append(parts, wtHintStyle.Render(ansi.Truncate(singleLineCell(m.wsHint), m.width, "…")))
 	}
 	if footer != "" {
 		parts = append(parts, footer)
@@ -2996,6 +3054,8 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 		// before that load completes coalesces into wsDirty instead of
 		// dispatching a second, concurrent load — see loadWorkspaceStatusCmd.
 		wsBuilding: true,
+		// Probe safe-to-delete as soon as the first workspace load lands.
+		wsSafeDue: true,
 
 		// Inject real implementations for tmux, git, and harness operations.
 		// Tests can override these fields with fakes after construction. store
@@ -3005,6 +3065,7 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 		harnOp: realHarnessOps{},
 
 		prompt: promptIdle,
+		view:   viewWorkspaces,
 		input:  ti,
 	}
 }

@@ -8,6 +8,7 @@ package ui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -137,6 +138,78 @@ func TestWorkspaceViewEmptyStateWhenNoWorkspacesConfigured(t *testing.T) {
 	}
 	if strings.TrimSpace(out) == "" {
 		t.Error("no-workspaces state must not render a blank pane")
+	}
+}
+
+func TestNewModelOpensOnWorkspacesEvenWithNone(t *testing.T) {
+	m := newModel(make(chan state.Snapshot), nil, false, false)
+	m.width, m.height = 120, 40
+
+	if m.view != viewWorkspaces {
+		t.Fatalf("launch view = %v, want viewWorkspaces", m.view)
+	}
+	if out := m.View(); !strings.Contains(out, "press N") {
+		t.Errorf("zero workspaces must still open on Workspaces with the create hint; got:\n%s", out)
+	}
+}
+
+func TestWorkspaceViewHeaderRollsUpMostUrgentAttention(t *testing.T) {
+	waiting := makeSessionStatus("needs-you", "needs-you", settings.StateRunning, "/repo/api")
+	waiting.Attention = state.AttnPermissionPending
+	busy := makeSessionStatus("busy", "busy", settings.StateRunning, "/repo/api")
+	busy.Attention = state.AttnActive
+	m := model{
+		width: 120, height: 40, view: viewWorkspaces,
+		wsStatuses: []workspace.WorkspaceStatus{
+			makeWsStatus("payments", busy, waiting),
+			makeWsStatus("idle", makeSessionStatus("parked", "parked", settings.StateStopped, "/repo/api")),
+		},
+	}
+
+	headers := map[string]string{}
+	for _, line := range strings.Split(m.View(), "\n") {
+		for _, name := range []string{"payments", "idle"} {
+			if strings.Contains(line, name+"  ") && strings.Contains(line, "sessions") {
+				headers[name] = line
+			}
+		}
+	}
+	if !strings.Contains(headers["payments"], glyphPermission) {
+		t.Errorf("payments header must carry the permission badge; got %q", headers["payments"])
+	}
+	for _, g := range []string{glyphPermission, glyphActive, glyphInactive} {
+		if strings.Contains(headers["idle"], g) {
+			t.Errorf("header with nothing running must carry no badge; got %q", headers["idle"])
+		}
+	}
+}
+
+func TestWorkspaceViewSessionRowShowsTitleAndStoppedActivity(t *testing.T) {
+	stopped := makeSessionStatus("parked", "parked", settings.StateStopped, "/repo/api")
+	stopped.Title = "Refactor billing export"
+	stopped.LastActivity = fixedNow.Add(-2 * time.Hour)
+	running := makeSessionStatus("live", "live", settings.StateRunning, "/repo/api")
+	running.Title = "Wire OAuth callback"
+	running.LastActivity = fixedNow.Add(-3 * time.Hour)
+	m := model{
+		width: 120, height: 40, view: viewWorkspaces, tickNow: fixedNow,
+		wsStatuses: []workspace.WorkspaceStatus{makeWsStatus("payments", stopped, running)},
+	}
+
+	var parkedLine, liveLine string
+	for _, line := range strings.Split(m.View(), "\n") {
+		switch {
+		case strings.Contains(line, "parked"):
+			parkedLine = line
+		case strings.Contains(line, "live") && strings.Contains(line, "OAuth"):
+			liveLine = line
+		}
+	}
+	if !strings.Contains(parkedLine, "Refactor billing export") || !strings.Contains(parkedLine, "2h") {
+		t.Errorf("stopped row must show title and relative activity; got %q", parkedLine)
+	}
+	if liveLine == "" || strings.Contains(liveLine, "3h") {
+		t.Errorf("running row must show its title but no activity age (the badge covers it); got %q", liveLine)
 	}
 }
 
@@ -444,8 +517,8 @@ func TestWorkspaceViewInitDispatchesStoreLoadWhenNotDemo(t *testing.T) {
 	m := newModel(ch, nil, false, false)
 
 	cmd := m.Init()
-	if n := batchLen(cmd()); n != 3 {
-		t.Errorf("Init outside demo must batch 3 cmds (waitSnapshot, tick, workspace-status load); got %d", n)
+	if n := batchLen(cmd()); n != 4 {
+		t.Errorf("Init outside demo must batch 4 cmds (waitSnapshot, tick, workspace-status load, safe-probe tick); got %d", n)
 	}
 }
 
