@@ -707,21 +707,25 @@ type model struct {
 	// only while prompt == promptWorkspaceModal. wsModalWorkspace is the
 	// target workspace's name, captured when the modal opens.
 	// wsModalScanning is true between opening and the scan result arriving.
-	// wsModalEntries is the combined, alphabetically sorted set of the
-	// workspace's current members (offered for removal) and freshly
-	// discovered non-member candidates (offered for addition) — see
-	// wsModalEntry (workspace_modal.go). wsModalMatches is its current
-	// fuzzy-filtered view (what is rendered), indices into wsModalEntries;
-	// wsModalCursor indexes wsModalMatches. wsModalErr holds a scan error to
-	// surface in the modal body (a failed commit is reported via wsHint
-	// instead, since the modal has already closed by then). Zero values are
-	// safe (modal closed).
+	// wsModalEntries is the workspace's current members (offered for
+	// removal) followed by freshly discovered non-member candidates (offered
+	// for addition) — see wsModalEntry (workspace_modal.go). wsModalMatches
+	// is its current fuzzy-filtered view (what is rendered), indices into
+	// wsModalEntries; wsModalCursor indexes wsModalMatches. wsModalErr holds a
+	// scan error to surface in the modal body. For a workspace without
+	// sessions the modal stays open across commits: wsModalBusy is the path
+	// whose attach/detach is in flight, and wsModalNotice/wsModalNoticeErr
+	// report the last commit's outcome inside the modal. Zero values are safe
+	// (modal closed).
 	wsModalWorkspace string
 	wsModalScanning  bool
 	wsModalEntries   []wsModalEntry
 	wsModalMatches   []int
 	wsModalCursor    int
 	wsModalErr       string
+	wsModalBusy      string
+	wsModalNotice    string
+	wsModalNoticeErr bool
 
 	// Membership-backfill prompt ('promptWorkspaceBackfill') state, opened
 	// when a membershipChangedMsg lands for a workspace that has at least one
@@ -2313,10 +2317,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case wsModalActionErrMsg:
-		// A committed attach/detach failed validation or persistence; report
-		// it in wsHint since the modal has already closed by the time this
-		// arrives. membershipChangedMsg (the success case) is handled below,
-		// by workspace_backfill.go's handleMembershipChanged.
+		// A committed attach/detach failed validation or persistence. The
+		// modal reports it inline when it is still open on this commit;
+		// otherwise it has closed and the failure goes to wsHint.
+		// membershipChangedMsg (the success case) is handled below.
+		if m.wsModalAwaitingCommit() {
+			return m.failWsModalCommit(msg.err), nil
+		}
 		m.wsHint = fmt.Sprintf("membership change failed: %v", msg.err)
 		return m, nil
 
@@ -2336,6 +2343,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// user has no way to know the backfill never happened otherwise, so
 		// name the repo and workspace and point at the recovery (re-add the
 		// repo to be offered the backfill again).
+		if m.wsModalAwaitingCommit() && msg.workspace == m.wsModalWorkspace {
+			return m.applyWsModalCommit(msg)
+		}
 		if m.prompt != promptIdle {
 			m.wsHint = fmt.Sprintf(
 				"%s: existing sessions in %s were not updated — re-add the repo to offer the backfill again",
