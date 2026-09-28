@@ -142,6 +142,21 @@ func TestAssembleSession_OneWorktreePerMember(t *testing.T) {
 			t.Errorf("member worktree %q does not exist: %v", m.WorktreePath, err)
 		}
 	}
+
+	agentsFile, err := os.ReadFile(filepath.Join(wantDir, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("session AGENTS.md: %v", err)
+	}
+	if !strings.Contains(string(agentsFile), "`"+wantBranch+"`") {
+		t.Errorf("session AGENTS.md does not name branch %q:\n%s", wantBranch, agentsFile)
+	}
+	claudeFile, err := os.ReadFile(filepath.Join(wantDir, "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("session CLAUDE.md: %v", err)
+	}
+	if !strings.Contains(string(claudeFile), "@AGENTS.md") {
+		t.Errorf("session CLAUDE.md does not import AGENTS.md:\n%s", claudeFile)
+	}
 }
 
 // TestAssembleSession_BranchExistsInSecondRepo_CreatesNothing verifies that

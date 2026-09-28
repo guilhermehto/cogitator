@@ -371,6 +371,9 @@ jumps).
 - **Adding a member later**: attaching a repo to a workspace that already has
   sessions prompts which of those sessions to backfill with a new worktree for
   it; sessions you skip keep their existing member list.
+- **Agent orientation**: each session directory gets a root `AGENTS.md` (plus a
+  `CLAUDE.md` importing it) telling coding agents that it is not a repo itself
+  and each subdirectory is a separate git worktree.
 
 `ctrl+P` lists workspace sessions in the session switcher too, labelled
 `<workspace>/<session>`. See [Key bindings](#key-bindings) for the full set of
