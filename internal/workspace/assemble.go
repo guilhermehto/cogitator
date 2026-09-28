@@ -73,6 +73,10 @@ func AssembleSession(ws Workspace, root, sessionName, harness string) (Session, 
 	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		return Session{}, fmt.Errorf("create session directory %q: %w", sessionDir, err)
 	}
+	if err := writeSessionAgentFiles(sessionDir, branch); err != nil {
+		_ = os.RemoveAll(sessionDir)
+		return Session{}, err
+	}
 
 	// members holds one entry per repo BEFORE its git.AddWorktree call, not
 	// after: the entry is appended with the intended dest path first, then
@@ -102,6 +106,38 @@ func AssembleSession(ws Workspace, root, sessionName, harness string) (Session, 
 		Harness: harness,
 		Members: members,
 	}, nil
+}
+
+// sessionAgentsFile orients coding agents launched in a session directory,
+// which is not itself a git repo but a parent of one worktree per member.
+const sessionAgentsFile = `# Workspace session
+
+This directory is not a git repository. Each subdirectory is a git worktree of a separate repo, all on branch ` + "`%s`" + `.
+
+- Run git commands inside the relevant subdirectory; each has its own history, remotes, and tooling.
+- Changes spanning repos need a commit in each repo.
+- Follow each repo's own AGENTS.md/CLAUDE.md when working inside it.
+`
+
+// sessionClaudeFile points Claude Code, which reads CLAUDE.md rather than
+// AGENTS.md, at the same instructions via its @-import syntax.
+const sessionClaudeFile = "@AGENTS.md\n"
+
+func writeSessionAgentFiles(sessionDir, branch string) error {
+	files := []struct {
+		name    string
+		content []byte
+	}{
+		{"AGENTS.md", fmt.Appendf(nil, sessionAgentsFile, branch)},
+		{"CLAUDE.md", []byte(sessionClaudeFile)},
+	}
+	for _, f := range files {
+		path := filepath.Join(sessionDir, f.name)
+		if err := os.WriteFile(path, f.content, 0o644); err != nil {
+			return fmt.Errorf("write %q: %w", path, err)
+		}
+	}
+	return nil
 }
 
 // rollbackMember undoes one intended member worktree — whether it was fully
