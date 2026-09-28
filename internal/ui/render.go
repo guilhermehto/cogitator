@@ -664,60 +664,133 @@ func (m model) worktreePromptLine() string {
 	return wtHintStyle.Render(label) + m.input.View()
 }
 
-// renderRepoFinder renders the embedded "add repo" fuzzy finder shown in the
-// sessions pane while prompt == promptAddRepo. It draws a query line, the
-// fuzzy-matched repository list (cursor row highlighted, windowed to fit the
-// pane), and a status/help footer. height is the pane's inner content height,
-// used to window the list so a long result set never overflows the pane.
-func (m model) renderRepoFinder(width, height int) string {
-	var b strings.Builder
-	b.WriteString(headerStyle.Render("Add repo") + "\n")
-	b.WriteString(promptMarker() + m.input.View())
+// renderRepoFinder renders the floating "track a repo" picker shown over the
+// Repos view while prompt == promptAddRepo, composited by View via
+// overlayBox. It shares the pickerBox layout and row style with the
+// workspace repo-membership modal so both repo pickers read the same.
+// fieldW/fieldH are the pane's dimensions, used to size the box and window
+// the list so a long result set never overflows the pane.
+func (m model) renderRepoFinder(fieldW, fieldH int) string {
+	contentW := pickerContentW(fieldW)
+	listH := max(1, min(len(m.repoFinderAll), fieldH-pickerChromeLines))
 
+	var body []string
 	switch {
 	case m.repoFinderErr != "":
-		b.WriteString("\n" + wtHintStyle.Render(m.repoFinderErr))
-		return b.String()
+		body = []string{wtHintStyle.Render(m.repoFinderErr)}
 	case m.repoFinderScanning:
-		b.WriteString("\n" + dimStyle.Render("scanning "+shortenDirectory(repoFinderRoot())+" …"))
-		return b.String()
+		body = []string{dimStyle.Render("scanning " + shortenDirectory(repoFinderRoot()) + " …")}
+	case len(m.repoFinderAll) == 0:
+		body = []string{dimStyle.Render("no untracked git repositories under " + shortenDirectory(repoFinderRoot()))}
 	case len(m.repoFinderMatches) == 0:
-		if len(m.repoFinderAll) == 0 {
-			b.WriteString("\n" + dimStyle.Render("no git repositories found under "+shortenDirectory(repoFinderRoot())))
-		} else {
-			b.WriteString("\n" + dimStyle.Render("no match"))
-		}
-		return b.String()
+		body = []string{dimStyle.Render("no match")}
+	default:
+		body = m.repoFinderRows(contentW, listH)
 	}
 
-	// Window the match list around the cursor. Reserve three lines for the
-	// title, query, and footer so the rendered block fits in height exactly.
-	listH := height - 3
-	if listH < 1 {
-		listH = 1
-	}
+	return m.renderPickerBox(pickerBox{
+		title:  "Track a repo",
+		aside:  pluralize(len(m.repoFinderAll), "repo") + " found",
+		body:   body,
+		listH:  listH,
+		footer: "enter track · ↑↓ move · type to filter · esc cancel",
+	}, contentW)
+}
+
+// repoFinderRows renders the cursor-windowed candidate rows of the 'A'
+// finder.
+func (m model) repoFinderRows(contentW, listH int) []string {
+	nameW := repoPickNameW(m.repoFinderAll, contentW)
 	cursor := clampIndex(m.repoFinderCursor, len(m.repoFinderMatches))
-	start := 0
-	if cursor >= listH {
-		start = cursor - listH + 1
-	}
-	end := start + listH
-	if end > len(m.repoFinderMatches) {
-		end = len(m.repoFinderMatches)
-	}
+	start := max(0, cursor-listH+1)
+	end := min(start+listH, len(m.repoFinderMatches))
+	query := m.input.Value()
 
+	rows := make([]string, 0, end-start)
 	for i := start; i < end; i++ {
-		// Lines are plain text, so the reverse highlight can wrap them
-		// directly (no embedded colour resets to strip, unlike worktree rows).
-		line := ansi.Truncate("  "+shortenDirectory(m.repoFinderMatches[i]), width-2, "…")
+		row := padToWidth(formatRepoPickRow(dimStyle.Render("○"), m.repoFinderMatches[i], query, nameW, lipgloss.NewStyle()), contentW)
 		if i == cursor {
-			line = wtCursorStyle.Render(line)
+			row = highlightSelectedRow(row)
 		}
-		b.WriteString("\n" + line)
+		rows = append(rows, row)
 	}
+	return rows
+}
 
-	b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("%d repos · ↑↓ move · enter add · esc cancel", len(m.repoFinderMatches))))
-	return b.String()
+// pickerChromeLines is the number of non-list lines a pickerBox draws:
+// title, blank, filter, blank, blank, notice, footer, and the two border rows.
+const pickerChromeLines = 9
+
+// pickerContentW sizes a pickerBox's text area to the pane: capped for
+// readability and kept clear of the pane edge (fieldW is the width handed
+// to overlayBox, two wider than the pane's text area, and the box adds four
+// for border and padding).
+func pickerContentW(fieldW int) int {
+	return min(72, max(20, fieldW-8))
+}
+
+// pickerBox describes a floating filter-and-pick dialog: a title with a
+// right-aligned aside (counts), the shared text input, a list area of listH
+// rows (or a single status line), a one-line notice, and a key hint footer.
+type pickerBox struct {
+	title, aside   string
+	body           []string
+	listH          int
+	notice, footer string
+}
+
+// renderPickerBox draws p at a fixed size so the box does not jump while the
+// filter narrows results: the list area is padded to listH rows and every
+// line to contentW cells.
+func (m model) renderPickerBox(p pickerBox, contentW int) string {
+	title := headerStyle.Render(p.title)
+	aside := dimStyle.Render(p.aside)
+	in := m.input
+	in.Width = max(1, contentW-3)
+
+	lines := []string{
+		title + strings.Repeat(" ", max(1, contentW-lipgloss.Width(title)-lipgloss.Width(aside))) + aside,
+		"",
+		promptMarker() + in.View(),
+		"",
+	}
+	lines = append(lines, p.body...)
+	for range p.listH - len(p.body) {
+		lines = append(lines, "")
+	}
+	lines = append(lines, "", p.notice, dimStyle.Render(p.footer))
+
+	for i, line := range lines {
+		lines[i] = padToWidth(ansi.Truncate(line, contentW, "…"), contentW)
+	}
+	return modalBoxStyle.Render(strings.Join(lines, "\n"))
+}
+
+// repoPickNameW is the repo-name column width for a repo picker: the widest
+// basename in paths, capped at half the row so the parent path stays visible.
+func repoPickNameW(paths []string, contentW int) int {
+	nameW := 0
+	for _, p := range paths {
+		nameW = max(nameW, lipgloss.Width(filepath.Base(p)))
+	}
+	return min(nameW, contentW/2)
+}
+
+// formatRepoPickRow renders one repo picker row: marker, the repo's basename
+// in nameStyle with the query's fuzzy matches highlighted, and its dimmed
+// parent directory. Matches are computed against the full path (what the
+// pickers rank on) and mapped onto the basename.
+func formatRepoPickRow(marker, path, query string, nameW int, nameStyle lipgloss.Style) string {
+	name := filepath.Base(path)
+	positions, _ := fuzzyMatchPositions(query, path)
+	matched := make(map[int]bool, len(positions))
+	for _, p := range positions {
+		matched[p] = true
+	}
+	nameOffset := len([]rune(path)) - len([]rune(name))
+
+	nameCell := padCell(highlightSegment(name, nameStyle, matched, nameOffset), nameW, lipgloss.Left)
+	return " " + marker + " " + nameCell + "  " + wtPathStyle.Render(shortenDirectory(filepath.Dir(path)))
 }
 
 // sessionPaletteRowsVisible is the fixed number of result rows the session

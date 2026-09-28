@@ -20,11 +20,9 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
 
 	"github.com/guilhermehto/cogitator/internal/git"
 	"github.com/guilhermehto/cogitator/internal/settings"
@@ -375,41 +373,23 @@ var wsModalMemberStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("78")).Bo
 
 // renderWorkspaceModal renders the floating repo-membership checklist shown
 // while prompt == promptWorkspaceModal, composited (centred) over the
-// Workspaces view by View via overlayBox (render.go). Each row is a checkbox
-// (● attached, ○ not), the repo name with the filter's matched characters
-// highlighted, and its parent directory. The box keeps a fixed size while
-// the filter narrows results so it does not jump around. fieldW/fieldH are
-// the Workspaces pane's dimensions, used to cap the box width and window the
-// list so the whole modal fits the pane.
+// Workspaces view by View via overlayBox (render.go), using the pickerBox
+// layout shared with the 'A' repo finder. Each row is a checkbox (●
+// attached, ○ not), the repo name with the filter's matched characters
+// highlighted, and its parent directory. fieldW/fieldH are the Workspaces
+// pane's dimensions, used to cap the box width and window the list so the
+// whole modal fits the pane.
 func (m model) renderWorkspaceModal(fieldW, fieldH int) string {
-	contentW := min(72, max(20, fieldW-8))
-
-	attached := len(memberEntryPaths(m.wsModalEntries))
-	title := headerStyle.Render("Repos in " + m.wsModalWorkspace)
-	count := dimStyle.Render(pluralize(attached, "repo") + " attached")
-	in := m.input
-	in.Width = max(1, contentW-3)
-
-	lines := []string{
-		title + strings.Repeat(" ", max(1, contentW-lipgloss.Width(title)-lipgloss.Width(count))) + count,
-		"",
-		promptMarker() + in.View(),
-		"",
-	}
-
-	const chromeLines = 9 // title, blank, filter, blank, blank, notice, footer + border
-	listH := max(1, min(len(m.wsModalEntries), fieldH-chromeLines))
-	body := m.wsModalBodyLines(contentW, listH)
-	for len(body) < listH {
-		body = append(body, "")
-	}
-	lines = append(lines, body...)
-
-	lines = append(lines, "", m.wsModalNoticeLine(), dimStyle.Render(m.wsModalFooter()))
-	for i, line := range lines {
-		lines[i] = padToWidth(ansi.Truncate(line, contentW, "…"), contentW)
-	}
-	return modalBoxStyle.Render(strings.Join(lines, "\n"))
+	contentW := pickerContentW(fieldW)
+	listH := max(1, min(len(m.wsModalEntries), fieldH-pickerChromeLines))
+	return m.renderPickerBox(pickerBox{
+		title:  "Repos in " + m.wsModalWorkspace,
+		aside:  pluralize(len(memberEntryPaths(m.wsModalEntries)), "repo") + " attached",
+		body:   m.wsModalBodyLines(contentW, listH),
+		listH:  listH,
+		notice: m.wsModalNoticeLine(),
+		footer: m.wsModalFooter(),
+	}, contentW)
 }
 
 // wsModalBodyLines renders the list area: a status line while scanning or
@@ -426,12 +406,7 @@ func (m model) wsModalBodyLines(contentW, listH int) []string {
 		return []string{dimStyle.Render("no match")}
 	}
 
-	nameW := 0
-	for _, e := range m.wsModalEntries {
-		nameW = max(nameW, lipgloss.Width(filepath.Base(e.path)))
-	}
-	nameW = min(nameW, contentW/2)
-
+	nameW := repoPickNameW(wsModalEntryPaths(m.wsModalEntries), contentW)
 	cursor := clampIndex(m.wsModalCursor, len(m.wsModalMatches))
 	start := max(0, cursor-listH+1)
 	end := min(start+listH, len(m.wsModalMatches))
@@ -449,8 +424,7 @@ func (m model) wsModalBodyLines(contentW, listH int) []string {
 }
 
 // formatWsModalRow renders one checklist row: the membership marker (or an
-// ellipsis while its commit is in flight), the repo name with fuzzy matches
-// highlighted, and the dimmed parent directory.
+// ellipsis while its commit is in flight) before the shared repo picker row.
 func (m model) formatWsModalRow(entry wsModalEntry, query string, nameW int) string {
 	marker := dimStyle.Render("○")
 	nameStyle := lipgloss.NewStyle()
@@ -461,17 +435,7 @@ func (m model) formatWsModalRow(entry wsModalEntry, query string, nameW int) str
 		marker = wsModalMemberStyle.Render("●")
 		nameStyle = nameStyle.Bold(true)
 	}
-
-	name := filepath.Base(entry.path)
-	positions, _ := fuzzyMatchPositions(query, entry.path)
-	matched := make(map[int]bool, len(positions))
-	for _, p := range positions {
-		matched[p] = true
-	}
-	nameOffset := len([]rune(entry.path)) - len([]rune(name))
-
-	nameCell := padCell(highlightSegment(name, nameStyle, matched, nameOffset), nameW, lipgloss.Left)
-	return " " + marker + " " + nameCell + "  " + wtPathStyle.Render(shortenDirectory(filepath.Dir(entry.path)))
+	return formatRepoPickRow(marker, entry.path, query, nameW, nameStyle)
 }
 
 // wsModalNoticeLine reports the last in-modal commit: what was added or

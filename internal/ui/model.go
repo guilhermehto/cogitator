@@ -2848,34 +2848,57 @@ func (m model) orderedSessionCandidates() (candidates []sessionCandidate, startO
 	return candidates, startOnPrevious
 }
 
-// renderHarnessChooser renders the harness-selection list shown in the sessions
-// pane while prompt == promptChooseHarness. The user moves the cursor with
-// up/down and confirms with enter; esc cancels the whole new-worktree flow.
-func (m model) renderHarnessChooser(width, height int) string {
-	var b strings.Builder
-	b.WriteString(headerStyle.Render("Choose harness") + "\n")
+// renderHarnessChooser renders the floating harness-selection box drawn over
+// the active view while prompt == promptChooseHarness. The user moves the
+// cursor with up/down and confirms with enter; esc cancels the whole
+// new-worktree/new-session flow. fieldW is the pane width handed to
+// overlayBox.
+func (m model) renderHarnessChooser(fieldW int) string {
+	contentW := min(48, max(20, fieldW-8))
+	subject := fmt.Sprintf("worktree %s / %s", filepath.Base(m.newWorktreeRepo), m.newWorktreeBranch)
 	if m.wsCreateTarget != "" {
-		b.WriteString(dimStyle.Render(fmt.Sprintf("new session: %s / %s", m.wsCreateTarget, m.wsCreateSessionName)) + "\n")
-	} else {
-		b.WriteString(dimStyle.Render(fmt.Sprintf("new worktree: %s / %s", filepath.Base(m.newWorktreeRepo), m.newWorktreeBranch)) + "\n")
+		subject = fmt.Sprintf("session %s / %s", m.wsCreateTarget, m.wsCreateSessionName)
 	}
 
+	lines := []string{
+		headerStyle.Render("Choose harness"),
+		dimStyle.Render("for new " + subject),
+		"",
+	}
 	if len(m.harnessChooserKinds) == 0 {
-		b.WriteString(dimStyle.Render("(no harnesses registered)"))
-		return b.String()
+		lines = append(lines, dimStyle.Render("(no harnesses registered)"))
 	}
-
 	cursor := clampIndex(m.harnessChooserCursor, len(m.harnessChooserKinds))
 	for i, k := range m.harnessChooserKinds {
-		line := ansi.Truncate("  "+string(k), width-2, "…")
+		line := padToWidth(" "+agentColor(string(k)).UnsetItalic().Render(string(k)), contentW)
 		if i == cursor {
-			line = wtCursorStyle.Render(line)
+			line = highlightSelectedRow(line)
 		}
-		b.WriteString(line + "\n")
+		lines = append(lines, line)
 	}
+	lines = append(lines, "", dimStyle.Render("enter select · ↑↓ move · esc cancel"))
 
-	b.WriteString(dimStyle.Render("↑↓ move · enter select · esc cancel"))
-	return b.String()
+	for i, line := range lines {
+		lines[i] = padToWidth(ansi.Truncate(line, contentW, "…"), contentW)
+	}
+	return modalBoxStyle.Render(strings.Join(lines, "\n"))
+}
+
+// activeViewBackdrop renders the active view as the backdrop that floating
+// dialogs are composited over, so the pane stays visible behind them.
+func (m model) activeViewBackdrop(paneW, innerH int, rows []state.SessionView, recentByInstance map[string]int) string {
+	switch {
+	case m.view == viewWorkspaces:
+		return m.renderWorkspacesView(paneW, innerH)
+	case len(m.workspaceRows) > 0:
+		now := m.tickNow
+		if now.IsZero() {
+			now = time.Now()
+		}
+		return m.renderWorkspaceRowsViewport(paneW, innerH, m.workspaceRows, m.sessionCursor, now)
+	default:
+		return m.renderAllSessions(paneW, rows, recentByInstance)
+	}
 }
 
 func (m model) View() string {
@@ -2936,7 +2959,8 @@ func (m model) View() string {
 	var sessionContent string
 	switch {
 	case m.prompt == promptAddRepo:
-		sessionContent = m.renderRepoFinder(paneW, sessionsInnerH)
+		backdrop := m.activeViewBackdrop(paneW, sessionsInnerH, rows, recentByInstance)
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderRepoFinder(paneW, sessionsInnerH))
 	case m.prompt == promptSwitchSession || m.prompt == promptSearchSession:
 		// Render whichever view (Sessions or Workspaces) is active as the
 		// backdrop, then composite the floating palette box centred over it
@@ -2953,41 +2977,14 @@ func (m model) View() string {
 		}
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderSessionPalette(paneW, sessionsInnerH))
 	case m.prompt == promptHelp:
-		// Render whichever view is active as the backdrop, then composite the
-		// floating help box centred over it so the pane stays visible behind.
-		now := m.tickNow
-		if now.IsZero() {
-			now = time.Now()
-		}
-		var backdrop string
-		switch {
-		case m.view == viewWorkspaces:
-			backdrop = m.renderWorkspacesView(paneW, sessionsInnerH)
-		case len(m.workspaceRows) > 0:
-			backdrop = m.renderWorkspaceRowsViewport(paneW, sessionsInnerH, m.workspaceRows, m.sessionCursor, now)
-		default:
-			backdrop = m.renderAllSessions(paneW, rows, recentByInstance)
-		}
+		backdrop := m.activeViewBackdrop(paneW, sessionsInnerH, rows, recentByInstance)
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, renderHelp(paneW, m.view))
 	case m.prompt == promptSettings:
-		// Render whichever view is active as the backdrop, then composite the
-		// settings modal centred over it so the pane stays visible behind.
-		now := m.tickNow
-		if now.IsZero() {
-			now = time.Now()
-		}
-		var backdrop string
-		switch {
-		case m.view == viewWorkspaces:
-			backdrop = m.renderWorkspacesView(paneW, sessionsInnerH)
-		case len(m.workspaceRows) > 0:
-			backdrop = m.renderWorkspaceRowsViewport(paneW, sessionsInnerH, m.workspaceRows, m.sessionCursor, now)
-		default:
-			backdrop = m.renderAllSessions(paneW, rows, recentByInstance)
-		}
+		backdrop := m.activeViewBackdrop(paneW, sessionsInnerH, rows, recentByInstance)
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderSettings(paneW))
 	case m.prompt == promptChooseHarness:
-		sessionContent = m.renderHarnessChooser(paneW, sessionsInnerH)
+		backdrop := m.activeViewBackdrop(paneW, sessionsInnerH, rows, recentByInstance)
+		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderHarnessChooser(paneW))
 	case m.prompt == promptNewWorkspace:
 		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWsNamePrompt("New workspace"))
