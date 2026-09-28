@@ -750,7 +750,7 @@ func TestWorkspaceDelete_SuccessfulDeleteStaysDeletingUntilReloadDropsIt(t *test
 }
 
 func TestWorkspaceDelete_SpinnerKeepsTickingWhileDeletePending(t *testing.T) {
-	m := model{spinnerActive: true, wsPendingDeletes: map[wsDeleteTarget]struct{}{{workspace: "payments"}: {}}}
+	m := model{spinnerActive: true, wsPendingDeletes: map[wsTarget]struct{}{{workspace: "payments"}: {}}}
 
 	updated, cmd := m.Update(spinnerTickMsg{})
 

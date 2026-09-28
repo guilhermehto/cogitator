@@ -29,6 +29,47 @@ type WorkspaceStatus struct {
 	Sessions  []SessionStatus
 }
 
+// rollupOrder ranks attention labels for a workspace-level summary, most
+// urgent first. It refines state.Attention.Rank (which ties permission with
+// question and errored with finished) into a total order so the rollup is
+// deterministic.
+var rollupOrder = []state.Attention{
+	state.AttnPermissionPending,
+	state.AttnQuestionPending,
+	state.AttnErrored,
+	state.AttnFinished,
+	state.AttnActive,
+	state.AttnInactive,
+}
+
+// Attention rolls the running sessions' attention labels up into the single
+// most urgent one, so a workspace header can say whether anything inside it
+// needs the user. ok is false when no session is running.
+func (ws WorkspaceStatus) Attention() (attn state.Attention, ok bool) {
+	best := len(rollupOrder)
+	for _, sess := range ws.Sessions {
+		if sess.State != settings.StateRunning {
+			continue
+		}
+		ok = true
+		for i, a := range rollupOrder {
+			if a == sess.Attention && i < best {
+				best = i
+				break
+			}
+		}
+	}
+	if !ok {
+		return "", false
+	}
+	if best == len(rollupOrder) {
+		// Running with a label outside the known set: report it as active,
+		// matching attnLabel's fallback glyph for unknown labels.
+		return state.AttnActive, true
+	}
+	return rollupOrder[best], true
+}
+
 // liveSessionCandidate holds the best live state.SessionView observed so far
 // for a given canonical directory.
 type liveSessionCandidate struct {

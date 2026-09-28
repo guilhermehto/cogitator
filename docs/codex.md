@@ -145,4 +145,4 @@ After trusting, the hook fires on every subsequent Codex session without further
 
 ## Verification
 
-With cogitator running (auto-enabled when `~/.codex` exists) and the hooks wired and trusted, start a Codex session in any directory. You should see a new Codex session appear in the cogitator Sessions pane. When Codex requests a permission, the session's attention indicator should change to the permission-pending state.
+With cogitator running (auto-enabled when `~/.codex` exists) and the hooks wired and trusted, start a Codex session in any directory. You should see a new Codex session appear in the cogitator Repos pane. When Codex requests a permission, the session's attention indicator should change to the permission-pending state.

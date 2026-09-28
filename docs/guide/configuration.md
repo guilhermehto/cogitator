@@ -18,7 +18,7 @@ setter, so editing this file is the only way to change them.
 
 | Field            | Type         | Default    | Description                                                                                                                                                                                                                                                                                                          |
 | ---------------- | ------------ | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `repos`          | string array | `[]`       | Absolute paths to the git repositories cogitator tracks for worktree launching. Normally managed from the UI (press `A` in the Sessions pane to fuzzy-find and add a repo), so entries usually appear here without hand-editing. Paths are canonicalized; a configured repo missing from disk is still listed but its worktree actions are disabled. |
+| `repos`          | string array | `[]`       | Absolute paths to the git repositories cogitator tracks for worktree launching. Normally managed from the UI (press `A` in the Repos pane to fuzzy-find and add a repo), so entries usually appear here without hand-editing. Paths are canonicalized; a configured repo missing from disk is still listed but its worktree actions are disabled. |
 | `defaultHarness` | string       | `opencode` | Harness pre-selected when you create a new worktree (`n`). One of `opencode`, `claude-code`, `codex`, `omp`. Empty falls back to `opencode`.                                                                                                                                                                            |
 | `launchMode`     | string       | `session`  | How a worktree opens in tmux: `window` or `session`. Empty or any unrecognized value falls back to `session`.                                                                                                                                                                                                           |
 | `workspaceRoot`  | string       | `` (empty) | Directory under which workspace session bundles are created (one git worktree per member repo, per session). Empty uses `$XDG_DATA_HOME/cogitator/workspaces`, falling back to `~/.local/share/cogitator/workspaces` when `$XDG_DATA_HOME` is unset. A leading `~` is expanded. Rejected if it resolves inside an existing git working tree. |
@@ -44,8 +44,15 @@ no restart needed.
 A **workspace** bundles several repos so you can work across all of them on one branch.
 Creating a session inside a workspace checks out that branch as a real git worktree in
 *every* member repo, laid out side by side under one session directory (rooted at
-`workspaceRoot`, above). Press `Tab` to swap between the Sessions pane (single-repo
-worktrees) and the Workspaces pane.
+`workspaceRoot`, above). cogitator opens on the Workspaces pane — what you are working on
+now; press `Tab` for the Repos pane (single-repo worktrees, quick pulls and jumps).
+
+Each workspace header shows the most urgent attention badge among its running sessions, so
+you can tell at a glance which workspace needs you. Session rows show the agent's title and,
+once stopped, how long ago it was last active. A session whose every member branch is merged
+into `main`/`master` and whose worktrees have no uncommitted or untracked changes is tagged
+`(safe to delete)` — delete it with `D` when you are done (checked in the background every
+15 seconds and after each pull).
 
 - **Real directories, not symlinks**: every supported harness (opencode, Claude Code, Codex,
   omp) searches with ripgrep, which skips symlinked directories unless you pass `-L`. Member
@@ -56,7 +63,7 @@ worktrees) and the Workspaces pane.
 - **Divergent bases**: each member's branch is created from that repo's own current `HEAD`,
   so if repo A is on `main` and repo B is on a feature branch, their new worktrees start from
   different points.
-- **Membership is independent of `repos`**: the flat `repos` list (Sessions pane) and a
+- **Membership is independent of `repos`**: the flat `repos` list (Repos pane) and a
   workspace's member repos are tracked separately — adding a repo to a workspace does not add
   it to `repos`, and vice versa.
 - **Hidden repo basenames are rejected**: a member whose directory basename starts with `.`
@@ -68,4 +75,4 @@ worktrees) and the Workspaces pane.
 
 `ctrl+P` lists workspace sessions in the session switcher too, labelled
 `<workspace>/<session>`. See [Key bindings](/guide/key-bindings) for the Workspaces-pane keys
-(`N`, `n`, `e`, `D`).
+(`N`, `n`, `e`, `D`, `P`).

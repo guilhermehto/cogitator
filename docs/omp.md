@@ -4,7 +4,7 @@ cogitator can display live attention signals for [Oh My Pi (omp)](https://oh-my-
 
 ## How it works
 
-Two layers feed the cogitator Sessions pane:
+Two layers feed the cogitator Repos pane:
 
 1. **Polling** — cogitator scans `~/.omp/agent/sessions/**/*.jsonl` every few seconds, reading each session's header (id, cwd, title, created) and last-activity timestamp. This makes every omp session appear with a recency-derived liveness label, with no setup beyond having omp installed.
 2. **Live attention hook** — unlike Codex and Claude Code, omp has **no external command-hook** mechanism; its hooks are in-process TypeScript modules. cogitator ships a small extension (`internal/omp/cogitator.ts`, also embedded in the binary) that you install into omp via `cogitator omp-hook install`. It forwards session lifecycle events to the running cogitator over a local Unix-domain socket (`cogitator omp-hook`), so attention updates appear instantly instead of waiting for the next poll.
@@ -68,6 +68,6 @@ this by baking in the absolute path).
 
 ## Verification
 
-With cogitator running (auto-enabled when `~/.omp/agent` exists) and the extension installed, start an omp session in any directory. You should see a new omp session appear in the cogitator Sessions pane within one poll interval. While omp is working a turn the session shows as active; when omp invokes the `ask` tool it shows question-pending; when the turn ends it shows idle / awaiting.
+With cogitator running (auto-enabled when `~/.omp/agent` exists) and the extension installed, start an omp session in any directory. You should see a new omp session appear in the cogitator Repos pane within one poll interval. While omp is working a turn the session shows as active; when omp invokes the `ask` tool it shows question-pending; when the turn ends it shows idle / awaiting.
 
 To confirm the extension is loaded, omp lists it under its loaded extensions (it derives the name `cogitator` from the file). Errors loading the extension surface in omp's startup, not in cogitator.

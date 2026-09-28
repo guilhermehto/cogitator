@@ -405,9 +405,7 @@ func TestSnapshotMsgCoalescedBuildUsesLatestSnap(t *testing.T) {
 func TestDemoRendersWorktreeRoster(t *testing.T) {
 	rows := demoWorktrees(fixedNow)
 	ch := make(chan state.Snapshot, 1)
-	m := newModel(ch, config.Default(), false, false)
-	m.demo = true
-	m.workspaceRows = rows
+	m := newDemoModel(ch, config.Default(), rows)
 	m.snap = state.Snapshot{Sessions: liveSessionsFor(rows), UpdatedAt: fixedNow}
 	m.width, m.height = 120, 40
 
@@ -425,10 +423,9 @@ func TestDemoRendersWorktreeRoster(t *testing.T) {
 // TestViewFallbackExcludesWorkspaceOwnedSession verifies that when no repos
 // are configured — exactly the case where View renders the live-only
 // fallback via renderAllSessions — a live session whose Directory lies under
-// the resolved workspace root is excluded from both the fallback listing and
-// the header's live/recent counts. Without this, an install with zero
-// configured repos would surface a workspace session's per-repo checkout as
-// an ordinary live session.
+// the resolved workspace root is excluded from the fallback listing (it has
+// its own Workspaces-view row), while the header's live/recent counts still
+// include it: they summarise everything running, Repos and Workspaces alike.
 func TestViewFallbackExcludesWorkspaceOwnedSession(t *testing.T) {
 	root := t.TempDir()
 	memberDir := filepath.Join(root, "session-1", "repo")
@@ -482,8 +479,8 @@ func TestViewFallbackExcludesWorkspaceOwnedSession(t *testing.T) {
 	if !strings.Contains(got, "ordinary-title") {
 		t.Errorf("fallback view must still render the ordinary session, got %q", got)
 	}
-	if !strings.Contains(got, "1 live") {
-		t.Errorf("header must count only the ordinary session as live, got %q", got)
+	if !strings.Contains(got, "2 live") {
+		t.Errorf("header must count the workspace-owned and the ordinary session as live, got %q", got)
 	}
 }
 

@@ -22,7 +22,7 @@ cogitator is a TUI dashboard for your harnesses. It gives you a live view of ses
 
 - **See status at a glance**: discovers running instances, flagging which sessions need you (permission requests, pending questions, errors).
 - **Create git worktrees**: spin up a new worktree for a branch, or fetch, pull, and delete existing ones, straight from the roster.
-- **Bundle multi-repo workspaces**: group several repos into a workspace and create a session that checks out one new branch across every member repo at once; `Tab` swaps between the Sessions and Workspaces panes.
+- **Bundle multi-repo workspaces**: group several repos into a workspace and create a session that checks out one new branch across every member repo at once; `Tab` swaps between the Repos and Workspaces panes.
 - **Navigate into them**: jump to a running agent or resume a stopped one in a tmux session (or window) with a single keystroke.
 - **Works across harnesses**: opencode, Claude Code, Codex, and omp.
 
@@ -244,7 +244,7 @@ minimal hook variant, and `CODEX_HOME` override), and
 cogitator displays live attention signals for [Oh My Pi (omp)](https://oh-my-pi.dev)
 sessions. Monitoring **auto-enables** when the omp agent directory (`~/.omp/agent`,
 or `$PI_CODING_AGENT_DIR` / `$PI_CONFIG_DIR/agent`) exists — no environment variable
-needed. omp sessions then appear in the Sessions pane from a filesystem poll alone.
+needed. omp sessions then appear in the Repos pane from a filesystem poll alone.
 
 omp has **no external command-hook** like Codex/Claude (its hooks are in-process
 TypeScript modules), so live attention is wired through a small extension cogitator
@@ -284,14 +284,15 @@ and [Live attention reference → omp](#omp-reference) for how it behaves.
 | Key | Context | Action |
 | --- | --- | --- |
 | `ctrl+P` | anywhere (outside a prompt) | open the session switcher: fuzzy-find a repo/branch or workspace session (listed as `<workspace>/<session>`) and jump to it (`cmd+P` is not supported — terminals don't forward it to TUI apps) |
-| `Tab` | anywhere (outside a prompt) | swap focus between the Sessions and Workspaces panes |
-| `/` | Sessions pane focused | fuzzy-search repo/branch names; Enter moves the list cursor to the selected session without jumping into it |
-| `a` | Sessions pane focused | toggle collapsed/expanded recent sessions |
-| `P` | Sessions pane focused | pull latest into the highlighted worktree's branch (`git pull --ff-only --no-tags origin <branch>`); handy for refreshing a base branch before branching off it |
+| `Tab` | anywhere (outside a prompt) | swap focus between the Workspaces pane (shown on launch) and the Repos pane |
+| `/` | Repos pane focused | fuzzy-search repo/branch names; Enter moves the list cursor to the selected session without jumping into it |
+| `a` | Repos pane focused | toggle collapsed/expanded recent sessions |
+| `P` | Repos pane focused | pull latest into the highlighted worktree's branch (`git pull --ff-only --no-tags origin <branch>`); handy for refreshing a base branch before branching off it |
 | `N` | Workspaces pane focused | create a new, empty workspace |
 | `n` | Workspaces pane focused | create a session in the workspace under the cursor: prompts for a session name, then a harness, then checks out one new branch across every member repo |
 | `e` | Workspaces pane focused | open the repo-membership modal for the workspace under the cursor: attach a repo found under `$HOME`, or detach a current member |
 | `D` | Workspaces pane focused | delete the session or workspace under the cursor, behind a two-step `y`/`y` confirm that shows each member repo's branch merge status |
+| `P` | Workspaces pane focused | pull (`--ff-only`) every member repo concurrently: on a workspace header, each member's base checkout on its current branch; on a session row, the session branch in each member worktree (members whose branch was never pushed report `no upstream`) |
 | `Enter` | Workspaces pane focused, on a session row | launch the session in tmux |
 | `Esc` | inside add/edit prompt | cancel the prompt without quitting |
 | `Enter` | inside add/edit prompt | submit the prompt |
@@ -320,7 +321,7 @@ no in-app setter, so editing this file is the only way to change them.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `repos` | string array | `[]` | Absolute paths to the git repositories cogitator tracks for worktree launching. Normally managed from the UI — press `A` in the Sessions pane to fuzzy-find and add a repo — so entries usually appear here without hand-editing. Paths are canonicalized; a configured repo missing from disk is still listed but its worktree actions are disabled. |
+| `repos` | string array | `[]` | Absolute paths to the git repositories cogitator tracks for worktree launching. Normally managed from the UI — press `A` in the Repos pane to fuzzy-find and add a repo — so entries usually appear here without hand-editing. Paths are canonicalized; a configured repo missing from disk is still listed but its worktree actions are disabled. |
 | `defaultHarness` | string | `opencode` | Harness pre-selected when you create a new worktree (`n`). One of `opencode`, `claude-code`, `codex`, `omp`. Empty falls back to `opencode`. |
 | `launchMode` | string | `session` | How a worktree opens in tmux: `window` or `session`. Empty or any unrecognized value falls back to `session`. |
 | `workspaceRoot` | string | `` (empty) | Directory under which workspace session bundles are created (one git worktree per member repo, per session). Empty uses `$XDG_DATA_HOME/cogitator/workspaces`, falling back to `~/.local/share/cogitator/workspaces` when `$XDG_DATA_HOME` is unset. A leading `~` is expanded. Rejected if it resolves inside an existing git working tree. |
@@ -347,8 +348,9 @@ no restart needed.
 A **workspace** bundles several repos so you can work across all of them on one
 branch. Creating a session inside a workspace checks out that branch as a real
 git worktree in *every* member repo, laid out side by side under one session
-directory. Press `Tab` to swap between the Sessions pane (single-repo
-worktrees) and the Workspaces pane.
+directory. cogitator opens on the Workspaces pane — what you are working on
+now; press `Tab` for the Repos pane (single-repo worktrees, quick pulls and
+jumps).
 
 - **Real directories, not symlinks**: every supported harness (opencode, Claude
   Code, Codex, omp) searches with ripgrep, which skips symlinked directories

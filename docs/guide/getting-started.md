@@ -9,7 +9,7 @@ sessions and lets you manage git worktrees:
   existing ones, straight from the roster.
 - **Bundle multi-repo workspaces**: group several repos into a workspace and create a session
   that checks out one new branch across every member repo at once; `Tab` swaps between the
-  Sessions and Workspaces panes. See [Configuration](/guide/configuration#workspaces) for
+  Repos and Workspaces panes. See [Configuration](/guide/configuration#workspaces) for
   disk-cost and layout details.
 - **Navigate into them**: jump to a running agent or resume a stopped one in a tmux session
   (or window) with a single keystroke.

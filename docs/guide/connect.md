@@ -160,7 +160,7 @@ hook variant, and `CODEX_HOME` override), and
 cogitator displays live attention signals for [Oh My Pi (omp)](https://oh-my-pi.dev) sessions.
 Monitoring **auto-enables** when the omp agent directory (`~/.omp/agent`, or
 `$PI_CODING_AGENT_DIR` / `$PI_CONFIG_DIR/agent`) exists. No environment variable needed. omp
-sessions then appear in the Sessions pane from a filesystem poll alone.
+sessions then appear in the Repos pane from a filesystem poll alone.
 
 omp has **no external command-hook** like Codex/Claude (its hooks are in-process TypeScript
 modules), so live attention is wired through a small extension cogitator ships (embedded in
