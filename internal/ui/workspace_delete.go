@@ -86,7 +86,96 @@ func (m *model) clearWsDeleteTarget() {
 	m.wsDeleteSession = ""
 	m.wsDeleteMembers = nil
 	m.wsDeleteMergeInfo = nil
-	m.wsDeleteCursor = 0
+	m.wsDeleteScroll = 0
+}
+
+// wsDeleteTarget identifies a dispatched delete: one session, or the whole
+// workspace when session is empty.
+type wsDeleteTarget struct {
+	workspace string
+	session   string
+}
+
+// startWsDelete dispatches the confirmed delete and marks its target pending
+// so its rows animate "deleting…" and refuse another 'D' until the teardown
+// reports back. Teardown runs git across every member repo and queues behind
+// any other workspace mutation, so it can take seconds; without the marker
+// the row looks untouched, inviting a retry that — once the first delete
+// lands and the cursor slides onto a neighbour — deletes the wrong thing.
+func (m model) startWsDelete() (model, tea.Cmd) {
+	target := wsDeleteTarget{workspace: m.wsDeleteWorkspace, session: m.wsDeleteSession}
+	m.clearWsDeleteTarget()
+	if m.wsPendingDeletes == nil {
+		m.wsPendingDeletes = map[wsDeleteTarget]struct{}{}
+	}
+	m.wsPendingDeletes[target] = struct{}{}
+
+	var actionCmd tea.Cmd
+	if target.session == "" {
+		actionCmd = deleteWorkspaceCmd(m.store, m.tmux, target.workspace, m.launchMode)
+	} else {
+		actionCmd = deleteWsSessionCmd(m.store, m.tmux, target.workspace, target.session, m.launchMode)
+	}
+	var spinnerC tea.Cmd
+	if !m.spinnerActive {
+		m.spinnerActive = true
+		spinnerC = spinnerTickCmd()
+	}
+	return m, tea.Batch(actionCmd, spinnerC)
+}
+
+// wsDeletePending reports whether sessionName in workspaceName — or, with an
+// empty sessionName, the workspace itself — is being deleted, either directly
+// or because its whole workspace is.
+func (m model) wsDeletePending(workspaceName, sessionName string) bool {
+	if _, ok := m.wsPendingDeletes[wsDeleteTarget{workspace: workspaceName}]; ok {
+		return true
+	}
+	if sessionName == "" {
+		return false
+	}
+	_, ok := m.wsPendingDeletes[wsDeleteTarget{workspace: workspaceName, session: sessionName}]
+	return ok
+}
+
+// pruneWsPendingDeletes forgets pending deletes whose target no longer
+// appears in m.wsStatuses. A successful delete stays pending until the reload
+// that drops its rows lands, so they never flash back to normal in between.
+func (m *model) pruneWsPendingDeletes() {
+	for target := range m.wsPendingDeletes {
+		if !wsStatusesContain(m.wsStatuses, target) {
+			delete(m.wsPendingDeletes, target)
+		}
+	}
+}
+
+func wsStatusesContain(statuses []workspace.WorkspaceStatus, target wsDeleteTarget) bool {
+	for _, ws := range statuses {
+		if ws.Workspace.Name != target.workspace {
+			continue
+		}
+		if target.session == "" {
+			return true
+		}
+		for _, s := range ws.Sessions {
+			if s.Session.Name == target.session {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// deletingWsSession returns sess relabelled with an animated "deleting…"
+// marker for formatWsSessionRow.
+func deletingWsSession(sess workspace.SessionStatus, glyph string) workspace.SessionStatus {
+	label := sess.Session.Branch
+	if label == "" {
+		label = sess.Session.Name
+	}
+	sess.Session.Branch = fmt.Sprintf("%s deleting %s…", glyph, label)
+	return sess
 }
 
 // updateWorkspaceDelete handles 'D' in the Workspaces view: it opens the
@@ -105,9 +194,17 @@ func (m model) updateWorkspaceDelete(msg tea.KeyMsg) (model, tea.Cmd, bool) {
 		return m, nil, false
 	}
 	if ws, sess, ok := m.wsSessionUnderCursor(); ok {
+		if m.wsDeletePending(ws.Workspace.Name, sess.Session.Name) {
+			m.wsHint = fmt.Sprintf("session %q is already being deleted", sess.Session.Name)
+			return m, nil, true
+		}
 		return m.openDeleteWsSessionConfirm(ws.Workspace.Name, sess.Session)
 	}
 	if ws, ok := m.wsUnderCursor(); ok {
+		if m.wsDeletePending(ws.Name, "") {
+			m.wsHint = fmt.Sprintf("workspace %q is already being deleted", ws.Name)
+			return m, nil, true
+		}
 		return m.openDeleteWorkspaceConfirm(ws)
 	}
 	return m, nil, false
@@ -116,7 +213,7 @@ func (m model) updateWorkspaceDelete(msg tea.KeyMsg) (model, tea.Cmd, bool) {
 // openDeleteWsSessionConfirm captures sess's members, opens the first
 // confirmation, and dispatches the concurrent per-member merge-status probes.
 func (m model) openDeleteWsSessionConfirm(workspaceName string, sess workspace.Session) (model, tea.Cmd, bool) {
-	m.wsDeleteCursor = 0
+	m.wsDeleteScroll = 0
 	m.wsDeleteWorkspace = workspaceName
 	m.wsDeleteSession = sess.Name
 	m.wsDeleteMembers = wsDeleteMembersFor([]workspace.Session{sess})
@@ -129,7 +226,7 @@ func (m model) openDeleteWsSessionConfirm(workspaceName string, sess workspace.S
 // opens the first confirmation, and dispatches the concurrent per-member
 // merge-status probes across all of them.
 func (m model) openDeleteWorkspaceConfirm(ws workspace.Workspace) (model, tea.Cmd, bool) {
-	m.wsDeleteCursor = 0
+	m.wsDeleteScroll = 0
 	m.wsDeleteWorkspace = ws.Name
 	m.wsDeleteSession = ""
 	m.wsDeleteMembers = wsDeleteMembersFor(ws.Sessions)
@@ -323,54 +420,96 @@ func (m model) wsDeleteConfirmCopy() (title, hint string) {
 	}
 }
 
-// renderWsDeleteConfirm renders the floating box shown while a workspace or
-// workspace-session delete confirmation is active: a title naming the
-// target, one line per member repo with its branch's merge status
-// ("checking…" until the matching probe returns), and the confirm/cancel
-// hint for whichever of the two gates is active. Mirrors renderWsNamePrompt's
-// floating-box composition (workspace_cmd.go) but for a multi-repo
-// confirmation instead of a single text prompt.
-func (m model) renderWsDeleteConfirm(fieldW, fieldH int) string {
+// wsDeleteConfirmLayout is the delete confirmation fitted to a pane: wrapped
+// copy plus the read-only body listing what will be removed, bodyH lines of
+// which fit at once. Shared by the renderer and the ↑↓ handler so scrolling
+// clamps to exactly what is drawn.
+type wsDeleteConfirmLayout struct {
+	title, summary, hint string
+	body                 []string
+	bodyH                int
+}
+
+func (m model) layoutWsDeleteConfirm(fieldW, fieldH int) wsDeleteConfirmLayout {
 	title, hint := m.wsDeleteConfirmCopy()
-	hintStyle := wtHintStyle
-	if m.prompt == promptConfirmDeleteWsSession2 || m.prompt == promptConfirmDeleteWorkspace2 {
-		hintStyle = attnErrStyle
-	}
-
 	contentW := min(72, max(1, fieldW-4))
-	title = ansi.Wrap(title, contentW, "")
-	hint = ansi.Wrap(hint, contentW, "")
-	listH := max(1, fieldH-5-strings.Count(title, "\n")-strings.Count(hint, "\n"))
-	cursor := clampIndex(m.wsDeleteCursor, len(m.wsDeleteMembers))
-	start := max(0, cursor-listH+1)
-	end := min(start+listH, len(m.wsDeleteMembers))
-
-	var b strings.Builder
-	b.WriteString(headerStyle.Render(title))
-	if len(m.wsDeleteMembers) == 0 {
-		b.WriteString("\n  " + dimStyle.Render("(no sessions to remove)"))
+	l := wsDeleteConfirmLayout{
+		title: ansi.Wrap(title, contentW, ""),
+		hint:  ansi.Wrap(hint, contentW, ""),
+		body:  m.wsDeleteBodyLines(contentW),
 	}
-	for i := start; i < end; i++ {
-		mem := m.wsDeleteMembers[i]
+	if len(m.wsDeleteMembers) > 0 {
+		l.summary = ansi.Wrap("removes these worktrees and their branches:", contentW, "")
+	}
+	// Border (2), title, summary, scroll indicator and hint, plus any extra
+	// rows wrapping adds.
+	wrapped := strings.Count(l.title, "\n") + strings.Count(l.summary, "\n") + strings.Count(l.hint, "\n")
+	l.bodyH = max(1, fieldH-6-wrapped)
+	return l
+}
+
+// wsDeleteBodyLines lists every member worktree the delete removes with its
+// branch's merge status ("checking…" until the matching probe returns). A
+// whole-workspace delete groups members under their session, since sessions
+// share member repos on different branches.
+func (m model) wsDeleteBodyLines(contentW int) []string {
+	if len(m.wsDeleteMembers) == 0 {
+		return []string{"  " + dimStyle.Render("(no sessions to remove)")}
+	}
+	var lines []string
+	for i, mem := range m.wsDeleteMembers {
+		label := fmt.Sprintf("  %s [%s]", filepath.Base(mem.repoPath), mem.branch)
+		if m.wsDeleteSession == "" {
+			if i == 0 || m.wsDeleteMembers[i-1].session != mem.session {
+				lines = append(lines, ansi.Truncate(fmt.Sprintf("  %s [%s]", mem.session, mem.branch), contentW, "…"))
+			}
+			label = "    " + filepath.Base(mem.repoPath)
+		}
 		info := m.wsDeleteMergeInfo[mem.worktreePath]
 		if info == "" {
 			info = "checking merge status…"
 		}
-		label := filepath.Base(mem.repoPath)
-		if m.wsDeleteSession == "" {
-			// A whole-workspace delete can span several sessions that share
-			// the same member repos on different branches — name the session
-			// so same-repo lines are distinguishable.
-			label = mem.session + "/" + label
-		}
-		label = ansi.Truncate(fmt.Sprintf("  %s [%s]", label, mem.branch), max(0, contentW-ansi.StringWidth(info)-2), "…")
-		line := ansi.Truncate(label+": "+info, contentW, "…")
-		if i == cursor {
-			line = wtCursorStyle.Render(line)
-		}
+		label = ansi.Truncate(label, max(0, contentW-ansi.StringWidth(info)-2), "…")
+		lines = append(lines, ansi.Truncate(label+": "+info, contentW, "…"))
+	}
+	return lines
+}
+
+// scrollWsDeleteConfirm moves the confirmation body's viewport by delta
+// lines, stopping once the last line is visible.
+func (m *model) scrollWsDeleteConfirm(delta int) {
+	_, innerH := m.paneHeights()
+	l := m.layoutWsDeleteConfirm(m.paneWidth(), innerH)
+	m.wsDeleteScroll = min(max(m.wsDeleteScroll+delta, 0), max(0, len(l.body)-l.bodyH))
+}
+
+// renderWsDeleteConfirm renders the floating box shown while a workspace or
+// workspace-session delete confirmation is active: a title naming the
+// target, the read-only list of member worktrees it removes, and the
+// confirm/cancel hint for whichever of the two gates is active. The list
+// scrolls when it overflows but has no selection — the whole target goes.
+// Mirrors renderWsNamePrompt's floating-box composition (workspace_cmd.go)
+// but for a multi-repo confirmation instead of a single text prompt.
+func (m model) renderWsDeleteConfirm(fieldW, fieldH int) string {
+	l := m.layoutWsDeleteConfirm(fieldW, fieldH)
+	hintStyle := wtHintStyle
+	if m.prompt == promptConfirmDeleteWsSession2 || m.prompt == promptConfirmDeleteWorkspace2 {
+		hintStyle = attnErrStyle
+	}
+	start := min(m.wsDeleteScroll, max(0, len(l.body)-l.bodyH))
+	end := min(start+l.bodyH, len(l.body))
+
+	var b strings.Builder
+	b.WriteString(headerStyle.Render(l.title))
+	if l.summary != "" {
+		b.WriteString("\n" + dimStyle.Render(l.summary))
+	}
+	for _, line := range l.body[start:end] {
 		b.WriteString("\n" + line)
 	}
-	b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("%d–%d of %d · ↑↓ scroll", min(start+1, end), end, len(m.wsDeleteMembers))))
-	b.WriteString("\n" + hintStyle.Render(hint))
+	if len(l.body) > l.bodyH {
+		b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("%d–%d of %d · ↑↓ scroll", start+1, end, len(l.body))))
+	}
+	b.WriteString("\n" + hintStyle.Render(l.hint))
 	return paletteBoxStyle.Render(b.String())
 }

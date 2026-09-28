@@ -25,6 +25,11 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
+
 	"github.com/guilhermehto/cogitator/internal/git"
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 	"github.com/guilhermehto/cogitator/internal/workspace"
@@ -96,6 +101,29 @@ func (f *fakeDeleteStoreOps) DetachRepo(workspaceName, repoPath string) error { 
 // SessionMember.RepoPath that deterministically fails `git worktree remove`
 // with an error naming the path itself — the cheapest way to exercise
 // TeardownSession's failure path without a real git fixture repo.
+// firstMsgOf runs cmd — which may be a tea.Batch of the action Cmd and the
+// spinner ticker — and returns the first T produced. Batched cmds run in
+// order and stop at the first match, so the (sleeping) ticker never runs.
+func firstMsgOf[T tea.Msg](t *testing.T, cmd tea.Cmd) T {
+	t.Helper()
+	msg := runCmd(cmd)
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, c := range batch {
+			if c == nil {
+				continue
+			}
+			if want, ok := c().(T); ok {
+				return want
+			}
+		}
+	}
+	want, ok := msg.(T)
+	if !ok {
+		t.Fatalf("expected %T, got %T", want, msg)
+	}
+	return want
+}
+
 func nonGitDir(t *testing.T) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "not-a-repo")
@@ -320,10 +348,7 @@ func TestWorkspaceDelete_SecondConfirmYDispatchesDeleteWsSessionCmd(t *testing.T
 		t.Fatal("y must dispatch the delete cmd")
 	}
 
-	result, ok := runCmd(cmd).(wsSessionDeletedMsg)
-	if !ok {
-		t.Fatalf("expected wsSessionDeletedMsg, got %T", runCmd(cmd))
-	}
+	result := firstMsgOf[wsSessionDeletedMsg](t, cmd)
 	if result.workspaceName != "payments" || result.sessionName != "Feature X" {
 		t.Errorf("unexpected result target: %+v", result)
 	}
@@ -350,10 +375,7 @@ func TestWorkspaceDelete_SecondConfirmYDispatchesDeleteWorkspaceCmd(t *testing.T
 		t.Fatal("y must dispatch the delete cmd")
 	}
 
-	result, ok := runCmd(cmd).(wsWorkspaceDeletedMsg)
-	if !ok {
-		t.Fatalf("expected wsWorkspaceDeletedMsg, got %T", runCmd(cmd))
-	}
+	result := firstMsgOf[wsWorkspaceDeletedMsg](t, cmd)
 	if result.workspaceName != "payments" {
 		t.Errorf("unexpected result target: %+v", result)
 	}
@@ -593,7 +615,8 @@ func TestWorkspaceDelete_ScrollsThroughStatusesWithoutHidingConfirmation(t *test
 				m.wsDeleteMergeInfo[path] = "merged into main"
 			}
 			m.wsDeleteMergeInfo[m.wsDeleteMembers[24].worktreePath] = "NOT merged into main"
-			for range m.wsDeleteMembers {
+			// The whole-workspace confirm adds a session header per member.
+			for range 2 * len(m.wsDeleteMembers) {
 				updated, cmd := m.Update(keyMsg("down"))
 				m = updated.(model)
 				if m.prompt != prompt || cmd != nil {
@@ -606,7 +629,7 @@ func TestWorkspaceDelete_ScrollsThroughStatusesWithoutHidingConfirmation(t *test
 					t.Errorf("scrolled deletion missing %q:\n%s", want, view)
 				}
 			}
-			for range m.wsDeleteMembers {
+			for range 2 * len(m.wsDeleteMembers) {
 				updated, _ := m.Update(keyMsg("up"))
 				m = updated.(model)
 			}
@@ -615,4 +638,191 @@ func TestWorkspaceDelete_ScrollsThroughStatusesWithoutHidingConfirmation(t *test
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// In-flight deletes: visible "deleting…" rows, no repeat 'D'
+// ---------------------------------------------------------------------------
+
+func pendingDeleteModel() model {
+	sess := workspace.Session{Name: "Feature X", Dir: "/ws/payments/feature-x", Branch: "feature-x"}
+	other := workspace.Session{Name: "Other", Dir: "/ws/billing/other", Branch: "other"}
+	return model{
+		width: 120, height: 40, view: viewWorkspaces, input: newTestInput(),
+		wsStatuses: []workspace.WorkspaceStatus{
+			wsStatusWithSession("payments", workspace.SessionStatus{Session: sess}),
+			wsStatusWithSession("billing", workspace.SessionStatus{Session: other}),
+		},
+		store: &fakeDeleteStoreOps{loadErr: errors.New("boom")},
+	}
+}
+
+func TestWorkspaceDelete_ConfirmedDeleteRendersDeletingAndRefusesRepeatD(t *testing.T) {
+	cases := []struct {
+		name        string
+		prompt      promptMode
+		session     string
+		wantDeleted string
+	}{
+		{"workspace", promptConfirmDeleteWorkspace2, "", "deleting…"},
+		{"session", promptConfirmDeleteWsSession2, "Feature X", "deleting feature-x…"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := pendingDeleteModel()
+			m.prompt = c.prompt
+			m.wsDeleteWorkspace, m.wsDeleteSession = "payments", c.session
+
+			updated, _ := m.Update(keyMsg("y"))
+			m = updated.(model)
+
+			if view := m.renderWorkspacesView(118, 36); !strings.Contains(view, c.wantDeleted) {
+				t.Fatalf("confirmed delete must mark its row %q:\n%s", c.wantDeleted, view)
+			}
+			// Both the header (entry 0) and the session row (entry 1) of the
+			// workspace being deleted must refuse a second 'D'.
+			for _, cursor := range []int{0, 1} {
+				if c.session != "" && cursor == 0 {
+					continue // deleting one session leaves the workspace deletable
+				}
+				m.wsCursor = cursor
+				updated, cmd := m.Update(keyMsg("D"))
+				m2 := updated.(model)
+				if m2.prompt != promptIdle || cmd != nil {
+					t.Errorf("cursor %d: D on a row being deleted must not reopen the confirm (prompt %v)", cursor, m2.prompt)
+				}
+				if !strings.Contains(m2.wsHint, "already being deleted") {
+					t.Errorf("cursor %d: expected an already-deleting hint, got %q", cursor, m2.wsHint)
+				}
+			}
+
+			m.wsCursor = 2 // billing header
+			updated, _ = m.Update(keyMsg("D"))
+			if got := updated.(model).prompt; got != promptConfirmDeleteWorkspace {
+				t.Errorf("an unrelated workspace must stay deletable, got prompt %v", got)
+			}
+		})
+	}
+}
+
+func TestWorkspaceDelete_FailedDeleteClearsDeletingMarker(t *testing.T) {
+	m := pendingDeleteModel()
+	m.prompt = promptConfirmDeleteWorkspace2
+	m.wsDeleteWorkspace = "payments"
+	updated, _ := m.Update(keyMsg("y"))
+	m = updated.(model)
+
+	updated, _ = m.Update(wsWorkspaceDeletedMsg{workspaceName: "payments", err: errors.New("locked")})
+	m = updated.(model)
+
+	if view := m.renderWorkspacesView(118, 36); strings.Contains(view, "deleting") {
+		t.Errorf("a failed delete must restore the row:\n%s", view)
+	}
+	m.wsCursor = 0
+	updated, _ = m.Update(keyMsg("D"))
+	if got := updated.(model).prompt; got != promptConfirmDeleteWorkspace {
+		t.Errorf("a failed delete must be retryable, got prompt %v", got)
+	}
+}
+
+func TestWorkspaceDelete_SuccessfulDeleteStaysDeletingUntilReloadDropsIt(t *testing.T) {
+	m := pendingDeleteModel()
+	m.prompt = promptConfirmDeleteWsSession2
+	m.wsDeleteWorkspace, m.wsDeleteSession = "payments", "Feature X"
+	updated, _ := m.Update(keyMsg("y"))
+	m = updated.(model)
+
+	updated, _ = m.Update(wsSessionDeletedMsg{workspaceName: "payments", sessionName: "Feature X"})
+	m = updated.(model)
+	// A reload that started before the store changed still lists the session.
+	updated, _ = m.Update(wsStatusMsg{statuses: m.wsStatuses})
+	m = updated.(model)
+	if view := m.renderWorkspacesView(118, 36); !strings.Contains(view, "deleting feature-x…") {
+		t.Fatalf("row must keep its deleting marker until a reload drops it:\n%s", view)
+	}
+
+	emptied := []workspace.WorkspaceStatus{{Workspace: workspace.Workspace{Name: "payments"}}, m.wsStatuses[1]}
+	updated, _ = m.Update(wsStatusMsg{statuses: emptied})
+	m = updated.(model)
+	if len(m.wsPendingDeletes) != 0 {
+		t.Errorf("reload without the session must forget the pending delete, got %v", m.wsPendingDeletes)
+	}
+}
+
+func TestWorkspaceDelete_SpinnerKeepsTickingWhileDeletePending(t *testing.T) {
+	m := model{spinnerActive: true, wsPendingDeletes: map[wsDeleteTarget]struct{}{{workspace: "payments"}: {}}}
+
+	updated, cmd := m.Update(spinnerTickMsg{})
+
+	if cmd == nil || !updated.(model).spinnerActive {
+		t.Error("spinner must keep ticking while a delete is pending")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Confirm body: a read-only summary, not a picker
+// ---------------------------------------------------------------------------
+
+func TestWorkspaceDelete_ConfirmListHasNoSelection(t *testing.T) {
+	r := lipgloss.DefaultRenderer()
+	orig := r.ColorProfile()
+	r.SetColorProfile(termenv.ANSI256)
+	defer r.SetColorProfile(orig)
+
+	m := model{
+		width: 120, height: 40, view: viewWorkspaces, prompt: promptConfirmDeleteWsSession,
+		wsDeleteWorkspace: "payments", wsDeleteSession: "Feature X",
+		wsDeleteMembers: []wsDeleteMember{
+			{session: "Feature X", repoPath: "/repo/a", worktreePath: "/wt/a", branch: "feature-x"},
+			{session: "Feature X", repoPath: "/repo/b", worktreePath: "/wt/b", branch: "feature-x"},
+		},
+		wsDeleteMergeInfo: map[string]string{},
+	}
+	before := m.renderWsDeleteConfirm(118, 36)
+
+	updated, _ := m.Update(keyMsg("down"))
+	after := updated.(model).renderWsDeleteConfirm(118, 36)
+
+	if before != after {
+		t.Errorf("↑↓ on a list that fits must not change the confirm:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	if strings.Contains(before, "scroll") {
+		t.Errorf("a list that fits must not advertise scrolling:\n%s", before)
+	}
+}
+
+func TestWorkspaceDelete_WorkspaceConfirmGroupsMembersUnderSessions(t *testing.T) {
+	m := model{
+		prompt: promptConfirmDeleteWorkspace, wsDeleteWorkspace: "payments",
+		wsDeleteMembers: []wsDeleteMember{
+			{session: "Feature X", repoPath: "/repo/a", worktreePath: "/wt/x/a", branch: "feature-x"},
+			{session: "Feature X", repoPath: "/repo/b", worktreePath: "/wt/x/b", branch: "feature-x"},
+			{session: "Bug Y", repoPath: "/repo/a", worktreePath: "/wt/y/a", branch: "bug-y"},
+		},
+		wsDeleteMergeInfo: map[string]string{"/wt/x/a": "merged into main"},
+	}
+
+	view := m.renderWsDeleteConfirm(118, 36)
+
+	want := strings.Join([]string{
+		"removes these worktrees and their branches:",
+		"  Feature X [feature-x]",
+		"    a: merged into main",
+		"    b: checking merge status…",
+		"  Bug Y [bug-y]",
+		"    a: checking merge status…",
+	}, "\n")
+	if got := boxText(view); !strings.Contains(got, want) {
+		t.Errorf("members must be listed under their session:\n%s", got)
+	}
+}
+
+// boxText strips styling and the border from a rendered box, leaving its
+// lines with trailing padding trimmed.
+func boxText(box string) string {
+	lines := strings.Split(ansi.Strip(box), "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(strings.Trim(line, "│╭╮╰╯─"), " ")
+	}
+	return strings.Join(lines, "\n")
 }
