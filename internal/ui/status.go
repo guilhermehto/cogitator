@@ -2,11 +2,14 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/guilhermehto/cogitator/internal/agentfeed"
+	"github.com/guilhermehto/cogitator/internal/agents"
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/provider"
 	"github.com/guilhermehto/cogitator/internal/state"
@@ -24,6 +27,11 @@ func RunStatus(cfg *config.Config, logger *slog.Logger) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	if line, ok := statusFromFeed(ctx, agentfeed.NewClient(), logger); ok {
+		fmt.Println(line)
+		return nil
+	}
 
 	store := state.New(ctx, cfg, logger)
 
@@ -56,35 +64,69 @@ func RunStatus(cfg *config.Config, logger *slog.Logger) error {
 	}
 }
 
+// feedLister is the slice of agentfeed.Client that --status needs.
+type feedLister interface {
+	List(ctx context.Context) ([]agents.Agent, error)
+}
+
+// statusCounts holds the per-glyph tallies shown in the status line.
+type statusCounts struct {
+	question, permission, errored, finished int
+}
+
+// statusFromFeed renders the status line from the running TUI's feed. ok is
+// false when the caller should fall back to mDNS discovery.
+func statusFromFeed(ctx context.Context, feed feedLister, logger *slog.Logger) (line string, ok bool) {
+	list, err := feed.List(ctx)
+	if errors.Is(err, agentfeed.ErrNotRunning) {
+		return "", false
+	}
+	if err != nil {
+		logger.Warn("status: agent feed unavailable, falling back to discovery", "err", err)
+		return "", false
+	}
+
+	counts := agents.Counts(list)
+	return statusCounts{
+		question:   counts.NeedsYou[state.AttnQuestionPending],
+		permission: counts.NeedsYou[state.AttnPermissionPending],
+		errored:    counts.NeedsYou[state.AttnErrored],
+		finished:   counts.ByGroup[agents.GroupDone],
+	}.render(), true
+}
+
 // formatStatusLine counts attention-bearing rows and renders a compact
 // `<glyph> <count>` summary. Empty string means no session needs eyes.
 func formatStatusLine(rows []state.SessionView) string {
-	perm, question, errored, finished := 0, 0, 0, 0
+	var counts statusCounts
 	for _, sv := range rows {
 		switch sv.Attention {
 		case state.AttnPermissionPending:
-			perm++
+			counts.permission++
 		case state.AttnQuestionPending:
-			question++
+			counts.question++
 		case state.AttnErrored:
-			errored++
+			counts.errored++
 		case state.AttnFinished:
-			finished++
+			counts.finished++
 		}
 	}
+	return counts.render()
+}
 
+func (c statusCounts) render() string {
 	var parts []string
-	if question > 0 {
-		parts = append(parts, fmt.Sprintf("%s %d", glyphQuestion, question))
+	if c.question > 0 {
+		parts = append(parts, fmt.Sprintf("%s %d", glyphQuestion, c.question))
 	}
-	if perm > 0 {
-		parts = append(parts, fmt.Sprintf("%s %d", glyphPermission, perm))
+	if c.permission > 0 {
+		parts = append(parts, fmt.Sprintf("%s %d", glyphPermission, c.permission))
 	}
-	if errored > 0 {
-		parts = append(parts, fmt.Sprintf("%s %d", glyphError, errored))
+	if c.errored > 0 {
+		parts = append(parts, fmt.Sprintf("%s %d", glyphError, c.errored))
 	}
-	if finished > 0 {
-		parts = append(parts, fmt.Sprintf("%s %d", glyphFinished, finished))
+	if c.finished > 0 {
+		parts = append(parts, fmt.Sprintf("%s %d", glyphFinished, c.finished))
 	}
 	return strings.Join(parts, " ")
 }
