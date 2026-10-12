@@ -62,7 +62,7 @@ func DiffOptions(list []Agent, panes []Pane, globals map[string]string) []tmuxct
 		}
 	}
 
-	return append(writes, diffGlobals(desired, globals)...)
+	return append(writes, diffGlobals(list, globals)...)
 }
 
 // ClearAll returns the writes that remove every @cog_* option cogitator owns.
@@ -202,17 +202,12 @@ func diffOption(target, option, have, want string) (tmuxctl.OptionWrite, bool) {
 	}
 }
 
-func diffGlobals(desired map[string]windowBadge, globals map[string]string) []tmuxctl.OptionWrite {
-	counts := map[string]int{}
-	for _, badge := range desired {
-		switch badge.status {
-		case "needs-you":
-			counts[OptNeeds]++
-		case "done":
-			counts[OptDone]++
-		case "working":
-			counts[OptWorking]++
-		}
+func diffGlobals(list []Agent, globals map[string]string) []tmuxctl.OptionWrite {
+	byGroup := Counts(list).ByGroup
+	counts := map[string]int{
+		OptNeeds:   byGroup[GroupNeedsYou],
+		OptDone:    byGroup[GroupDone],
+		OptWorking: byGroup[GroupWorking],
 	}
 
 	var writes []tmuxctl.OptionWrite

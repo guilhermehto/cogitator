@@ -90,8 +90,10 @@ func TestDiffOptionsUnsetsOrphanedWindowOptions(t *testing.T) {
 func TestDiffOptionsSkipsWindowsMissingFromPanes(t *testing.T) {
 	a := agentOn("/a", "@9", GroupNeedsYou, state.AttnQuestionPending, 5)
 
-	if got := DiffOptions([]Agent{a}, []Pane{{WindowID: "@1"}}, nil); len(got) != 0 {
-		t.Fatalf("want no writes, got %v", got)
+	for _, w := range DiffOptions([]Agent{a}, []Pane{{WindowID: "@1"}}, nil) {
+		if !w.Global {
+			t.Fatalf("want no window writes, got %v", w)
+		}
 	}
 }
 
@@ -171,5 +173,18 @@ func TestSeenOnFocusHonoursSessionOwnership(t *testing.T) {
 
 	if !reflect.DeepEqual(got, []string{"/owned"}) {
 		t.Fatalf("got %v", got)
+	}
+}
+
+func TestDiffOptionsCountsGlobalsPerAgent(t *testing.T) {
+	sharedA := agentOn("/a", "@1", GroupNeedsYou, state.AttnPermissionPending, 5)
+	sharedB := agentOn("/b", "@1", GroupNeedsYou, state.AttnQuestionPending, 5)
+	windowless := agentOn("/c", "", GroupWorking, state.AttnActive, 5)
+
+	got := DiffOptions([]Agent{sharedA, sharedB, windowless}, []Pane{{WindowID: "@1"}}, nil)
+
+	want := []tmuxctl.OptionWrite{globalSet(OptNeeds, "2"), globalSet(OptWorking, "1")}
+	if !reflect.DeepEqual(got[len(got)-2:], want) {
+		t.Fatalf("got %v\nwant globals %v", got, want)
 	}
 }
