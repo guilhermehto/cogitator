@@ -152,3 +152,114 @@ func TestPickKeepsLastListWhenRefreshFails(t *testing.T) {
 		t.Fatalf("expected stale list plus error:\n%s", view)
 	}
 }
+
+type captureRecorder struct {
+	targets []string
+}
+
+func (c *captureRecorder) Run(args ...string) (string, error) {
+	target := args[len(args)-1]
+	c.targets = append(c.targets, target)
+
+	return "building…\nAllow edit of main.go? [y/n]\n", nil
+}
+
+func newPreviewPick(t *testing.T, width int) (pickModel, *captureRecorder) {
+	t.Helper()
+	t.Setenv("TMUX", "/tmp/tmux-test,1,0")
+
+	list := agentsInEveryGroup()
+	for i := range list {
+		list[i].WindowID = "@" + list[i].ID
+	}
+	recorder := &captureRecorder{}
+	m := newTestPick(&fakeAgentFeed{list: list})
+	m.runner = recorder
+
+	model, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: 30})
+	m = model.(pickModel)
+	model, _ = m.Update(pickListMsg{agents: list})
+
+	return model.(pickModel), recorder
+}
+
+func step(m pickModel, msg tea.Msg) (pickModel, tea.Cmd) {
+	model, cmd := m.Update(msg)
+
+	return model.(pickModel), cmd
+}
+
+func TestPreviewShowsReasonAndPaneTailForCursorAgent(t *testing.T) {
+	m, recorder := newPreviewPick(t, 120)
+
+	m, cmd := step(m, previewDebounceMsg{seq: m.previewSeq})
+	m, _ = step(m, cmd())
+
+	view := m.View()
+	for _, want := range []string{"needs permission", "Allow edit of main.go? [y/n]"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view missing %q:\n%s", want, view)
+		}
+	}
+	if len(recorder.targets) != 1 || recorder.targets[0] != "@/a" {
+		t.Fatalf("capture targets = %v, want [@/a]", recorder.targets)
+	}
+}
+
+func TestPreviewKeepsOneCaptureInFlightAndFinalSelectionWins(t *testing.T) {
+	m, recorder := newPreviewPick(t, 120)
+
+	m, cmd := step(m, previewDebounceMsg{seq: m.previewSeq})
+	staleSeq := m.previewSeq
+	firstCapture := cmd
+
+	m, _ = step(m, keyMsg("j"))
+	m, _ = step(m, keyMsg("j"))
+
+	m, cmd = step(m, previewDebounceMsg{seq: staleSeq})
+	if cmd != nil {
+		t.Fatal("stale debounce must not start a capture")
+	}
+
+	m, cmd = step(m, previewDebounceMsg{seq: m.previewSeq})
+	if cmd != nil {
+		t.Fatal("debounce must not start a second capture while one is in flight")
+	}
+
+	m, cmd = step(m, firstCapture())
+	if cmd == nil {
+		t.Fatal("finished capture should chase the final selection")
+	}
+	m, _ = step(m, cmd())
+
+	if got := recorder.targets; len(got) != 2 || got[1] != "@/c" {
+		t.Fatalf("capture targets = %v, want second capture of @/c", got)
+	}
+	if m.previewAgentID != "/c" {
+		t.Fatalf("preview agent = %q, want /c", m.previewAgentID)
+	}
+}
+
+func TestPreviewToggleHidesPreviewAndWidensList(t *testing.T) {
+	m, _ := newPreviewPick(t, 120)
+	m, cmd := step(m, previewDebounceMsg{seq: m.previewSeq})
+	m, _ = step(m, cmd())
+	if !strings.Contains(m.View(), "needs permission") {
+		t.Fatal("preview should be visible by default on a wide popup")
+	}
+
+	m, _ = step(m, keyMsg("p"))
+
+	view := m.View()
+	if strings.Contains(view, "needs permission") || strings.Contains(view, "Allow edit") {
+		t.Fatalf("preview should be hidden:\n%s", view)
+	}
+}
+
+func TestPreviewDefaultsOffOnNarrowPopup(t *testing.T) {
+	m, _ := newPreviewPick(t, 80)
+
+	if m.showPreview {
+		t.Fatal("preview should default off below 100 columns")
+	}
+}

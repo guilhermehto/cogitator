@@ -929,3 +929,26 @@ func TestNewFunctions_NotAvailableOutsideTmux(t *testing.T) {
 		t.Errorf("unexpected calls: %v", f.calls)
 	}
 }
+
+func TestCapturePane_RequestsTailOfTarget(t *testing.T) {
+	withTMUX(t)
+	f := &fakeRunner{}
+	f.push("line1\nline2\n", nil)
+
+	out, err := CapturePane(f, "%7", 30)
+	if err != nil {
+		t.Fatalf("CapturePane: %v", err)
+	}
+	if out != "line1\nline2\n" {
+		t.Errorf("out = %q", out)
+	}
+	assertCall(t, f, 0, "capture-pane", "-p", "-J", "-S", "-30", "-t", "%7")
+}
+
+func TestCapturePane_NotAvailableOutsideTmux(t *testing.T) {
+	withoutTMUX(t)
+
+	if _, err := CapturePane(&fakeRunner{}, "%7", 30); !errors.Is(err, ErrNotAvailable) {
+		t.Errorf("err = %v, want ErrNotAvailable", err)
+	}
+}
