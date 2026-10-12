@@ -786,6 +786,11 @@ type model struct {
 	panes        []agents.Pane
 	panesLoading bool
 	panesDirty   bool
+
+	// badgeRunner is the tmux seam for the focus poll that publishes @cog_*
+	// badges; nil disables it (--demo, no feed).
+	badgeRunner  tmuxctl.Runner
+	focusPolling bool
 	agents       []agents.Agent
 
 	// prompt/input drive the sessions-pane input bar shared by every prompt
@@ -1382,7 +1387,7 @@ func (m model) Init() tea.Cmd {
 		wsC = loadWorkspaceStatusCmd(m.store, m.snap)
 		safeC = wsSafeTickCmd()
 	}
-	return tea.Batch(waitSnapshot(m.snaps), tick, wsC, safeC, listPanesCmd(m.listPanes), waitFeedAction(m.feedActions))
+	return tea.Batch(waitSnapshot(m.snaps), tick, wsC, safeC, listPanesCmd(m.listPanes), waitFeedAction(m.feedActions), m.initialFocusTick())
 }
 
 func waitSnapshot(ch <-chan state.Snapshot) tea.Cmd {
@@ -2545,6 +2550,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case panesMsg:
 		return m, m.applyPanes(msg)
+
+	case focusTickMsg:
+		return m, m.handleFocusTick()
+
+	case focusPollMsg:
+		return m, m.applyFocusPoll(msg)
+
+	case badgeWriteMsg:
+		return m, nil
 
 	case workspaceRowsMsg:
 		// Apply both optimistic overlays: drop rows awaiting deletion, and

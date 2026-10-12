@@ -109,7 +109,17 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 		m.attachFeed(feedHolder, feedActions, func() ([]tmuxctl.Pane, error) {
 			return tmuxctl.ListPanes(tmuxctl.DefaultRunner)
 		})
+		m.attachBadges(tmuxctl.DefaultRunner)
 	}
-	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	stopHangupWatch := quitOnHangup(p)
+	defer stopHangupWatch()
+
+	_, err := p.Run()
+	if feedHolder != nil {
+		clearBadges(tmuxctl.DefaultRunner, shutdownClearTimeout)
+	}
+
 	return err
 }

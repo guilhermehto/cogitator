@@ -12,6 +12,7 @@ type Config struct {
 	RecentWindow            time.Duration
 	PollEvery               time.Duration
 	RecencyPollEvery        time.Duration
+	FocusPollEvery          time.Duration
 	StatusDeadline          time.Duration
 	MessageActivityDebounce time.Duration
 	DiscoveryBrowseTimeout  time.Duration
@@ -144,6 +145,7 @@ func Default() *Config {
 		RecentWindow:            30 * time.Minute,
 		PollEvery:               5 * time.Second,
 		RecencyPollEvery:        30 * time.Second,
+		FocusPollEvery:          2 * time.Second,
 		StatusDeadline:          3 * time.Second,
 		MessageActivityDebounce: 250 * time.Millisecond,
 		DiscoveryBrowseTimeout:  4 * time.Second,
