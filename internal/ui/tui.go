@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/guilhermehto/cogitator/internal/agentfeed"
 	"github.com/guilhermehto/cogitator/internal/claudecode"
 	"github.com/guilhermehto/cogitator/internal/codex"
 	"github.com/guilhermehto/cogitator/internal/config"
@@ -15,6 +16,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/singleinstance"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/supervisor"
+	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
@@ -101,6 +103,13 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 	m.viewMarker = store
 	// Wire the workspace store so the Workspaces view can load workspaces.json.
 	m.store = wsStore
+	feedHolder, feedActions, stopFeed := startAgentFeed(ctx, agentfeed.SocketPath(), logger)
+	defer stopFeed()
+	if feedHolder != nil {
+		m.attachFeed(feedHolder, feedActions, func() ([]tmuxctl.Pane, error) {
+			return tmuxctl.ListPanes(tmuxctl.DefaultRunner)
+		})
+	}
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
 }

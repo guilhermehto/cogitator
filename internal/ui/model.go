@@ -12,6 +12,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/guilhermehto/cogitator/internal/agentfeed"
+	"github.com/guilhermehto/cogitator/internal/agents"
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/git"
 	"github.com/guilhermehto/cogitator/internal/harness"
@@ -217,6 +219,9 @@ type launchResultMsg struct {
 	// configured default overrode the row's recorded harness; empty otherwise.
 	// The launch handler upserts the roster to match only when it is set.
 	harnessKind string
+	// client is the tmux client a feed-initiated jump targets; empty for jumps
+	// made from inside cogitator itself.
+	client string
 }
 
 // worktreeCreatedMsg is returned by newWorktreeCmd after git.AddWorktree
@@ -282,6 +287,10 @@ type tmuxOps interface {
 	EnsureWindowMode(dir, name string, argv []string, mode tmuxctl.LaunchMode) (tmuxctl.Target, error)
 	Select(target tmuxctl.Target) error
 	SelectSession(target tmuxctl.Target) error
+	SelectForClient(target tmuxctl.Target, client string) error
+	SelectSessionForClient(target tmuxctl.Target, client string) error
+	SelectPaneForClient(paneID, client string) error
+	DisplayMessage(client, text string) error
 	KillWindow(target tmuxctl.Target) error
 	KillSession(target tmuxctl.Target) error
 }
@@ -308,6 +317,18 @@ func (realTmuxOps) EnsureWindowMode(dir, name string, argv []string, mode tmuxct
 func (realTmuxOps) Select(target tmuxctl.Target) error { return tmuxctl.Select(target) }
 func (realTmuxOps) SelectSession(target tmuxctl.Target) error {
 	return tmuxctl.SelectSession(target)
+}
+func (realTmuxOps) SelectForClient(target tmuxctl.Target, client string) error {
+	return tmuxctl.SelectForClient(target, client)
+}
+func (realTmuxOps) SelectSessionForClient(target tmuxctl.Target, client string) error {
+	return tmuxctl.SelectSessionForClient(target, client)
+}
+func (realTmuxOps) SelectPaneForClient(paneID, client string) error {
+	return tmuxctl.SelectPaneForClient(tmuxctl.DefaultRunner, paneID, client)
+}
+func (realTmuxOps) DisplayMessage(client, text string) error {
+	return tmuxctl.DisplayMessage(tmuxctl.DefaultRunner, client, text)
 }
 func (realTmuxOps) KillWindow(target tmuxctl.Target) error { return tmuxctl.KillWindow(target) }
 func (realTmuxOps) KillSession(target tmuxctl.Target) error {
@@ -756,6 +777,17 @@ type model struct {
 	harnOp harnessOps
 	store  storeOps
 
+	// feed publishes the unified agent list to the feed socket; nil when the
+	// feed is not running (--demo, bind failure). feedActions delivers its
+	// focus/seen requests, listPanes is the tmux seam for panes.
+	feed         *agentfeed.Holder
+	feedActions  <-chan agentfeed.Action
+	listPanes    func() ([]tmuxctl.Pane, error)
+	panes        []agents.Pane
+	panesLoading bool
+	panesDirty   bool
+	agents       []agents.Agent
+
 	// prompt/input drive the sessions-pane input bar shared by every prompt
 	// mode (new worktree, fetch branch, repo finder, session switcher, ...).
 	prompt promptMode
@@ -851,9 +883,17 @@ func wsSessionLaunchTarget(workspaceName string, sess workspace.SessionStatus) l
 //
 // The function is a tea.Cmd (runs off the UI goroutine).
 func launchCmd(ops tmuxOps, target launchTarget, harnOp harnessOps, mode tmuxctl.LaunchMode, defaultKind string) tea.Cmd {
-	inner := launchInner(ops, target, harnOp, mode, defaultKind)
+	return launchForClientCmd(ops, target, harnOp, mode, defaultKind, "")
+}
+
+// launchForClientCmd is launchCmd for a feed-initiated jump: the select moves
+// client rather than the current tmux client, and the result carries client so
+// a failure can be reported there.
+func launchForClientCmd(ops tmuxOps, target launchTarget, harnOp harnessOps, mode tmuxctl.LaunchMode, defaultKind, client string) tea.Cmd {
+	inner := launchInnerForClient(ops, target, harnOp, mode, defaultKind, client)
 	return func() tea.Msg {
 		res := inner()
+		res.client = client
 		// Stamp the session identity so the Update handler can mark it viewed
 		// (clearing AttnFinished) when the select succeeds.
 		res.provider = target.provider
@@ -894,6 +934,12 @@ func launchArgv(target launchTarget, harnOp harnessOps, defaultKind string) (arg
 }
 
 func launchInner(ops tmuxOps, target launchTarget, harnOp harnessOps, mode tmuxctl.LaunchMode, defaultKind string) func() launchResultMsg {
+	return launchInnerForClient(ops, target, harnOp, mode, defaultKind, "")
+}
+
+// launchInnerForClient is launchInner selecting for a specific tmux client;
+// an empty client selects for the current one.
+func launchInnerForClient(ops tmuxOps, target launchTarget, harnOp harnessOps, mode tmuxctl.LaunchMode, defaultKind, client string) func() launchResultMsg {
 	return func() launchResultMsg {
 		if ops == nil || !ops.Available() {
 			return launchResultMsg{dir: target.dir, err: tmuxctl.ErrNotAvailable}
@@ -912,9 +958,9 @@ func launchInner(ops tmuxOps, target launchTarget, harnOp harnessOps, mode tmuxc
 		// window). In window mode it focuses the exact tagged window.
 		selectTarget := func(tmuxTarget tmuxctl.Target) error {
 			if mode == tmuxctl.ModeSession {
-				return ops.SelectSession(tmuxTarget)
+				return ops.SelectSessionForClient(tmuxTarget, client)
 			}
-			return ops.Select(tmuxTarget)
+			return ops.SelectForClient(tmuxTarget, client)
 		}
 
 		// Check tmux directly instead of trusting the caller's cached state.
@@ -1336,7 +1382,7 @@ func (m model) Init() tea.Cmd {
 		wsC = loadWorkspaceStatusCmd(m.store, m.snap)
 		safeC = wsSafeTickCmd()
 	}
-	return tea.Batch(waitSnapshot(m.snaps), tick, wsC, safeC)
+	return tea.Batch(waitSnapshot(m.snaps), tick, wsC, safeC, listPanesCmd(m.listPanes), waitFeedAction(m.feedActions))
 }
 
 func waitSnapshot(ch <-chan state.Snapshot) tea.Cmd {
@@ -2163,6 +2209,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.tmuxHint = hint
 			}
+			if msg.client != "" {
+				m.tmuxHint = hint
+				return m, displayMessageCmd(m.tmux, msg.client, hint)
+			}
 			return m, nil
 		}
 		if m.viewMarker != nil && msg.sessionID != "" {
@@ -2487,7 +2537,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				wsC = loadWorkspaceStatusCmd(m.store, m.snap)
 			}
 		}
-		return m, tea.Batch(next, bellC, buildC, wsC)
+		m.refreshAgents()
+		return m, tea.Batch(next, bellC, buildC, wsC, m.requestPanes())
+
+	case feedActionMsg:
+		return m, tea.Batch(waitFeedAction(m.feedActions), m.handleFeedAction(agentfeed.Action(msg)))
+
+	case panesMsg:
+		return m, m.applyPanes(msg)
 
 	case workspaceRowsMsg:
 		// Apply both optimistic overlays: drop rows awaiting deletion, and
@@ -2504,6 +2561,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sessionCursor = n - 1
 		}
 		m.rowsBuilding = false
+		m.refreshAgents()
 		if m.rowsDirty {
 			m.rowsDirty = false
 			m.rowsBuilding = true
@@ -2520,6 +2578,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clampWsCursor()
 		m.pruneWsPendingDeletes()
 		m.wsBuilding = false
+		m.refreshAgents()
 		var reloadC tea.Cmd
 		if m.wsDirty {
 			m.wsDirty = false

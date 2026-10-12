@@ -61,6 +61,7 @@ type fakeTmuxOps struct {
 	selectErr          error
 	killWindowErr      error
 	killSessionErr     error
+	displayMessageErr  error
 
 	// Call recording.
 	findWindowCalls    []string
@@ -71,6 +72,21 @@ type fakeTmuxOps struct {
 	selectSessionCalls []tmuxctl.Target
 	killWindowCalls    []tmuxctl.Target
 	killSessionCalls   []tmuxctl.Target
+
+	clientSelectCalls   []clientSelectCall
+	displayMessageCalls []displayMessageCall
+}
+
+type clientSelectCall struct {
+	target  tmuxctl.Target
+	paneID  string
+	session bool
+	client  string
+}
+
+type displayMessageCall struct {
+	client string
+	text   string
 }
 
 type relaunchCall struct {
@@ -119,6 +135,30 @@ func (f *fakeTmuxOps) Select(target tmuxctl.Target) error {
 func (f *fakeTmuxOps) SelectSession(target tmuxctl.Target) error {
 	f.selectSessionCalls = append(f.selectSessionCalls, target)
 	return f.selectErr
+}
+
+func (f *fakeTmuxOps) SelectForClient(target tmuxctl.Target, client string) error {
+	if client != "" {
+		f.clientSelectCalls = append(f.clientSelectCalls, clientSelectCall{target: target, client: client})
+	}
+	return f.Select(target)
+}
+
+func (f *fakeTmuxOps) SelectSessionForClient(target tmuxctl.Target, client string) error {
+	if client != "" {
+		f.clientSelectCalls = append(f.clientSelectCalls, clientSelectCall{target: target, session: true, client: client})
+	}
+	return f.SelectSession(target)
+}
+
+func (f *fakeTmuxOps) SelectPaneForClient(paneID, client string) error {
+	f.clientSelectCalls = append(f.clientSelectCalls, clientSelectCall{paneID: paneID, client: client})
+	return f.selectErr
+}
+
+func (f *fakeTmuxOps) DisplayMessage(client, text string) error {
+	f.displayMessageCalls = append(f.displayMessageCalls, displayMessageCall{client: client, text: text})
+	return f.displayMessageErr
 }
 
 func (f *fakeTmuxOps) KillWindow(target tmuxctl.Target) error {
