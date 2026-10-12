@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
@@ -515,6 +516,18 @@ func Select(target Target) error {
 
 // SelectWith is the injectable variant of Select.
 func SelectWith(r Runner, target Target) error {
+	return SelectForClientWith(r, target, "")
+}
+
+// SelectForClient is Select targeting a specific tmux client (e.g.
+// "/dev/ttys003") instead of whichever client tmux considers current. An empty
+// client behaves exactly like Select.
+func SelectForClient(target Target, client string) error {
+	return SelectForClientWith(DefaultRunner, target, client)
+}
+
+// SelectForClientWith is the injectable variant of SelectForClient.
+func SelectForClientWith(r Runner, target Target, client string) error {
 	if !Available() {
 		return ErrNotAvailable
 	}
@@ -522,10 +535,18 @@ func SelectWith(r Runner, target Target) error {
 	if _, err := r.Run("select-window", "-t", string(target)); err != nil {
 		return fmt.Errorf("tmuxctl: select-window %s: %w", target, err)
 	}
-	if _, err := r.Run("switch-client", "-t", string(target)); err != nil {
+	if _, err := r.Run(switchClientArgs(client, string(target))...); err != nil {
 		return fmt.Errorf("tmuxctl: switch-client %s: %w", target, err)
 	}
 	return nil
+}
+
+// switchClientArgs builds a switch-client argv, adding -c only when client is set.
+func switchClientArgs(client, target string) []string {
+	if client == "" {
+		return []string{"switch-client", "-t", target}
+	}
+	return []string{"switch-client", "-c", client, "-t", target}
 }
 
 // SelectSession switches the attached tmux client to the session that owns
@@ -543,13 +564,43 @@ func SelectSession(target Target) error {
 
 // SelectSessionWith is the injectable variant of SelectSession.
 func SelectSessionWith(r Runner, target Target) error {
+	return SelectSessionForClientWith(r, target, "")
+}
+
+// SelectSessionForClient is SelectSession targeting a specific tmux client.
+// An empty client behaves exactly like SelectSession.
+func SelectSessionForClient(target Target, client string) error {
+	return SelectSessionForClientWith(DefaultRunner, target, client)
+}
+
+// SelectSessionForClientWith is the injectable variant of SelectSessionForClient.
+func SelectSessionForClientWith(r Runner, target Target, client string) error {
 	if !Available() {
 		return ErrNotAvailable
 	}
 
 	session := sessionOf(target)
-	if _, err := r.Run("switch-client", "-t", session); err != nil {
+	if _, err := r.Run(switchClientArgs(client, session)...); err != nil {
 		return fmt.Errorf("tmuxctl: switch-client %s: %w", session, err)
+	}
+	return nil
+}
+
+// SelectPaneForClient moves client to the window and pane identified by paneID
+// (e.g. "%12"). Pane ids are server-unique, so no session qualifier is needed.
+func SelectPaneForClient(r Runner, paneID, client string) error {
+	if !Available() {
+		return ErrNotAvailable
+	}
+
+	if _, err := r.Run("select-window", "-t", paneID); err != nil {
+		return fmt.Errorf("tmuxctl: select-window %s: %w", paneID, err)
+	}
+	if _, err := r.Run("select-pane", "-t", paneID); err != nil {
+		return fmt.Errorf("tmuxctl: select-pane %s: %w", paneID, err)
+	}
+	if _, err := r.Run(switchClientArgs(client, paneID)...); err != nil {
+		return fmt.Errorf("tmuxctl: switch-client %s: %w", paneID, err)
 	}
 	return nil
 }
@@ -642,4 +693,236 @@ func ListCogDirsWith(r Runner) (map[string]bool, error) {
 		result[canonical] = true
 	}
 	return result, nil
+}
+
+// Pane is one tmux pane with the window-level @cog_* state of its window.
+// Path is canonical when it could be canonicalised, raw otherwise.
+type Pane struct {
+	PaneID      string
+	WindowID    string
+	SessionID   string
+	SessionName string
+	Path        string
+	Command     string
+	CogDir      string
+	CogStatus   string
+	CogReason   string
+	CogSince    string
+}
+
+// paneFormat is tab-separated because paths may contain spaces.
+var paneFormat = strings.Join([]string{
+	"#{pane_id}", "#{window_id}", "#{session_id}", "#{session_name}",
+	"#{pane_current_path}", "#{pane_current_command}",
+	"#{@cog_dir}", "#{@cog_status}", "#{@cog_reason}", "#{@cog_since}",
+}, "\t")
+
+// ListPanes returns every pane on the server in a single list-panes call.
+func ListPanes(r Runner) ([]Pane, error) {
+	if !Available() {
+		return nil, ErrNotAvailable
+	}
+
+	out, err := r.Run("list-panes", "-a", "-F", paneFormat)
+	if err != nil {
+		return nil, fmt.Errorf("tmuxctl: list-panes: %w", err)
+	}
+
+	var panes []Pane
+	for _, line := range splitLines(out) {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 10 {
+			continue
+		}
+
+		path := fields[4]
+		if canonical, err := pathnorm.Canonical(path); err == nil {
+			path = canonical
+		}
+
+		panes = append(panes, Pane{
+			PaneID:      fields[0],
+			WindowID:    fields[1],
+			SessionID:   fields[2],
+			SessionName: fields[3],
+			Path:        path,
+			Command:     fields[5],
+			CogDir:      fields[6],
+			CogStatus:   fields[7],
+			CogReason:   fields[8],
+			CogSince:    fields[9],
+		})
+	}
+	return panes, nil
+}
+
+// ClientFocus is where one attached tmux client is looking.
+type ClientFocus struct {
+	Client           string
+	SessionID        string
+	WindowID         string
+	ActivityUnixSecs int64
+}
+
+// ListClientFocus returns the session and window each attached client is on.
+func ListClientFocus(r Runner) ([]ClientFocus, error) {
+	if !Available() {
+		return nil, ErrNotAvailable
+	}
+
+	out, err := r.Run("list-clients", "-F",
+		"#{client_name}\t#{session_id}\t#{window_id}\t#{client_activity}")
+	if err != nil {
+		return nil, fmt.Errorf("tmuxctl: list-clients: %w", err)
+	}
+
+	var clients []ClientFocus
+	for _, line := range splitLines(out) {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 4 {
+			continue
+		}
+
+		activity, _ := strconv.ParseInt(strings.TrimSpace(fields[3]), 10, 64)
+		clients = append(clients, ClientFocus{
+			Client:           fields[0],
+			SessionID:        fields[1],
+			WindowID:         fields[2],
+			ActivityUnixSecs: activity,
+		})
+	}
+	return clients, nil
+}
+
+// splitLines splits command output into lines, dropping empty ones. Unlike
+// TrimSpace per line it keeps trailing tabs, which delimit empty fields.
+func splitLines(out string) []string {
+	var lines []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// optionBoundary separates per-option output in the chained show-options call.
+const optionBoundary = "\x1f-cog-end-\x1f"
+
+// ReadGlobalOptions returns the current global value of each named option.
+// Unset options are absent from the map, so callers can diff against what tmux
+// actually holds. Values must be single-line.
+func ReadGlobalOptions(r Runner, names []string) (map[string]string, error) {
+	if !Available() {
+		return nil, ErrNotAvailable
+	}
+
+	values := make(map[string]string, len(names))
+	if len(names) == 0 {
+		return values, nil
+	}
+
+	var args []string
+	for i, name := range names {
+		if i > 0 {
+			args = append(args, ";")
+		}
+		args = append(args, "show-options", "-gqv", name, ";", "display-message", "-p", optionBoundary)
+	}
+
+	out, err := r.Run(args...)
+	if err != nil {
+		return nil, fmt.Errorf("tmuxctl: show-options: %w", err)
+	}
+
+	index := 0
+	var value []string
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if line != optionBoundary {
+			value = append(value, line)
+			continue
+		}
+		if index < len(names) && len(value) > 0 {
+			values[names[index]] = strings.Join(value, "\n")
+		}
+		index++
+		value = nil
+	}
+	return values, nil
+}
+
+// OptionWrite is one set/unset of a @cog_* option. Global writes target the
+// server-wide option; otherwise Target is a window id and the write is
+// window-scoped.
+type OptionWrite struct {
+	Global bool
+	Target string
+	Name   string
+	Value  string
+	Unset  bool
+}
+
+func (w OptionWrite) args() []string {
+	args := []string{"set-option"}
+	if w.Global {
+		args = append(args, "-g")
+	} else {
+		args = append(args, "-w")
+	}
+	if w.Unset {
+		args = append(args, "-u")
+	}
+	if !w.Global {
+		args = append(args, "-t", w.Target)
+	}
+	args = append(args, w.Name)
+	if !w.Unset {
+		args = append(args, w.Value)
+	}
+	return args
+}
+
+// ApplyOptions applies all writes in one tmux invocation, chaining commands
+// with ";". tmux aborts the rest of a chain when one command fails, so callers
+// must only target windows that exist. No-op on empty input.
+func ApplyOptions(r Runner, writes []OptionWrite) error {
+	if len(writes) == 0 {
+		return nil
+	}
+	if !Available() {
+		return ErrNotAvailable
+	}
+
+	var args []string
+	for i, w := range writes {
+		if i > 0 {
+			args = append(args, ";")
+		}
+		args = append(args, w.args()...)
+	}
+
+	if _, err := r.Run(args...); err != nil {
+		return fmt.Errorf("tmuxctl: apply options: %w", err)
+	}
+	return nil
+}
+
+// DisplayMessage shows text in client's status line.
+func DisplayMessage(r Runner, client, text string) error {
+	if !Available() {
+		return ErrNotAvailable
+	}
+
+	args := []string{"display-message"}
+	if client != "" {
+		args = append(args, "-c", client)
+	}
+	args = append(args, text)
+
+	if _, err := r.Run(args...); err != nil {
+		return fmt.Errorf("tmuxctl: display-message: %w", err)
+	}
+	return nil
 }

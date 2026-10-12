@@ -757,3 +757,175 @@ func TestListCogDirs_RunnerError(t *testing.T) {
 		t.Errorf("error should mention list-windows, got: %v", err)
 	}
 }
+
+// ---- client-targeted select, listings, batched options -----------------------
+
+func TestSelectForClient_TargetsGivenClient(t *testing.T) {
+	withTMUX(t)
+	f := &fakeRunner{}
+
+	if err := SelectForClientWith(f, "main:3", "/dev/ttys003"); err != nil {
+		t.Fatal(err)
+	}
+
+	assertCall(t, f, 0, "select-window", "-t", "main:3")
+	assertCall(t, f, 1, "switch-client", "-c", "/dev/ttys003", "-t", "main:3")
+}
+
+func TestSelectForClient_EmptyClientMatchesSelect(t *testing.T) {
+	withTMUX(t)
+	f := &fakeRunner{}
+
+	if err := SelectForClientWith(f, "main:3", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := strings.Join(f.calls[1], " "); got != "switch-client -t main:3" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestSelectSessionForClient_TargetsGivenClient(t *testing.T) {
+	withTMUX(t)
+	f := &fakeRunner{}
+
+	if err := SelectSessionForClientWith(f, "main:3", "/dev/ttys003"); err != nil {
+		t.Fatal(err)
+	}
+
+	assertCall(t, f, 0, "switch-client", "-c", "/dev/ttys003", "-t", "main")
+}
+
+func TestSelectPaneForClient_SelectsWindowPaneAndSwitches(t *testing.T) {
+	withTMUX(t)
+	f := &fakeRunner{}
+
+	if err := SelectPaneForClient(f, "%12", "/dev/ttys003"); err != nil {
+		t.Fatal(err)
+	}
+
+	assertCall(t, f, 0, "select-window", "-t", "%12")
+	assertCall(t, f, 1, "select-pane", "-t", "%12")
+	assertCall(t, f, 2, "switch-client", "-c", "/dev/ttys003", "-t", "%12")
+}
+
+func TestApplyOptions_ChainsWritesIntoOneCall(t *testing.T) {
+	withTMUX(t)
+	f := &fakeRunner{}
+
+	err := ApplyOptions(f, []OptionWrite{
+		{Target: "@3", Name: "@cog_status", Value: "busy"},
+		{Target: "@4", Name: "@cog_reason", Unset: true},
+		{Global: true, Name: "@cog_count", Value: "2"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(f.calls) != 1 {
+		t.Fatalf("got %d runner calls, want 1", len(f.calls))
+	}
+	want := "set-option -w -t @3 @cog_status busy ; set-option -w -u -t @4 @cog_reason ; set-option -g @cog_count 2"
+	if got := strings.Join(f.calls[0], " "); got != want {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+}
+
+func TestApplyOptions_NoOpWhenEmpty(t *testing.T) {
+	withTMUX(t)
+	f := &fakeRunner{}
+
+	if err := ApplyOptions(f, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("unexpected calls: %v", f.calls)
+	}
+}
+
+func TestListPanes_ParsesPathsWithSpacesAndEmptyOptions(t *testing.T) {
+	withTMUX(t)
+	f := &fakeRunner{}
+	f.push("%1\t@2\t$3\tmain\t/no/such dir/with space\topencode\t/repo\tbusy\tneeds input\t1700000000\n"+
+		"%2\t@2\t$3\tmain\t/no/such\tzsh\t\t\t\t\n", nil)
+
+	panes, err := ListPanes(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := Pane{
+		PaneID: "%1", WindowID: "@2", SessionID: "$3", SessionName: "main",
+		Path: "/no/such dir/with space", Command: "opencode",
+		CogDir: "/repo", CogStatus: "busy", CogReason: "needs input", CogSince: "1700000000",
+	}
+	if len(panes) != 2 || panes[0] != want {
+		t.Fatalf("got %+v", panes)
+	}
+	if panes[1].CogDir != "" || panes[1].Command != "zsh" {
+		t.Errorf("second pane: %+v", panes[1])
+	}
+}
+
+func TestListClientFocus_ParsesClients(t *testing.T) {
+	withTMUX(t)
+	f := &fakeRunner{}
+	f.push("/dev/ttys003\t$1\t@2\t1700000005\n", nil)
+
+	clients, err := ListClientFocus(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := ClientFocus{Client: "/dev/ttys003", SessionID: "$1", WindowID: "@2", ActivityUnixSecs: 1700000005}
+	if len(clients) != 1 || clients[0] != want {
+		t.Fatalf("got %+v", clients)
+	}
+}
+
+func TestReadGlobalOptions_OmitsUnsetOptions(t *testing.T) {
+	withTMUX(t)
+	f := &fakeRunner{}
+	f.push("busy\n"+optionBoundary+"\n"+optionBoundary+"\n3\n"+optionBoundary+"\n", nil)
+
+	got, err := ReadGlobalOptions(f, []string{"@cog_a", "@cog_b", "@cog_c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(got) != 2 || got["@cog_a"] != "busy" || got["@cog_c"] != "3" {
+		t.Errorf("got %v", got)
+	}
+}
+
+func TestDisplayMessage_TargetsClient(t *testing.T) {
+	withTMUX(t)
+	f := &fakeRunner{}
+
+	if err := DisplayMessage(f, "/dev/ttys003", "hello"); err != nil {
+		t.Fatal(err)
+	}
+
+	assertCall(t, f, 0, "display-message", "-c", "/dev/ttys003", "hello")
+}
+
+func TestNewFunctions_NotAvailableOutsideTmux(t *testing.T) {
+	withoutTMUX(t)
+	f := &fakeRunner{}
+
+	if _, err := ListPanes(f); !errors.Is(err, ErrNotAvailable) {
+		t.Errorf("ListPanes: %v", err)
+	}
+	if _, err := ListClientFocus(f); !errors.Is(err, ErrNotAvailable) {
+		t.Errorf("ListClientFocus: %v", err)
+	}
+	if err := SelectForClientWith(f, "a:1", "c"); !errors.Is(err, ErrNotAvailable) {
+		t.Errorf("SelectForClient: %v", err)
+	}
+	if err := DisplayMessage(f, "c", "x"); !errors.Is(err, ErrNotAvailable) {
+		t.Errorf("DisplayMessage: %v", err)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("unexpected calls: %v", f.calls)
+	}
+}
