@@ -40,6 +40,7 @@ export default defineConfig({
           { text: 'Getting started', link: '/guide/getting-started' },
           { text: 'Connect your agent', link: '/guide/connect' },
           { text: 'Key bindings', link: '/guide/key-bindings' },
+          { text: 'tmux integration', link: '/guide/tmux' },
           { text: 'Configuration', link: '/guide/configuration' },
         ],
       },

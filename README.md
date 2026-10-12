@@ -444,6 +444,7 @@ exits 0 — omp shows no failure and never blocks your turns.
 - `--debug`: show diagnostic UI elements that are noisy during normal use (e.g. the unreachable-instance footer).
 - `--log-level`: set log verbosity (`debug|info|warn|error`). Default is `info`.
 - `--version`: print module version, commit, and build date.
+- `cogitator pick` / `cogitator next`: agent picker popup and "jump to what needs you" for tmux key bindings; see [tmux integration](https://guilhermehto.github.io/cogitator/guide/tmux).
 
 ## Logging
 

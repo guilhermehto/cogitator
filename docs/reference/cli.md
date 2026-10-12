@@ -18,6 +18,20 @@ line. It exits when either:
 - a non-empty snapshot arrives, or
 - the status deadline is reached (default: 3s).
 
+When the cogitator TUI is running, `--status` reads its live feed instead of running
+discovery itself; otherwise it falls back to mDNS discovery as above.
+
+## Subcommands
+
+These drive the [tmux integration](/guide/tmux) and talk to the running TUI:
+
+- `cogitator pick [--client X]`: open the agent picker (meant for a tmux popup).
+- `cogitator next [--client X --window W --session S]`: jump to the next agent that needs
+  you. Always exits 0 and prints nothing, reporting through a tmux message; exits 2 only on
+  usage errors.
+
+All flags are optional and fall back to tmux's current client, window, and session.
+
 ## Hook subcommands
 
 These are wired up during [agent setup](/guide/connect) and are not meant to be run by hand:
