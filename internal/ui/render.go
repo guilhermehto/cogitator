@@ -1037,6 +1037,11 @@ var (
 		{"D", "delete selection"},
 		{"P", "pull (ff-only)"},
 	}}
+	helpAgents = helpSection{"Agents", [][2]string{
+		{"enter", "jump to agent"},
+		{"x", "mark seen"},
+		{"/", "filter"},
+	}}
 	helpGeneral = helpSection{"General", [][2]string{
 		{"tab", "switch view"},
 		{"S", "settings"},
@@ -1077,8 +1082,11 @@ func statusLegend() [][2]string {
 // handed to overlayBox, two wider than the text area) is too narrow.
 func renderHelp(fieldW int, view viewMode) string {
 	viewSection := helpRepos
-	if view == viewWorkspaces {
+	switch view {
+	case viewWorkspaces:
 		viewSection = helpWorkspaces
+	case viewAgents:
+		viewSection = helpAgents
 	}
 	leftSections := []helpSection{viewSection, helpGeneral}
 	rightSections := []helpSection{helpNavigate}

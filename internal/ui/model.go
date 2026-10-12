@@ -42,7 +42,8 @@ type workspaceRowsMsg struct {
 
 // viewMode selects which top-level view occupies the full pane: Repos
 // (viewSessions: worktrees merged across configured repos) or Workspaces
-// (multi-repo bundles and their sessions). newModel opens on Workspaces — it
+// (multi-repo bundles and their sessions), or Agents (the attention-ordered
+// triage list across both). newModel opens on Workspaces — it
 // is the "what I'm working on" surface. Iota order is load-bearing: the zero
 // value maps to viewSessions, keeping existing model{} literals in tests valid
 // without explicit initialisation — the same convention promptMode documents
@@ -52,6 +53,7 @@ type viewMode int
 const (
 	viewSessions viewMode = iota
 	viewWorkspaces
+	viewAgents
 )
 
 // wsStatusMsg carries the result of loadWorkspaceStatusCmd: the workspace set
@@ -792,6 +794,7 @@ type model struct {
 	badgeRunner  tmuxctl.Runner
 	focusPolling bool
 	agents       []agents.Agent
+	agentsList   agentList
 
 	// prompt/input drive the sessions-pane input bar shared by every prompt
 	// mode (new worktree, fetch branch, repo finder, session switcher, ...).
@@ -1855,6 +1858,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// The Agents filter owns esc/q so typing a query never quits.
+		if m.view == viewAgents && m.agentsList.Filtering() {
+			return m.updateAgentsView(msg)
+		}
+
 		// (b) Global quit — only when no prompt is active.
 		switch msg.String() {
 		case "q", "ctrl+c", "esc":
@@ -1918,12 +1926,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "tab" {
 			m.wsHint = ""
 			m.tmuxHint = ""
-			if m.view == viewWorkspaces {
-				m.view = viewSessions
-			} else {
-				m.view = viewWorkspaces
-			}
+			m.view = nextView(m.view)
 			return m, nil
+		}
+
+		if m.view == viewAgents {
+			return m.updateAgentsView(msg)
 		}
 
 		// Workspaces-view keys route through their own methods rather than
@@ -2961,6 +2969,8 @@ func (m model) renderHarnessChooser(fieldW int) string {
 // dialogs are composited over, so the pane stays visible behind them.
 func (m model) activeViewBackdrop(paneW, innerH int, rows []state.SessionView, recentByInstance map[string]int) string {
 	switch {
+	case m.view == viewAgents:
+		return m.renderAgentsView(paneW, innerH)
 	case m.view == viewWorkspaces:
 		return m.renderWorkspacesView(paneW, innerH)
 	case len(m.workspaceRows) > 0:
@@ -3043,9 +3053,12 @@ func (m model) View() string {
 			now = time.Now()
 		}
 		var backdrop string
-		if m.view == viewWorkspaces {
+		switch m.view {
+		case viewAgents:
+			backdrop = m.renderAgentsView(paneW, sessionsInnerH)
+		case viewWorkspaces:
 			backdrop = m.renderWorkspacesView(paneW, sessionsInnerH)
-		} else {
+		default:
 			backdrop = m.renderWorkspaceRowsViewport(paneW, sessionsInnerH, m.workspaceRows, m.sessionCursor, now)
 		}
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderSessionPalette(paneW, sessionsInnerH))
@@ -3073,6 +3086,8 @@ func (m model) View() string {
 	case m.prompt == promptWorkspaceBackfill:
 		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWorkspaceBackfillPrompt(paneW, sessionsInnerH))
+	case m.view == viewAgents:
+		sessionContent = m.renderAgentsView(paneW, sessionsInnerH)
 	case m.view == viewWorkspaces:
 		sessionContent = m.renderWorkspacesView(paneW, sessionsInnerH)
 	case len(m.workspaceRows) > 0:
@@ -3161,9 +3176,10 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 		gitOp:  realGitOps{},
 		harnOp: realHarnessOps{},
 
-		prompt: promptIdle,
-		view:   viewWorkspaces,
-		input:  ti,
+		prompt:     promptIdle,
+		view:       viewWorkspaces,
+		input:      ti,
+		agentsList: newAgentList(),
 	}
 }
 

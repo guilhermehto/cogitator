@@ -51,14 +51,20 @@ func TestWorkspaceViewTabTogglesViewAndBackAgain(t *testing.T) {
 
 	updated, _ := m.Update(keyMsg("tab"))
 	m1 := updated.(model)
-	if m1.view != viewWorkspaces {
-		t.Fatalf("Tab must switch to viewWorkspaces; got %v", m1.view)
+	if m1.view != viewAgents {
+		t.Fatalf("Tab must switch to viewAgents; got %v", m1.view)
 	}
 
 	updated2, _ := m1.Update(keyMsg("tab"))
 	m2 := updated2.(model)
-	if m2.view != viewSessions {
-		t.Fatalf("second Tab must switch back to viewSessions; got %v", m2.view)
+	if m2.view != viewWorkspaces {
+		t.Fatalf("second Tab must switch to viewWorkspaces; got %v", m2.view)
+	}
+
+	updated3, _ := m2.Update(keyMsg("tab"))
+	m3 := updated3.(model)
+	if m3.view != viewSessions {
+		t.Fatalf("third Tab must switch back to viewSessions; got %v", m3.view)
 	}
 }
 
@@ -76,6 +82,8 @@ func TestWorkspaceViewTabPreservesSessionCursor(t *testing.T) {
 
 	updated, _ := m.Update(keyMsg("tab"))
 	m1 := updated.(model)
+	updated1b, _ := m1.Update(keyMsg("tab"))
+	m1 = updated1b.(model)
 	// Navigate the Workspaces view; this must never touch sessionCursor.
 	updated2, _ := m1.Update(keyMsg("j"))
 	m2 := updated2.(model)
@@ -307,10 +315,12 @@ func TestWorkspaceViewTabRoundTripClearsHint(t *testing.T) {
 		t.Fatalf("first tab must switch to the Sessions view; got %v", m2.view)
 	}
 
+	updated1b, _ := m2.Update(keyMsg("tab"))
+	m2 = updated1b.(model)
 	updated2, _ := m2.Update(keyMsg("tab"))
 	m3 := updated2.(model)
 	if m3.view != viewWorkspaces {
-		t.Fatalf("second tab must switch back to the Workspaces view; got %v", m3.view)
+		t.Fatalf("third tab must switch back to the Workspaces view; got %v", m3.view)
 	}
 
 	after := m3.View()
