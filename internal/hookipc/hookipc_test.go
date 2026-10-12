@@ -355,3 +355,112 @@ func TestListen_SocketPermissions(t *testing.T) {
 		t.Errorf("socket permissions = %04o, want 0600", perm)
 	}
 }
+
+func startEchoRPC(t *testing.T, sockPath string) func() {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cleanup, err := hookipc.ListenRPC(ctx, sockPath, func(req []byte) []byte {
+		return append([]byte("echo:"), req...)
+	}, nil)
+	if err != nil {
+		t.Fatalf("ListenRPC: %v", err)
+	}
+	t.Cleanup(cleanup)
+	return cleanup
+}
+
+func TestCall_ReturnsHandlerReply(t *testing.T) {
+	sockPath := filepath.Join(shortXDGDir(t), "cog-rpc.sock")
+	startEchoRPC(t, sockPath)
+
+	got, err := hookipc.Call(context.Background(), sockPath, []byte("ping"))
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if string(got) != "echo:ping" {
+		t.Errorf("reply = %q, want %q", got, "echo:ping")
+	}
+}
+
+func TestCall_NoListener(t *testing.T) {
+	sockPath := filepath.Join(shortXDGDir(t), "cog-rpc-none.sock")
+
+	start := time.Now()
+	_, err := hookipc.Call(context.Background(), sockPath, []byte("ping"))
+	if !errors.Is(err, hookipc.ErrListenerUnavailable) {
+		t.Fatalf("Call without listener: got %v, want ErrListenerUnavailable", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("Call took %v, want within dial timeout", elapsed)
+	}
+}
+
+func TestCall_SlowClientDoesNotBlockOthers(t *testing.T) {
+	sockPath := filepath.Join(shortXDGDir(t), "cog-rpc-slow.sock")
+	startEchoRPC(t, sockPath)
+
+	idle, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial idle client: %v", err)
+	}
+	defer idle.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	got, err := hookipc.Call(ctx, sockPath, []byte("fast"))
+	if err != nil {
+		t.Fatalf("Call while another client idles: %v", err)
+	}
+	if string(got) != "echo:fast" {
+		t.Errorf("reply = %q, want %q", got, "echo:fast")
+	}
+}
+
+func TestListenRPC_StaleSocket(t *testing.T) {
+	sockPath := filepath.Join(shortXDGDir(t), "cog-rpc-stale.sock")
+	f, err := os.Create(sockPath)
+	if err != nil {
+		t.Fatalf("create stale file: %v", err)
+	}
+	f.Close()
+
+	startEchoRPC(t, sockPath)
+
+	got, err := hookipc.Call(context.Background(), sockPath, []byte("x"))
+	if err != nil {
+		t.Fatalf("Call after stale replacement: %v", err)
+	}
+	if string(got) != "echo:x" {
+		t.Errorf("reply = %q, want %q", got, "echo:x")
+	}
+}
+
+func TestListenRPC_LiveSocket(t *testing.T) {
+	sockPath := filepath.Join(shortXDGDir(t), "cog-rpc-live.sock")
+	startEchoRPC(t, sockPath)
+
+	_, err := hookipc.ListenRPC(context.Background(), sockPath, func(_ []byte) []byte { return nil }, nil)
+	if !errors.Is(err, hookipc.ErrListenerOwned) {
+		t.Errorf("ListenRPC with live owner: got %v, want ErrListenerOwned", err)
+	}
+}
+
+func TestListenRPC_SocketPermissionsAndCleanup(t *testing.T) {
+	sockPath := filepath.Join(shortXDGDir(t), "cog-rpc-perms.sock")
+	cleanup := startEchoRPC(t, sockPath)
+
+	info, err := os.Stat(sockPath)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("socket permissions = %04o, want 0600", perm)
+	}
+
+	cleanup()
+	cleanup()
+	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
+		t.Errorf("socket file should be removed after cleanup, got: %v", err)
+	}
+}

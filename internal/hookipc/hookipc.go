@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -84,74 +85,19 @@ func Listen(ctx context.Context, sockPath string, handler func(raw []byte), logg
 		logger = slog.Default()
 	}
 
-	ln, err := net.Listen("unix", sockPath)
+	ln, err := bindSocket(ctx, sockPath)
 	if err != nil {
-		if !isAddrInUse(err) {
-			return noop, fmt.Errorf("hookipc: listen %s: %w", sockPath, err)
-		}
-		// EADDRINUSE — check if the existing socket is live or stale.
-		dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
-		conn, dialErr := (&net.Dialer{}).DialContext(dialCtx, "unix", sockPath)
-		cancel()
-		if dialErr == nil {
-			// A live owner answered — back off.
-			conn.Close()
-			return noop, ErrListenerOwned
-		}
-		// Stale socket — remove and retry.
-		if rmErr := os.Remove(sockPath); rmErr != nil && !os.IsNotExist(rmErr) {
-			return noop, fmt.Errorf("hookipc: remove stale socket %s: %w", sockPath, rmErr)
-		}
-		ln, err = net.Listen("unix", sockPath)
-		if err != nil {
-			return noop, fmt.Errorf("hookipc: listen after stale removal %s: %w", sockPath, err)
-		}
+		return noop, err
 	}
 
-	// Restrict the socket to the owner only. Without this, any local user can
-	// connect and inject framed hook JSON when the socket falls back to
-	// os.TempDir() (the macOS default when $XDG_RUNTIME_DIR is unset).
-	if err := os.Chmod(sockPath, 0o600); err != nil {
-		ln.Close()
-		return noop, fmt.Errorf("hookipc: chmod socket %s: %w", sockPath, err)
-	}
-
-	done := make(chan struct{})
-	cleanupOnce := make(chan struct{}, 1)
-	cleanupOnce <- struct{}{}
-
-	doCleanup := func() {
-		select {
-		case <-cleanupOnce:
-			// Signal done BEFORE closing the listener so the accept goroutine
-			// sees the closed channel and skips the "unexpected error" log.
-			close(done)
-			ln.Close()
-			os.Remove(sockPath) //nolint:errcheck // best-effort unlink
-		default:
-		}
-	}
+	cleanup, done := superviseListener(ctx, ln, sockPath)
 
 	go func() {
-		// Stop accepting when ctx is cancelled.
-		go func() {
-			select {
-			case <-ctx.Done():
-				doCleanup()
-			case <-done:
-			}
-		}()
-
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
-				select {
-				case <-done:
-					return // clean shutdown
-				default:
-					logger.Warn("hookipc: accept error", "err", err)
-					return
-				}
+				logAcceptError(err, done, logger)
+				return
 			}
 			// serveConn is called synchronously (not in a goroutine) so that
 			// frames are read and dispatched in the order connections arrive.
@@ -163,7 +109,169 @@ func Listen(ctx context.Context, sockPath string, handler func(raw []byte), logg
 		}
 	}()
 
-	return doCleanup, nil
+	return cleanup, nil
+}
+
+// ListenRPC binds the Unix-domain socket at sockPath and answers each framed
+// request with the framed bytes returned by handler. Bind, stale-socket
+// detection, permissions, and cleanup semantics match Listen. Connections are
+// served concurrently so a slow client cannot block others.
+func ListenRPC(ctx context.Context, sockPath string, handler func(req []byte) []byte, logger *slog.Logger) (cleanup func(), err error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	ln, err := bindSocket(ctx, sockPath)
+	if err != nil {
+		return noop, err
+	}
+
+	cleanup, done := superviseListener(ctx, ln, sockPath)
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				logAcceptError(err, done, logger)
+				return
+			}
+			go serveRPCConn(conn, handler, logger)
+		}
+	}()
+
+	return cleanup, nil
+}
+
+// bindSocket listens on sockPath, replacing a stale socket file and returning
+// ErrListenerOwned when a live instance answers. The socket is restricted to
+// the owner only.
+func bindSocket(ctx context.Context, sockPath string) (net.Listener, error) {
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		if !isAddrInUse(err) {
+			return nil, fmt.Errorf("hookipc: listen %s: %w", sockPath, err)
+		}
+		// EADDRINUSE — check if the existing socket is live or stale.
+		dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+		conn, dialErr := (&net.Dialer{}).DialContext(dialCtx, "unix", sockPath)
+		cancel()
+		if dialErr == nil {
+			// A live owner answered — back off.
+			conn.Close()
+			return nil, ErrListenerOwned
+		}
+		// Stale socket — remove and retry.
+		if rmErr := os.Remove(sockPath); rmErr != nil && !os.IsNotExist(rmErr) {
+			return nil, fmt.Errorf("hookipc: remove stale socket %s: %w", sockPath, rmErr)
+		}
+		ln, err = net.Listen("unix", sockPath)
+		if err != nil {
+			return nil, fmt.Errorf("hookipc: listen after stale removal %s: %w", sockPath, err)
+		}
+	}
+
+	// Restrict the socket to the owner only. Without this, any local user can
+	// connect and inject framed JSON when the socket falls back to
+	// os.TempDir() (the macOS default when $XDG_RUNTIME_DIR is unset).
+	if err := os.Chmod(sockPath, 0o600); err != nil {
+		ln.Close()
+		return nil, fmt.Errorf("hookipc: chmod socket %s: %w", sockPath, err)
+	}
+	return ln, nil
+}
+
+// superviseListener returns a cleanup func that closes ln and unlinks sockPath
+// exactly once, and a channel closed when cleanup has started. Cleanup is also
+// triggered by ctx cancellation.
+func superviseListener(ctx context.Context, ln net.Listener, sockPath string) (cleanup func(), done <-chan struct{}) {
+	doneCh := make(chan struct{})
+	var once sync.Once
+
+	cleanup = func() {
+		once.Do(func() {
+			// Signal done BEFORE closing the listener so the accept goroutine
+			// sees the closed channel and skips the "unexpected error" log.
+			close(doneCh)
+			ln.Close()
+			os.Remove(sockPath) //nolint:errcheck // best-effort unlink
+		})
+	}
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			cleanup()
+		case <-doneCh:
+		}
+	}()
+
+	return cleanup, doneCh
+}
+
+func logAcceptError(err error, done <-chan struct{}, logger *slog.Logger) {
+	select {
+	case <-done:
+	default:
+		logger.Warn("hookipc: accept error", "err", err)
+	}
+}
+
+// serveRPCConn reads one request frame, writes the handler's reply frame, and
+// closes conn.
+func serveRPCConn(conn net.Conn, handler func(req []byte) []byte, logger *slog.Logger) {
+	defer conn.Close()
+
+	if err := conn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+		logger.Warn("hookipc: set read deadline", "err", err)
+		return
+	}
+	req, err := ReadFrame(conn)
+	if err != nil {
+		if !errors.Is(err, io.EOF) {
+			logger.Warn("hookipc: read frame", "err", err)
+		}
+		return
+	}
+
+	reply := handler(req)
+
+	if err := conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+		logger.Warn("hookipc: set write deadline", "err", err)
+		return
+	}
+	if err := WriteFrame(conn, reply); err != nil {
+		logger.Warn("hookipc: write reply", "err", err)
+	}
+}
+
+// Call sends req as one frame to the RPC listener at sockPath and returns the
+// reply frame. A dial failure wraps ErrListenerUnavailable.
+func Call(ctx context.Context, sockPath string, req []byte) ([]byte, error) {
+	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
+
+	var d net.Dialer
+	conn, err := d.DialContext(dialCtx, "unix", sockPath)
+	if err != nil {
+		return nil, fmt.Errorf("hookipc: dial %s: %w: %w", sockPath, ErrListenerUnavailable, err)
+	}
+	defer conn.Close()
+
+	if err := conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+		return nil, fmt.Errorf("hookipc: set write deadline: %w", err)
+	}
+	if err := WriteFrame(conn, req); err != nil {
+		return nil, fmt.Errorf("hookipc: write frame: %w", err)
+	}
+
+	if err := conn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+		return nil, fmt.Errorf("hookipc: set read deadline: %w", err)
+	}
+	reply, err := ReadFrame(conn)
+	if err != nil {
+		return nil, fmt.Errorf("hookipc: read reply: %w", err)
+	}
+	return reply, nil
 }
 
 // serveConn reads a single framed message from conn and calls handler.
