@@ -5,14 +5,18 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"runtime/debug"
+	"strings"
 
+	"github.com/guilhermehto/cogitator/internal/agentfeed"
 	"github.com/guilhermehto/cogitator/internal/claudecode"
 	"github.com/guilhermehto/cogitator/internal/codex"
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/logging"
 	"github.com/guilhermehto/cogitator/internal/omp"
+	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 	"github.com/guilhermehto/cogitator/internal/ui"
 )
 
@@ -81,6 +85,16 @@ func main() {
 		return
 	}
 
+	if len(os.Args) > 1 && os.Args[1] == "pick" {
+		runPickCommand(os.Args[2:])
+		return
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "next" {
+		runNextCommand(os.Args[2:])
+		return
+	}
+
 	bell := flag.Bool("bell", false, "ring terminal bell on transitions into attention states")
 	status := flag.Bool("status", false, "print a one-shot icons-only attention summary and exit")
 	demo := flag.Bool("demo", false, "run the TUI with a curated synthetic snapshot (for screenshots); no mDNS, no shell-outs")
@@ -125,6 +139,76 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// runPickCommand shows the agent picker. A missing --client is resolved from
+// tmux, so the popup can omit it.
+func runPickCommand(args []string) {
+	flags := flag.NewFlagSet("pick", flag.ExitOnError)
+	client := flags.String("client", "", "tmux client to jump (default: the invoking client)")
+	flags.Parse(args)
+
+	logger, closer := setupSubcommandLogger("pick")
+	defer closer()
+
+	if *client == "" {
+		*client = tmuxDisplayValue("#{client_name}")
+	}
+
+	if err := ui.RunPick(config.Default(), logger, *client); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+// runNextCommand jumps to the next agent needing attention. It always exits 0
+// and prints nothing after flag parsing: run-shell would overlay any output.
+func runNextCommand(args []string) {
+	flags := flag.NewFlagSet("next", flag.ExitOnError)
+	client := flags.String("client", "", "tmux client to jump (default: the invoking client)")
+	windowID := flags.String("window", "", "tmux window id the client is looking at (default: current)")
+	sessionID := flags.String("session", "", "tmux session id the client is looking at (default: current)")
+	flags.Parse(args)
+
+	logger, closer := setupSubcommandLogger("next")
+	defer closer()
+
+	if *client == "" {
+		*client = tmuxDisplayValue("#{client_name}")
+	}
+	if *windowID == "" {
+		*windowID = tmuxDisplayValue("#{window_id}")
+	}
+	if *sessionID == "" {
+		*sessionID = tmuxDisplayValue("#{session_id}")
+	}
+
+	if err := agentfeed.RunNext(context.Background(), *client, *windowID, *sessionID, logger); err != nil {
+		logger.Error("next failed", "err", err)
+	}
+}
+
+// setupSubcommandLogger logs to the cogitator log file; a failure to open it
+// must not surface in a popup or run-shell overlay, so it falls back to the
+// default logger.
+func setupSubcommandLogger(name string) (*slog.Logger, func()) {
+	logger, closer, _, err := logging.Setup("info")
+	if err != nil {
+		return slog.Default(), func() {}
+	}
+
+	logger.Info("running subcommand", "name", name)
+
+	return logger, func() { closer.Close() }
+}
+
+func tmuxDisplayValue(format string) string {
+	out, err := tmuxctl.DefaultRunner.Run("display-message", "-p", format)
+	if err != nil {
+		return ""
+	}
+
+	return strings.TrimSpace(out)
 }
 
 func versionLine() string {
