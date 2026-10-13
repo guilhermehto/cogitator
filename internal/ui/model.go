@@ -3017,7 +3017,7 @@ func (m model) switchToAgent(id string) (tea.Model, tea.Cmd) {
 
 	m.agentsList.cursorID = agent.ID
 	cmd := m.focusAgent(agent, "")
-	return m, cmd
+	return m, tea.Batch(cmd, m.syncAgentPreview())
 }
 
 // orderedSessionCandidates returns sessionSwitchCandidates ordered
