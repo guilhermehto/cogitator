@@ -1,4 +1,6 @@
+mod app;
 mod feed;
+mod render;
 
 use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
