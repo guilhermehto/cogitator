@@ -425,6 +425,156 @@ func TestInstallRejectsGoRunBinary(t *testing.T) {
 	}
 }
 
+func writePlugin(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	wasm := filepath.Join(dir, "cogitator-zellij.wasm")
+	writeFile(t, wasm, "\x00asm", 0o644)
+
+	resolved, err := filepath.EvalSymlinks(wasm)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return resolved
+}
+
+func TestInstallBindsPluginToSidebarKey(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+	wasm := writePlugin(t)
+	link := filepath.Join(t.TempDir(), "plugin.wasm")
+	if err := os.Symlink(wasm, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := env.installer.Install(Options{Plugin: link}); err != nil {
+		t.Fatal(err)
+	}
+
+	content := readFile(t, env.conf)
+	want := `        bind "s" { LaunchOrFocusPlugin "file:` + wasm + `" { floating true; move_to_focused_tab true; cogitator "/opt/bin/cogitator"; }; SwitchToMode "locked"; }` + "\n    }\n    " + endMarker
+	if !strings.Contains(content, want) {
+		t.Fatalf("missing %q in:\n%s", want, content)
+	}
+	if !strings.Contains(env.out.String(), "sidebar s") {
+		t.Fatalf("summary does not mention the sidebar key: %q", env.out.String())
+	}
+}
+
+func TestInstallWithoutPluginKeepsBlockUnchanged(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+
+	if err := env.installer.Install(Options{SidebarKey: "a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := "keybinds clear-defaults=true {\n" +
+		"    " + beginLine + "\n" +
+		`    shared_among "normal" {` + "\n" +
+		`        bind "Space" { Run "/opt/bin/cogitator" "next" { floating true; close_on_exit true; }; SwitchToMode "locked"; }` + "\n" +
+		`        bind "a" { Run "/opt/bin/cogitator" "pick" { floating true; close_on_exit true; width "70%"; height "60%"; x "15%"; y "20%"; }; SwitchToMode "locked"; }` + "\n" +
+		"    }\n" +
+		"    " + endMarker + "\n" +
+		"    locked {\n"
+	content := readFile(t, env.conf)
+	if !strings.Contains(content, want) {
+		t.Fatalf("block changed without --plugin:\n%s", content)
+	}
+	if strings.Contains(content, "LaunchOrFocusPlugin \"file:") || strings.Contains(env.out.String(), "sidebar") {
+		t.Fatalf("plugin bound without --plugin:\n%s\n%s", content, env.out.String())
+	}
+}
+
+func TestInstallRejectsMissingPluginWithoutWriting(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+
+	cases := []struct {
+		name   string
+		plugin string
+	}{
+		{"missing file", filepath.Join(t.TempDir(), "absent.wasm")},
+		{"directory", t.TempDir()},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := env.installer.Install(Options{Plugin: tc.plugin}); err == nil {
+				t.Fatal("expected the plugin path to be rejected")
+			}
+			if got := readFile(t, env.conf); got != userShapedConfig {
+				t.Fatalf("config written despite the error:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestInstallRejectsSidebarKeyCollidingWithNextOrPick(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+	wasm := writePlugin(t)
+
+	cases := []struct {
+		name string
+		opts Options
+	}{
+		{"next key", Options{Plugin: wasm, SidebarKey: DefaultNextKey}},
+		{"pick key", Options{Plugin: wasm, SidebarKey: DefaultPickKey}},
+		{"custom pick key", Options{Plugin: wasm, PickKey: "s"}},
+		{"invalid key", Options{Plugin: wasm, SidebarKey: `s" { Quit; }`}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := env.installer.Install(tc.opts); err == nil {
+				t.Fatal("expected the sidebar key to be rejected")
+			}
+			if got := readFile(t, env.conf); got != userShapedConfig {
+				t.Fatalf("config written despite the error:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestInstallWithPluginTwiceReplacesBlock(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+	wasm := writePlugin(t)
+
+	if err := env.installer.Install(Options{Plugin: wasm}); err != nil {
+		t.Fatal(err)
+	}
+	first := readFile(t, env.conf)
+
+	if err := env.installer.Install(Options{Plugin: wasm}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, env.conf); got != first {
+		t.Fatalf("second install changed the file:\n%s", got)
+	}
+
+	if err := env.installer.Install(Options{Plugin: wasm, SidebarKey: "S"}); err != nil {
+		t.Fatal(err)
+	}
+	content := readFile(t, env.conf)
+	if got := strings.Count(content, beginMarker); got != 1 {
+		t.Fatalf("want 1 owned block, got %d in:\n%s", got, content)
+	}
+	if got := strings.Count(content, "LaunchOrFocusPlugin \"file:"); got != 1 || !strings.Contains(content, `bind "S" { LaunchOrFocusPlugin`) {
+		t.Fatalf("re-install did not replace the plugin bind:\n%s", content)
+	}
+
+	if err := env.installer.Install(Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, env.conf); strings.Contains(got, "LaunchOrFocusPlugin \"file:") {
+		t.Fatalf("install without --plugin kept the plugin bind:\n%s", got)
+	}
+}
+
 func TestConfigLookupOrder(t *testing.T) {
 	home := "/home/u"
 	cases := []struct {

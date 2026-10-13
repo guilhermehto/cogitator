@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -21,8 +22,9 @@ import (
 )
 
 const (
-	DefaultNextKey = "Space"
-	DefaultPickKey = "a"
+	DefaultNextKey    = "Space"
+	DefaultPickKey    = "a"
+	DefaultSidebarKey = "s"
 
 	beginMarker = "// BEGIN cogitator"
 	endMarker   = "// END cogitator"
@@ -51,16 +53,20 @@ var (
 )
 
 type bindSpec struct {
-	binary  string
-	nextKey string
-	pickKey string
-	mode    bindMode
+	binary     string
+	nextKey    string
+	pickKey    string
+	plugin     string
+	sidebarKey string
+	mode       bindMode
 }
 
 // Options are the user-facing flags shared by Install and Uninstall.
 type Options struct {
 	NextKey    string
 	PickKey    string
+	Plugin     string
+	SidebarKey string
 	ConfigPath string
 	Binary     string
 	DryRun     bool
@@ -80,17 +86,13 @@ type Installer struct {
 // Install writes (or replaces) the owned keybinds block in the user's
 // config.kdl. zellij hot-reloads the file, so running sessions pick it up.
 func (i Installer) Install(opts Options) error {
-	if opts.NextKey == "" {
-		opts.NextKey = DefaultNextKey
-	}
-	if opts.PickKey == "" {
-		opts.PickKey = DefaultPickKey
+	if err := normalizeKeys(&opts); err != nil {
+		return err
 	}
 
-	for _, key := range []string{opts.NextKey, opts.PickKey} {
-		if err := validateKey(key); err != nil {
-			return err
-		}
+	plugin, err := resolvePlugin(opts.Plugin)
+	if err != nil {
+		return err
 	}
 
 	binary, err := installkit.ResolveBinary(opts.Binary, i.LookPath, i.Executable)
@@ -113,7 +115,7 @@ func (i Installer) Install(opts Options) error {
 		return fmt.Errorf("%s: %w", confPath, err)
 	}
 
-	spec := bindSpec{binary: binary, nextKey: opts.NextKey, pickKey: opts.PickKey}
+	spec := bindSpec{binary: binary, nextKey: opts.NextKey, pickKey: opts.PickKey, plugin: plugin, sidebarKey: opts.SidebarKey}
 	updated, block, err := withOwnedBlock(stripped, &spec)
 	if err != nil {
 		return fmt.Errorf("%s: %w", confPath, err)
@@ -137,7 +139,11 @@ func (i Installer) Install(opts Options) error {
 	if hadBlock {
 		verb = "updated"
 	}
-	fmt.Fprintf(i.Out, "%s cogitator keybinds in %s (mode: %s → returns to %s; next %s, pick %s)\n", verb, confPath, spec.mode.name, spec.mode.returnTo, opts.NextKey, opts.PickKey)
+	sidebar := ""
+	if plugin != "" {
+		sidebar = ", sidebar " + opts.SidebarKey
+	}
+	fmt.Fprintf(i.Out, "%s cogitator keybinds in %s (mode: %s → returns to %s; next %s, pick %s%s)\n", verb, confPath, spec.mode.name, spec.mode.returnTo, opts.NextKey, opts.PickKey, sidebar)
 
 	return nil
 }
@@ -189,6 +195,65 @@ func (i Installer) configPath(explicit string) string {
 	default:
 		return filepath.Join(i.Home, ".config", "zellij", "config.kdl")
 	}
+}
+
+// normalizeKeys fills in default keys and validates them; the sidebar key
+// only matters when a plugin is bound.
+func normalizeKeys(opts *Options) error {
+	if opts.NextKey == "" {
+		opts.NextKey = DefaultNextKey
+	}
+	if opts.PickKey == "" {
+		opts.PickKey = DefaultPickKey
+	}
+
+	keys := []string{opts.NextKey, opts.PickKey}
+	if opts.Plugin != "" {
+		if opts.SidebarKey == "" {
+			opts.SidebarKey = DefaultSidebarKey
+		}
+		keys = append(keys, opts.SidebarKey)
+	}
+
+	for _, key := range keys {
+		if err := validateKey(key); err != nil {
+			return err
+		}
+	}
+
+	if opts.Plugin != "" && (opts.SidebarKey == opts.NextKey || opts.SidebarKey == opts.PickKey) {
+		return fmt.Errorf("sidebar key %q collides with the next/pick keys", opts.SidebarKey)
+	}
+
+	return nil
+}
+
+// resolvePlugin returns the absolute, symlink-resolved wasm path, or "" when
+// no plugin was requested.
+func resolvePlugin(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("plugin %s: %w", path, err)
+	}
+
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("plugin %s: %w", path, err)
+	}
+
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("plugin %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("plugin %s is not a regular file", path)
+	}
+
+	return resolved, nil
 }
 
 func validateKey(key string) error {
@@ -383,9 +448,15 @@ func bindings(indent string, spec bindSpec) string {
 	inner := indent + indentUnit
 	back := "SwitchToMode " + kdlQuote(spec.mode.returnTo) + "; }"
 
+	sidebar := ""
+	if spec.plugin != "" {
+		sidebar = inner + "bind " + kdlQuote(spec.sidebarKey) + " { LaunchOrFocusPlugin " + kdlQuote("file:"+spec.plugin) + " { floating true; move_to_focused_tab true; cogitator " + bin + "; }; " + back + "\n"
+	}
+
 	return indent + "shared_among " + kdlQuote(spec.mode.name) + " {\n" +
 		inner + "bind " + kdlQuote(spec.nextKey) + " { Run " + bin + ` "next" { floating true; close_on_exit true; }; ` + back + "\n" +
 		inner + "bind " + kdlQuote(spec.pickKey) + " { Run " + bin + ` "pick" { floating true; close_on_exit true; width "70%"; height "60%"; x "15%"; y "20%"; }; ` + back + "\n" +
+		sidebar +
 		indent + "}\n"
 }
 
