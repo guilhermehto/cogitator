@@ -76,6 +76,7 @@ impl ZellijPlugin for State {
                     return false;
                 }
                 self.granted = true;
+                rename_plugin_pane(self.plugin_id, "cogitator");
                 self.list();
                 set_timeout(self.refresh_secs);
                 false

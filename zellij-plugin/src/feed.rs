@@ -36,6 +36,7 @@ pub struct Agent {
     pub harness: String,
     pub title: String,
     pub attention: String,
+    pub state: String,
     pub group: Group,
     pub last_activity: String,
     pub mux_session: String,
@@ -43,28 +44,9 @@ pub struct Agent {
     pub pane_id: String,
 }
 
-impl Agent {
-    pub fn label(&self) -> String {
-        if self.kind == "worktree" && !self.repo.is_empty() && !self.branch.is_empty() {
-            return format!("{}/{}", self.repo, self.branch);
-        }
-        if self.kind == "workspace" && !self.workspace.is_empty() && !self.session_name.is_empty() {
-            return format!("{}/{}", self.workspace, self.session_name);
-        }
-        if !self.title.is_empty() {
-            return self.title.clone();
-        }
-        self.id
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap_or_default()
-            .to_string()
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Feed {
+    pub home: String,
     pub agents: Vec<Agent>,
 }
 
@@ -87,6 +69,8 @@ impl fmt::Display for ParseError {
 struct Wire {
     version: u64,
     #[serde(default)]
+    home: String,
+    #[serde(default)]
     agents: Vec<Agent>,
 }
 
@@ -96,6 +80,7 @@ pub fn parse(input: &str) -> Result<Feed, ParseError> {
         return Err(ParseError::UnsupportedVersion(wire.version));
     }
     Ok(Feed {
+        home: wire.home,
         agents: wire.agents,
     })
 }
@@ -106,8 +91,9 @@ mod tests {
 
     #[test]
     fn parses_full_agent() {
-        let input = r#"{"version":1,"agents":[{"id":"/a/b","kind":"worktree","repo":"r","branch":"br","workspace":"w","session_name":"s","harness":"omp","title":"t","attention":"question","group":"needs_you","last_activity":"2026-01-01T00:00:00Z","mux_session":"m","window_id":"1","pane_id":"2","extra":"x"}]}"#;
+        let input = r#"{"version":1,"home":"/h","agents":[{"id":"/a/b","kind":"worktree","repo":"r","branch":"br","workspace":"w","session_name":"s","harness":"omp","title":"t","attention":"question","state":"running","group":"needs_you","last_activity":"2026-01-01T00:00:00Z","mux_session":"m","window_id":"1","pane_id":"2","extra":"x"}]}"#;
         let feed = parse(input).unwrap();
+        assert_eq!(feed.home, "/h");
         assert_eq!(
             feed.agents,
             vec![Agent {
@@ -120,6 +106,7 @@ mod tests {
                 harness: "omp".into(),
                 title: "t".into(),
                 attention: "question".into(),
+                state: "running".into(),
                 group: Group::NeedsYou,
                 last_activity: "2026-01-01T00:00:00Z".into(),
                 mux_session: "m".into(),
@@ -176,48 +163,5 @@ mod tests {
                 Group::Stopped
             ]
         );
-    }
-
-    fn agent(kind: &str) -> Agent {
-        Agent {
-            id: "/home/me/proj".into(),
-            kind: kind.into(),
-            ..Agent::default()
-        }
-    }
-
-    #[test]
-    fn label_uses_repo_branch_for_worktree() {
-        let a = Agent {
-            repo: "r".into(),
-            branch: "b".into(),
-            ..agent("worktree")
-        };
-        assert_eq!(a.label(), "r/b");
-    }
-
-    #[test]
-    fn label_uses_workspace_session_for_workspace() {
-        let a = Agent {
-            workspace: "w".into(),
-            session_name: "s".into(),
-            ..agent("workspace")
-        };
-        assert_eq!(a.label(), "w/s");
-    }
-
-    #[test]
-    fn label_falls_back_to_title_when_parts_missing() {
-        let a = Agent {
-            repo: "r".into(),
-            title: "T".into(),
-            ..agent("worktree")
-        };
-        assert_eq!(a.label(), "T");
-    }
-
-    #[test]
-    fn label_falls_back_to_last_path_component() {
-        assert_eq!(agent("stray").label(), "proj");
     }
 }

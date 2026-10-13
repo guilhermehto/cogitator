@@ -1,74 +1,180 @@
 use crate::app::{App, Status, GROUP_ORDER};
 use crate::feed::{Agent, Group};
 
+// Glyphs, colours and widths mirror the TUI's Agents tab (internal/ui) so
+// both surfaces read the same.
+const GLYPH_ACTIVE: &str = "\u{f0765}";
+const GLYPH_INACTIVE: &str = "\u{f0766}";
+const GLYPH_QUESTION: &str = "\u{f0625}";
+const GLYPH_PERMISSION: &str = "\u{f033e}";
+const GLYPH_ERROR: &str = "\u{f0026}";
+const GLYPH_FINISHED: &str = "\u{f012c}";
+const GLYPH_MISSING: &str = "\u{f0e7a}";
+
+const HARNESS_WIDTH: usize = 11;
+const DETAIL_MIN_WIDTH: usize = 80;
+const SELECTED_BG: u8 = 237;
+
+const HARNESS_PALETTE: [u8; 22] = [
+    33, 39, 45, 51, 75, 81, 99, 105, 111, 117, 135, 141, 147, 153, 165, 171, 177, 183, 203, 207,
+    213, 219,
+];
+
+const HINTS: [(&str, &str); 3] = [("enter", "jump"), ("r", "refresh"), ("q", "hide")];
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Style {
+    fg: Option<u8>,
+    bold: bool,
+    italic: bool,
+}
+
+impl Style {
+    const fn fg(colour: u8) -> Self {
+        Style {
+            fg: Some(colour),
+            bold: false,
+            italic: false,
+        }
+    }
+
+    const fn bold(self) -> Self {
+        Style { bold: true, ..self }
+    }
+
+    const fn italic(self) -> Self {
+        Style {
+            italic: true,
+            ..self
+        }
+    }
+}
+
+const PLAIN: Style = Style {
+    fg: None,
+    bold: false,
+    italic: false,
+};
+const DIM: Style = Style::fg(240);
+const HEADER: Style = Style::fg(244).bold();
+const RECENT: Style = Style::fg(244).italic();
+const REPO: Style = Style::fg(63);
+const PATH: Style = Style::fg(240).italic();
+const HINT: Style = Style::fg(214).italic();
+const HINT_KEY: Style = Style::fg(111).bold();
+const ERROR: Style = Style::fg(196);
+const PERMISSION: Style = Style::fg(214).bold();
+const QUESTION: Style = Style::fg(226).bold();
+const ERRORED: Style = Style::fg(196).bold();
+const FINISHED: Style = Style::fg(51).bold();
+const INACTIVE: Style = Style::fg(244);
+const ACTIVE: Style = Style::fg(82);
+const MISSING: Style = Style::fg(196).italic();
+const UNKNOWN: Style = Style::fg(226);
+
+struct Span {
+    text: String,
+    style: Style,
+}
+
+fn span(text: impl Into<String>, style: Style) -> Span {
+    Span {
+        text: text.into(),
+        style,
+    }
+}
+
+type Line = Vec<Span>;
+
 pub fn render(app: &App, rows: usize, cols: usize, now_unix_secs: i64) -> Vec<String> {
     if rows == 0 {
         return Vec::new();
     }
 
-    let Some(notice) = app.notice() else {
+    let bottom = match app.notice() {
+        Some(notice) => Some(vec![span(notice, HINT)]),
+        None if rows > 2 => Some(footer()),
+        None => None,
+    };
+    let Some(bottom) = bottom else {
         return render_body(app, rows, cols, now_unix_secs);
     };
 
     let mut lines = render_body(app, rows - 1, cols, now_unix_secs);
     lines.resize(rows - 1, String::new());
-    lines.push(truncate(notice, cols));
+    lines.push(paint(&truncate(bottom, cols), None));
     lines
 }
 
-fn render_body(app: &App, rows: usize, cols: usize, now_unix_secs: i64) -> Vec<String> {
+fn footer() -> Line {
+    let mut line = Vec::new();
+    for (i, (key, desc)) in HINTS.iter().enumerate() {
+        if i > 0 {
+            line.push(span("   ", PLAIN));
+        }
+        line.push(span(*key, HINT_KEY));
+        line.push(span(format!(" {desc}"), DIM));
+    }
+    line
+}
+
+fn render_body(app: &App, rows: usize, cols: usize, now: i64) -> Vec<String> {
     if rows == 0 {
         return Vec::new();
     }
 
-    let lines = match app.status() {
-        Status::Ready => return render_list(app, rows, cols, now_unix_secs),
-        Status::Loading => "loading…".to_string(),
-        Status::NotRunning(_) => "cogitator is not running — start it inside zellij".to_string(),
-        Status::PermissionDenied => "permission denied — grant the plugin permissions".to_string(),
-        Status::Failed(msg) => msg.clone(),
+    let status = match app.status() {
+        Status::Ready => return render_list(app, rows, cols, now),
+        Status::Loading => span("loading…", DIM),
+        Status::NotRunning(_) => span("cogitator is not running — start it inside zellij", HINT),
+        Status::PermissionDenied => span("permission denied — grant the plugin permissions", HINT),
+        Status::Failed(msg) => span(msg.clone(), ERROR),
     };
-    vec![truncate(&lines, cols)]
+    vec![paint(&truncate(vec![status], cols), None)]
 }
 
 fn render_list(app: &App, rows: usize, cols: usize, now: i64) -> Vec<String> {
     let agents = app.agents();
     if agents.is_empty() {
-        return vec![truncate("no agents", cols)];
+        return vec![paint(
+            &truncate(vec![span("no agents in flight", DIM)], cols),
+            None,
+        )];
     }
 
     let selected = app.selected_index();
     let mut lines = Vec::new();
     let mut selected_line = 0;
     for group in GROUP_ORDER {
-        let mut members = agents
+        let members: Vec<(usize, &Agent)> = agents
             .iter()
             .enumerate()
             .filter(|(_, a)| a.group == group)
-            .peekable();
-        if members.peek().is_none() {
+            .collect();
+        if members.is_empty() {
             continue;
         }
 
-        lines.push(group_title(group).to_string());
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(paint(
+            &truncate(group_header(group, members.len()), cols),
+            None,
+        ));
         for (i, agent) in members {
             let is_selected = selected == Some(i);
             if is_selected {
                 selected_line = lines.len();
             }
-            lines.push(agent_row(agent, is_selected, now));
+            lines.push(agent_row(agent, is_selected, cols, now, app.home()));
         }
     }
 
     let offset = scroll_offset(app.scroll.get(), selected_line, rows, lines.len());
     app.scroll.set(offset);
 
-    lines
-        .iter()
-        .skip(offset)
-        .take(rows)
-        .map(|l| truncate(l, cols))
-        .collect()
+    lines.into_iter().skip(offset).take(rows).collect()
 }
 
 fn scroll_offset(current: usize, selected_line: usize, rows: usize, total: usize) -> usize {
@@ -82,42 +188,204 @@ fn scroll_offset(current: usize, selected_line: usize, rows: usize, total: usize
     offset
 }
 
-fn group_title(group: Group) -> &'static str {
-    match group {
-        Group::NeedsYou => "Needs you",
-        Group::Done => "Done",
-        Group::Working => "Working",
-        Group::Idle => "Idle",
-        Group::Stopped => "Stopped",
-    }
+fn group_header(group: Group, count: usize) -> Line {
+    let (title, style) = match group {
+        Group::NeedsYou => ("Needs you", PERMISSION),
+        Group::Done => ("Done", FINISHED),
+        Group::Working => ("Working", ACTIVE.bold()),
+        Group::Idle => ("Idle", HEADER),
+        Group::Stopped => ("Stopped", HEADER),
+    };
+    vec![span(title, style), span(format!(" · {count}"), DIM)]
 }
 
-fn glyph(attention: &str) -> &'static str {
+// agent_row lays out status, name and (when wide enough) the muted session
+// title on the left, harness and age on the right, as the TUI does.
+fn agent_row(agent: &Agent, selected: bool, cols: usize, now: i64, home: &str) -> String {
+    let age = parse_rfc3339(&agent.last_activity)
+        .map(|ts| relative_time(now - ts))
+        .unwrap_or_default();
+
+    let mut left = vec![status_cell(agent)];
+    left.extend(styled_name(agent, home));
+    let mut right = vec![span(age.clone(), DIM)];
+
+    if cols >= DETAIL_MIN_WIDTH {
+        if !agent.title.is_empty() {
+            left.push(span("  ", PLAIN));
+            left.push(span(agent.title.clone(), PATH));
+        }
+        let harness = vec![span(agent.harness.clone(), harness_style(&agent.harness))];
+        right = pad(truncate(harness, HARNESS_WIDTH), HARNESS_WIDTH);
+        right.push(span(format!(" {age:>4}"), DIM));
+    }
+
+    let gap = cols.saturating_sub(width(&right) + 2);
+    let mut row = pad(truncate(left, gap), gap);
+    row.push(span("  ", PLAIN));
+    row.extend(right);
+
+    let bg = if selected { Some(SELECTED_BG) } else { None };
+    paint(&truncate(row, cols), bg)
+}
+
+fn status_cell(agent: &Agent) -> Span {
+    let (glyph, style) = match agent.state.as_str() {
+        "running" => attention_glyph(&agent.attention),
+        "stopped" => (GLYPH_INACTIVE, DIM),
+        "missing" => (GLYPH_MISSING, MISSING),
+        "unknown" => ("?", UNKNOWN),
+        _ => ("·", DIM),
+    };
+    span(format!("{glyph} "), style)
+}
+
+fn attention_glyph(attention: &str) -> (&'static str, Style) {
     match attention {
-        "permission" | "question" => "?",
-        "errored" => "!",
-        "finished" => "✓",
-        "active" => "●",
-        _ => "·",
+        "permission" => (GLYPH_PERMISSION, PERMISSION),
+        "question" => (GLYPH_QUESTION, QUESTION),
+        "errored" => (GLYPH_ERROR, ERRORED),
+        "finished" => (GLYPH_FINISHED, FINISHED),
+        "inactive" => (GLYPH_INACTIVE, INACTIVE),
+        _ => (GLYPH_ACTIVE, ACTIVE),
     }
 }
 
-fn agent_row(agent: &Agent, selected: bool, now: i64) -> String {
-    let marker = if selected { "> " } else { "  " };
-    let mut row = format!("{marker}{} {}", glyph(&agent.attention), agent.label());
-    if !agent.harness.is_empty() {
-        row.push(' ');
-        row.push_str(&agent.harness);
+// styled_name mutes the repo or workspace so the branch or session reads
+// first; stopped agents are dimmed.
+fn styled_name(agent: &Agent, home: &str) -> Line {
+    let lead = if agent.state == "stopped" { DIM } else { PLAIN };
+
+    match agent.kind.as_str() {
+        "workspace" => vec![
+            span(agent.workspace.clone(), REPO),
+            span("/", DIM),
+            span(agent.session_name.clone(), lead),
+        ],
+        "stray" => vec![
+            span(abbreviate_home(&agent.id, home), lead),
+            span(" ", PLAIN),
+            span("stray", RECENT),
+        ],
+        _ if agent.branch.is_empty() => vec![span(abbreviate_home(&agent.id, home), lead)],
+        _ => vec![
+            span(base_name(&agent.repo), REPO),
+            span("·", DIM),
+            span(agent.branch.clone(), lead),
+        ],
     }
-    if let Some(ts) = parse_rfc3339(&agent.last_activity) {
-        row.push(' ');
-        row.push_str(&relative_time(now - ts));
-    }
-    row
 }
 
-fn truncate(line: &str, cols: usize) -> String {
-    line.chars().take(cols).collect()
+fn base_name(path: &str) -> String {
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn abbreviate_home(dir: &str, home: &str) -> String {
+    if home.is_empty() {
+        return dir.to_string();
+    }
+    if dir == home {
+        return "~".to_string();
+    }
+
+    match dir
+        .strip_prefix(home)
+        .and_then(|rest| rest.strip_prefix('/'))
+    {
+        Some(rest) => format!("~/{rest}"),
+        None => dir.to_string(),
+    }
+}
+
+fn harness_style(harness: &str) -> Style {
+    if harness.is_empty() {
+        return Style::fg(141).italic();
+    }
+
+    let index = fnv1a32(harness) as usize % HARNESS_PALETTE.len();
+    Style::fg(HARNESS_PALETTE[index]).italic()
+}
+
+fn fnv1a32(s: &str) -> u32 {
+    s.bytes().fold(0x811c_9dc5, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    })
+}
+
+fn width(line: &[Span]) -> usize {
+    line.iter().map(|s| s.text.chars().count()).sum()
+}
+
+// truncate cuts line to cols display cells, ending in "…" when anything was
+// dropped. Cells are counted as chars, which holds for the glyphs used here.
+fn truncate(line: Line, cols: usize) -> Line {
+    if width(&line) <= cols {
+        return line;
+    }
+    if cols == 0 {
+        return Vec::new();
+    }
+
+    let mut budget = cols - 1;
+    let mut out = Vec::new();
+    let mut tail_style = PLAIN;
+    for s in line {
+        tail_style = s.style;
+        let kept: String = s.text.chars().take(budget).collect();
+        budget -= kept.chars().count();
+        out.push(span(kept, s.style));
+        if budget == 0 {
+            break;
+        }
+    }
+    out.push(span("…", tail_style));
+    out
+}
+
+fn pad(mut line: Line, cols: usize) -> Line {
+    let missing = cols.saturating_sub(width(&line));
+    if missing > 0 {
+        line.push(span(" ".repeat(missing), PLAIN));
+    }
+    line
+}
+
+fn paint(line: &[Span], bg: Option<u8>) -> String {
+    let mut out = String::new();
+    for s in line {
+        if s.text.is_empty() {
+            continue;
+        }
+
+        let codes = sgr_codes(s.style, bg);
+        if codes.is_empty() {
+            out.push_str(&s.text);
+        } else {
+            out.push_str(&format!("\x1b[{}m{}\x1b[0m", codes.join(";"), s.text));
+        }
+    }
+    out
+}
+
+fn sgr_codes(style: Style, bg: Option<u8>) -> Vec<String> {
+    let mut codes = Vec::new();
+    if style.bold {
+        codes.push("1".to_string());
+    }
+    if style.italic {
+        codes.push("3".to_string());
+    }
+    if let Some(fg) = style.fg {
+        codes.push(format!("38;5;{fg}"));
+    }
+    if let Some(bg) = bg {
+        codes.push(format!("48;5;{bg}"));
+    }
+    codes
 }
 
 pub fn relative_time(elapsed_secs: i64) -> String {
@@ -127,10 +395,7 @@ pub fn relative_time(elapsed_secs: i64) -> String {
     if elapsed_secs < 3600 {
         return format!("{}m", elapsed_secs / 60);
     }
-    if elapsed_secs < 86400 {
-        return format!("{}h", elapsed_secs / 3600);
-    }
-    format!("{}d", elapsed_secs / 86400)
+    format!("{}h", elapsed_secs / 3600)
 }
 
 pub fn parse_rfc3339(s: &str) -> Option<i64> {
@@ -220,65 +485,167 @@ mod tests {
         app_from(&crate::app::tests::feed_json(agents))
     }
 
+    fn one_agent(fields: &str) -> App {
+        app_from(&format!(
+            r#"{{"version":1,"home":"/Users/me","agents":[{{"id":"/Users/me/p",{fields}}}]}}"#
+        ))
+    }
+
+    fn plain(line: &str) -> String {
+        let mut out = String::new();
+        let mut chars = line.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for c in chars.by_ref() {
+                    if c == 'm' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            out.push(c);
+        }
+        out
+    }
+
+    fn plain_lines(lines: &[String]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| plain(l).trim_end().to_string())
+            .collect()
+    }
+
+    fn row_colours(app: &App, cols: usize) -> String {
+        render(app, 5, cols, NOW)[1].replace(";48;5;237", "")
+    }
+
     #[test]
-    fn groups_render_in_order_with_headers() {
+    fn groups_render_in_order_with_counts_and_gaps() {
         let app = simple_app(&[
             ("/x/stopped", "stopped"),
             ("/x/idle", "idle"),
             ("/x/needs", "needs_you"),
             ("/x/done", "done"),
         ]);
-        let lines = render(&app, 20, 80, NOW);
+        let lines = plain_lines(&render(&app, 20, 40, NOW));
         assert_eq!(
-            lines,
-            vec![
-                "Needs you",
-                "> · needs",
-                "Done",
-                "  · done",
-                "Idle",
-                "  · idle",
-                "Stopped",
-                "  · stopped",
+            lines[..11],
+            [
+                "Needs you · 1",
+                "· /x/needs",
+                "",
+                "Done · 1",
+                "· /x/done",
+                "",
+                "Idle · 1",
+                "· /x/idle",
+                "",
+                "Stopped · 1",
+                "· /x/stopped",
             ]
         );
     }
 
     #[test]
-    fn row_shows_glyph_label_harness_and_age() {
-        let app = app_from(
-            r#"{"version":1,"agents":[{"id":"/p","kind":"worktree","repo":"r","branch":"b","harness":"omp","attention":"errored","group":"needs_you","last_activity":"2025-12-31T23:55:00Z"}]}"#,
+    fn worktree_row_shows_repo_folder_and_branch() {
+        let app = one_agent(
+            r#""kind":"worktree","repo":"/Users/me/.dotfiles","branch":"main","group":"idle""#,
         );
-        assert_eq!(render(&app, 5, 80, NOW)[1], "> ! r/b omp 5m");
+        assert_eq!(
+            plain_lines(&render(&app, 5, 40, NOW))[1],
+            "· .dotfiles·main"
+        );
     }
 
     #[test]
-    fn attention_glyphs_map_states() {
-        assert_eq!(glyph("permission"), "?");
-        assert_eq!(glyph("question"), "?");
-        assert_eq!(glyph("errored"), "!");
-        assert_eq!(glyph("finished"), "✓");
-        assert_eq!(glyph("active"), "●");
-        assert_eq!(glyph("inactive"), "·");
-        assert_eq!(glyph(""), "·");
+    fn workspace_row_shows_workspace_and_session() {
+        let app =
+            one_agent(r#""kind":"workspace","workspace":"w","session_name":"s","group":"idle""#);
+        assert_eq!(plain_lines(&render(&app, 5, 40, NOW))[1], "· w/s");
     }
 
     #[test]
-    fn empty_last_activity_omits_age() {
-        let app = app_from(
-            r#"{"version":1,"agents":[{"id":"/p","title":"t","harness":"omp","group":"idle"}]}"#,
-        );
-        assert_eq!(render(&app, 5, 80, NOW)[1], "> · t omp");
+    fn stray_row_abbreviates_home_and_tags_stray() {
+        let app = one_agent(r#""kind":"stray","group":"idle""#);
+        assert_eq!(plain_lines(&render(&app, 5, 40, NOW))[1], "· ~/p stray");
     }
 
     #[test]
-    fn lines_truncate_to_cols_counting_chars() {
-        let app = app_from(
-            r#"{"version":1,"agents":[{"id":"/p","title":"ñandú✓日本語","attention":"finished","group":"done"}]}"#,
+    fn running_agents_show_coloured_attention_glyph() {
+        let app = one_agent(
+            r#""kind":"stray","state":"running","attention":"permission","group":"needs_you""#,
         );
-        let lines = render(&app, 5, 8, NOW);
-        assert_eq!(lines[1], "> ✓ ñand");
-        assert!(lines.iter().all(|l| l.chars().count() <= 8));
+        let row = &row_colours(&app, 40);
+        assert!(
+            row.contains(&format!("38;5;214m{GLYPH_PERMISSION} ")),
+            "{row:?}"
+        );
+
+        let app =
+            one_agent(r#""kind":"stray","state":"running","attention":"inactive","group":"idle""#);
+        assert!(plain(&render(&app, 5, 40, NOW)[1]).starts_with(GLYPH_INACTIVE));
+    }
+
+    #[test]
+    fn stopped_agents_are_dimmed() {
+        let app = one_agent(
+            r#""kind":"worktree","repo":"r","branch":"b","state":"stopped","group":"stopped""#,
+        );
+        let row = &row_colours(&app, 40);
+        assert!(
+            row.contains(&format!("38;5;240m{GLYPH_INACTIVE} ")),
+            "{row:?}"
+        );
+        assert!(row.contains("38;5;240mb"), "{row:?}");
+    }
+
+    #[test]
+    fn narrow_row_right_aligns_age_at_the_edge() {
+        let app = one_agent(
+            r#""kind":"worktree","repo":"r","branch":"b","harness":"omp","group":"idle","last_activity":"2025-12-31T23:55:00Z""#,
+        );
+        let row = plain(&render(&app, 5, 30, NOW)[1]);
+        assert_eq!(row.chars().count(), 30);
+        assert!(row.ends_with("  5m"), "{row:?}");
+        assert!(!row.contains("omp"));
+    }
+
+    #[test]
+    fn wide_row_adds_title_and_harness_column() {
+        let app = one_agent(
+            r#""kind":"worktree","repo":"r","branch":"b","harness":"omp","title":"fix it","group":"idle","last_activity":"2025-12-31T20:00:00Z""#,
+        );
+        let row = &row_colours(&app, 90);
+        assert!(plain(row).ends_with("omp           4h"), "{:?}", plain(row));
+        assert!(plain(row).contains("r·b  fix it"));
+        assert!(row.contains("3;38;5;81momp"), "{row:?}");
+    }
+
+    #[test]
+    fn selected_row_paints_background_across_full_width() {
+        let app = simple_app(&[("/a", "idle"), ("/b", "idle")]);
+        let lines = render(&app, 5, 30, NOW);
+        assert!(lines[1].contains("48;5;237"));
+        assert_eq!(plain(&lines[1]).chars().count(), 30);
+        assert!(!lines[2].contains("48;5;237"));
+    }
+
+    #[test]
+    fn long_names_truncate_with_ellipsis_counting_chars() {
+        let app = one_agent(
+            r#""kind":"workspace","workspace":"ñandú","session_name":"日本語日本語日本語","group":"idle""#,
+        );
+        let row = plain(&render(&app, 5, 16, NOW)[1]);
+        assert_eq!(row.chars().count(), 16);
+        assert!(row.starts_with("· ñandú/日本語日本…"), "{row:?}");
+    }
+
+    #[test]
+    fn footer_lists_keys_on_the_bottom_row() {
+        let app = simple_app(&[("/a", "idle")]);
+        let lines = plain_lines(&render(&app, 6, 40, NOW));
+        assert_eq!(lines.len(), 6);
+        assert_eq!(lines[5], "enter jump   r refresh   q hide");
     }
 
     #[test]
@@ -293,21 +660,21 @@ mod tests {
         for _ in 0..4 {
             app.handle_key(Key::Down);
         }
-        let lines = render(&app, 3, 80, NOW);
-        assert_eq!(lines, vec!["  · c", "  · d", "> · e"]);
+        let lines = plain_lines(&render(&app, 4, 40, NOW));
+        assert_eq!(lines[..3], ["· /c", "· /d", "· /e"]);
 
         for _ in 0..4 {
             app.handle_key(Key::Up);
         }
-        let lines = render(&app, 3, 80, NOW);
-        assert_eq!(lines, vec!["Idle", "> · a", "  · b"]);
+        let lines = plain_lines(&render(&app, 4, 40, NOW));
+        assert_eq!(lines[..3], ["Idle · 5", "· /a", "· /b"]);
     }
 
     #[test]
     fn never_renders_more_than_rows() {
         let app = simple_app(&[("/a", "idle"), ("/b", "done"), ("/c", "working")]);
-        assert_eq!(render(&app, 2, 80, NOW).len(), 2);
-        assert!(render(&app, 0, 80, NOW).is_empty());
+        assert_eq!(render(&app, 2, 40, NOW).len(), 2);
+        assert!(render(&app, 0, 40, NOW).is_empty());
     }
 
     #[test]
@@ -315,41 +682,40 @@ mod tests {
         let mut app = App::new();
         app.apply_list_result(Some(1), b"", b"cogitator is not running");
         assert_eq!(
-            render(&app, 5, 80, NOW),
-            vec!["cogitator is not running — start it inside zellij"]
+            plain_lines(&render(&app, 2, 80, NOW)),
+            ["cogitator is not running — start it inside zellij"]
         );
 
         app.set_permission_denied();
         assert_eq!(
-            render(&app, 5, 80, NOW),
-            vec!["permission denied — grant the plugin permissions"]
+            plain_lines(&render(&app, 2, 80, NOW)),
+            ["permission denied — grant the plugin permissions"]
         );
 
         app.apply_list_result(Some(3), b"", b"kaput");
-        assert_eq!(render(&app, 5, 4, NOW), vec!["kapu"]);
+        assert_eq!(plain_lines(&render(&app, 2, 4, NOW)), ["kap…"]);
     }
 
     #[test]
-    fn empty_ready_list_says_no_agents() {
+    fn empty_ready_list_says_no_agents_in_flight() {
         let app = simple_app(&[]);
-        assert_eq!(render(&app, 5, 80, NOW), vec!["no agents"]);
+        assert_eq!(
+            plain_lines(&render(&app, 2, 80, NOW)),
+            ["no agents in flight"]
+        );
     }
 
     #[test]
-    fn notice_takes_the_bottom_row_below_the_list() {
+    fn notice_replaces_the_footer() {
         let mut app = simple_app(&[("/a", "idle"), ("/b", "idle"), ("/c", "idle")]);
         app.set_notice("focus failed");
         assert_eq!(
-            render(&app, 4, 80, NOW),
-            vec!["Idle", "> · a", "  · b", "focus failed"]
+            plain_lines(&render(&app, 4, 40, NOW)),
+            ["Idle · 3", "· /a", "· /b", "focus failed"]
         );
         assert_eq!(
-            render(&app, 5, 80, NOW),
-            vec!["Idle", "> · a", "  · b", "  · c", "focus failed"]
-        );
-        assert_eq!(
-            render(&app, 6, 80, NOW),
-            vec!["Idle", "> · a", "  · b", "  · c", "", "focus failed"]
+            plain_lines(&render(&app, 6, 40, NOW)),
+            ["Idle · 3", "· /a", "· /b", "· /c", "", "focus failed"]
         );
     }
 
@@ -357,7 +723,7 @@ mod tests {
     fn notice_alone_fits_a_single_row() {
         let mut app = simple_app(&[("/a", "idle")]);
         app.set_notice("focus failed");
-        assert_eq!(render(&app, 1, 5, NOW), vec!["focus"]);
+        assert_eq!(plain_lines(&render(&app, 1, 5, NOW)), ["focu…"]);
     }
 
     #[test]
@@ -366,7 +732,7 @@ mod tests {
         assert_eq!(relative_time(59), "now");
         assert_eq!(relative_time(300), "5m");
         assert_eq!(relative_time(3 * 3600 + 10), "3h");
-        assert_eq!(relative_time(2 * 86400 + 5), "2d");
+        assert_eq!(relative_time(361 * 3600), "361h");
     }
 
     #[test]

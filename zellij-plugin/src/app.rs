@@ -29,6 +29,7 @@ pub enum Effect {
 #[derive(Debug)]
 pub struct App {
     agents: Vec<Agent>,
+    home: String,
     selected: Option<String>,
     status: Status,
     notice: Option<String>,
@@ -39,6 +40,7 @@ impl Default for App {
     fn default() -> Self {
         App {
             agents: Vec::new(),
+            home: String::new(),
             selected: None,
             status: Status::Loading,
             notice: None,
@@ -71,6 +73,10 @@ impl App {
         &self.agents
     }
 
+    pub fn home(&self) -> &str {
+        &self.home
+    }
+
     pub fn status(&self) -> &Status {
         &self.status
     }
@@ -96,6 +102,7 @@ impl App {
         if exit_code == Some(0) {
             match feed::parse(&String::from_utf8_lossy(stdout)) {
                 Ok(feed) => {
+                    self.home = feed.home;
                     self.set_agents(feed.agents);
                     self.status = Status::Ready;
                 }
