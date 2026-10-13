@@ -22,6 +22,15 @@ func row(dir string, st settings.RowState, attn state.Attention, age time.Durati
 	}
 }
 
+func liveViews(dirs ...string) []state.SessionView {
+	views := make([]state.SessionView, len(dirs))
+	for i, dir := range dirs {
+		views[i] = state.SessionView{SessionID: "s-" + dir, Directory: dir, Source: state.SourceLive, LastActivity: now}
+	}
+
+	return views
+}
+
 func build(in Input) []Agent {
 	in.Now = now
 	if in.RecentWindow == 0 {
@@ -62,7 +71,8 @@ func TestBuildOrdersByUrgencyThenOldestFirst(t *testing.T) {
 		row("/w/unknown", settings.StateUnknown, "", 1*time.Minute),
 	}
 
-	got := ids(build(Input{Rows: rows}))
+	live := liveViews("/w/idle", "/w/working", "/w/done", "/w/errored", "/w/perm-new", "/w/perm-old")
+	got := ids(build(Input{Rows: rows, Live: live}))
 	want := []string{
 		"/w/perm-old", "/w/perm-new", "/w/errored",
 		"/w/done", "/w/working", "/w/idle", "/w/unknown", "/w/stopped",
@@ -87,13 +97,57 @@ func TestBuildStoppedAgentsFollowRecentWindow(t *testing.T) {
 				row("/w/live", settings.StateRunning, state.AttnActive, time.Minute),
 				row("/w/stopped", settings.StateStopped, "", tt.age),
 			}
-			got := ids(build(Input{Rows: rows}))
+			got := ids(build(Input{Rows: rows, Live: liveViews("/w/live")}))
 			want := []string{"/w/live"}
 			if tt.present {
 				want = append(want, "/w/stopped")
 			}
 			if !equal(got, want) {
 				t.Fatalf("agents = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestBuildTreatsRecentOnlySessionsAsStopped(t *testing.T) {
+	recent := func(dir string) []state.SessionView {
+		views := liveViews(dir)
+		views[0].Source = state.SourceRecent
+
+		return views
+	}
+	workspaceAt := func(dir string, attn state.Attention, age time.Duration) []workspace.WorkspaceStatus {
+		return []workspace.WorkspaceStatus{{
+			Workspace: workspace.Workspace{Name: "ws"},
+			Sessions: []workspace.SessionStatus{{
+				Session: workspace.Session{Name: "feat", Dir: dir},
+				State:   settings.StateRunning, Attention: attn, LastActivity: ago(age),
+			}},
+		}}
+	}
+
+	tests := []struct {
+		name  string
+		in    Input
+		want  []string
+		group Group
+	}{
+		{"drops finished row backed only by a recent view past the window", Input{Rows: []settings.Row{row("/w/a", settings.StateRunning, state.AttnFinished, 2*time.Hour)}, Live: recent("/w/a")}, nil, 0},
+		{"lists finished row backed only by a recent view as stopped inside the window", Input{Rows: []settings.Row{row("/w/a", settings.StateRunning, state.AttnFinished, 10*time.Minute)}, Live: recent("/w/a")}, []string{"/w/a"}, GroupStopped},
+		{"lists finished row backed by a live view as done", Input{Rows: []settings.Row{row("/w/a", settings.StateRunning, state.AttnFinished, 2*time.Hour)}, Live: liveViews("/w/a")}, []string{"/w/a"}, GroupDone},
+		{"lists inactive row backed by a live view as idle", Input{Rows: []settings.Row{row("/w/a", settings.StateRunning, state.AttnInactive, 2*time.Hour)}, Live: liveViews("/w/a")}, []string{"/w/a"}, GroupIdle},
+		{"lists active row backed by a live view as working", Input{Rows: []settings.Row{row("/w/a", settings.StateRunning, state.AttnActive, time.Minute)}, Live: liveViews("/w/a")}, []string{"/w/a"}, GroupWorking},
+		{"drops workspace session backed only by a recent view past the window", Input{Workspaces: workspaceAt("/ws/a", state.AttnFinished, 2*time.Hour), Live: recent("/ws/a")}, nil, 0},
+		{"lists workspace session backed only by a recent view as stopped inside the window", Input{Workspaces: workspaceAt("/ws/a", state.AttnFinished, 10*time.Minute), Live: recent("/ws/a")}, []string{"/ws/a"}, GroupStopped},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := build(tt.in)
+			if !equal(ids(got), tt.want) {
+				t.Fatalf("agents = %v, want %v", ids(got), tt.want)
+			}
+			if len(got) == 1 && got[0].Group != tt.group {
+				t.Fatalf("group = %v, want %v", got[0].Group, tt.group)
 			}
 		})
 	}
@@ -116,7 +170,7 @@ func TestBuildSkipsPlaceholdersMissingAndPendingSessions(t *testing.T) {
 		},
 	}}
 
-	got := build(Input{Rows: rows, Workspaces: workspaces})
+	got := build(Input{Rows: rows, Workspaces: workspaces, Live: liveViews("/ws/feat")})
 	if len(got) != 1 || got[0].ID != "/ws/feat" || got[0].Kind != KindWorkspace || got[0].Group != GroupNeedsYou {
 		t.Fatalf("agents = %+v, want only the workspace session needing attention", got)
 	}
@@ -131,7 +185,7 @@ func TestBuildManagedAgentLocatesWindowByCogDir(t *testing.T) {
 		{PaneID: "%3", WindowID: "@3", SessionID: "$1", Cwd: "/elsewhere", CogDir: "/w/a"},
 	}
 
-	got := build(Input{Rows: rows, Panes: panes})
+	got := build(Input{Rows: rows, Panes: panes, Live: liveViews("/w/a")})
 	if got[0].WindowID != "@3" || got[0].PaneID != "%3" || got[0].TmuxSessionID != "$1" || !got[0].SessionOwned {
 		t.Fatalf("tmux location not joined: %+v", got[0])
 	}
@@ -294,7 +348,7 @@ func TestBuildSessionOwnedFalseWhenSessionHoldsTwoTaggedWindows(t *testing.T) {
 		{PaneID: "%2", WindowID: "@2", SessionID: "$1", CogDir: "/w/b"},
 	}
 
-	for _, a := range build(Input{Rows: rows, Panes: panes}) {
+	for _, a := range build(Input{Rows: rows, Panes: panes, Live: liveViews("/w/a", "/w/b")}) {
 		if a.SessionOwned {
 			t.Fatalf("%s reported SessionOwned in a shared session", a.ID)
 		}

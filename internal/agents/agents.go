@@ -190,6 +190,7 @@ func indexOf(list []Agent, id string) int {
 
 func managedAgents(in Input) (agents []Agent, managedDirs map[string]bool) {
 	managedDirs = map[string]bool{}
+	liveDirs := liveSessionDirs(in.Live)
 
 	for _, row := range in.Rows {
 		dir := canonical(row.Worktree)
@@ -210,6 +211,7 @@ func managedAgents(in Input) (agents []Agent, managedDirs map[string]bool) {
 			Attention:    row.Attention,
 			LastActivity: row.LastActivity,
 		}
+		demoteWithoutLiveSession(&a, liveDirs)
 		if keep(&a, in) {
 			agents = append(agents, a)
 		}
@@ -236,12 +238,32 @@ func managedAgents(in Input) (agents []Agent, managedDirs map[string]bool) {
 				Attention:    sess.Attention,
 				LastActivity: sess.LastActivity,
 			}
+			demoteWithoutLiveSession(&a, liveDirs)
 			if keep(&a, in) {
 				agents = append(agents, a)
 			}
 		}
 	}
 	return agents, managedDirs
+}
+
+func liveSessionDirs(views []state.SessionView) map[string]bool {
+	dirs := map[string]bool{}
+	for _, sv := range views {
+		if sv.Source == state.SourceLive && sv.Directory != "" {
+			dirs[canonical(sv.Directory)] = true
+		}
+	}
+
+	return dirs
+}
+
+// demoteWithoutLiveSession stops a "running" agent backed only by recent-history
+// views: merge reports running for any session view, but only a live one is in flight.
+func demoteWithoutLiveSession(a *Agent, liveDirs map[string]bool) {
+	if a.State == settings.StateRunning && !liveDirs[a.ID] {
+		a.State = settings.StateStopped
+	}
 }
 
 func strayAgents(in Input, managedDirs map[string]bool) []Agent {
