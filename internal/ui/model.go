@@ -2874,9 +2874,9 @@ func (m model) agentCandidates() []sessionCandidate {
 
 // agentSwitchKey is the switchOrder key focusAgent records for a: the managed
 // launch target's dir (the raw worktree or session dir the other tabs record
-// too), or the canonical agent ID for strays and untracked agents.
+// too), or the agent ID for agents focused by pane and untracked agents.
 func (m model) agentSwitchKey(a agents.Agent) string {
-	if a.Kind == agents.KindStray {
+	if focusesPane(a) {
 		return a.ID
 	}
 	if target, ok := m.managedLaunchTarget(a); ok {

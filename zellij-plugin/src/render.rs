@@ -281,11 +281,11 @@ fn styled_name(agent: &Agent, home: &str) -> Line {
             span(agent.session_name.clone(), lead),
         ],
         "stray" => vec![
-            span(abbreviate_home(&agent.id, home), lead),
+            span(abbreviate_home(&agent.dir, home), lead),
             span(" ", PLAIN),
             span("stray", RECENT),
         ],
-        _ if agent.branch.is_empty() => vec![span(abbreviate_home(&agent.id, home), lead)],
+        _ if agent.branch.is_empty() => vec![span(abbreviate_home(&agent.dir, home), lead)],
         _ => vec![
             span(base_name(&agent.repo), REPO),
             span("·", DIM),
@@ -435,7 +435,7 @@ mod tests {
 
     fn one_agent(fields: &str) -> App {
         app_from(&format!(
-            r#"{{"version":1,"home":"/Users/me","agents":[{{"id":"/Users/me/p",{fields}}}]}}"#
+            r#"{{"version":1,"home":"/Users/me","agents":[{{"id":"/Users/me/p","dir":"/Users/me/p",{fields}}}]}}"#
         ))
     }
 
@@ -471,9 +471,9 @@ mod tests {
     fn needs_you_section_sits_above_the_rest() {
         let app = app_from(
             r#"{"version":1,"agents":[
-                {"id":"/x/newer","group":"done","last_activity":"2025-12-31T23:00:00Z"},
-                {"id":"/x/ask","group":"needs_you","last_activity":"2025-12-31T23:30:00Z"},
-                {"id":"/x/older","group":"idle","last_activity":"2025-12-31T22:00:00Z"}
+                {"id":"/x/newer","dir":"/x/newer","group":"done","last_activity":"2025-12-31T23:00:00Z"},
+                {"id":"/x/ask","dir":"/x/ask","group":"needs_you","last_activity":"2025-12-31T23:30:00Z"},
+                {"id":"/x/older","dir":"/x/older","group":"idle","last_activity":"2025-12-31T22:00:00Z"}
             ]}"#,
         );
         let lines: Vec<String> = plain_lines(&render(&app, 20, 40, NOW))
@@ -581,7 +581,7 @@ mod tests {
     #[test]
     fn row_the_user_sits_at_is_marked_even_when_selected() {
         let mut app = app_from(
-            r#"{"version":1,"agents":[{"id":"/a","window_id":"s:1"},{"id":"/b","window_id":"s:2"}]}"#,
+            r#"{"version":1,"agents":[{"id":"/a","dir":"/a","window_id":"s:1"},{"id":"/b","dir":"/b","window_id":"s:2"}]}"#,
         );
         app.set_location(crate::app::Location {
             session: "s".into(),

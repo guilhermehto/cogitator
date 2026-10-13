@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -65,10 +66,16 @@ func liveViewsForRunningRows(rows []settings.Row) []state.SessionView {
 	return views
 }
 
+// rebuildAgents feeds rows through the model; like a store snapshot, a row's
+// live view replaces the earlier view of the same session.
 func rebuildAgents(t *testing.T, m model, rows []settings.Row) model {
 	t.Helper()
 
-	m.snap.Sessions = append(m.snap.Sessions, liveViewsForRunningRows(rows)...)
+	fresh := liveViewsForRunningRows(rows)
+	sessions := slices.DeleteFunc(slices.Clone(m.snap.Sessions), func(sv state.SessionView) bool {
+		return slices.ContainsFunc(fresh, func(f state.SessionView) bool { return f.SessionID == sv.SessionID })
+	})
+	m.snap.Sessions = append(sessions, fresh...)
 	updated, _ := m.Update(workspaceRowsMsg{rows: rows})
 
 	return updated.(model)

@@ -341,9 +341,9 @@ func agentStyledName(a agents.Agent) string {
 	case a.Kind == agents.KindWorkspace:
 		return wtRepoStyle.UnsetBold().Render(a.Workspace) + dimStyle.Render("/") + lead.Render(a.SessionName)
 	case a.Kind == agents.KindStray:
-		return lead.Render(abbreviateHome(a.ID)) + " " + recentStyle.Render("stray")
+		return lead.Render(abbreviateHome(a.Dir)) + " " + recentStyle.Render("stray")
 	case a.Branch == "":
-		return lead.Render(abbreviateHome(a.ID))
+		return lead.Render(abbreviateHome(a.Dir))
 	}
 
 	return wtRepoStyle.UnsetBold().Render(filepath.Base(a.Repo)) + dimStyle.Render("·") + lead.Render(a.Branch)
@@ -365,10 +365,10 @@ func agentName(a agents.Agent) string {
 	case agents.KindWorkspace:
 		return a.Workspace + "/" + a.SessionName
 	case agents.KindStray:
-		return abbreviateHome(a.ID) + " stray"
+		return abbreviateHome(a.Dir) + " stray"
 	}
 	if a.Branch == "" {
-		return abbreviateHome(a.ID)
+		return abbreviateHome(a.Dir)
 	}
 
 	return filepath.Base(a.Repo) + "·" + a.Branch

@@ -147,7 +147,7 @@ func mixedTabsModel(tmuxFake *fakeMux) model {
 		wsStatusWithSession("payments", wsSession("Feature X", "feature-x", "/root/payments/feature-x", "fake", settings.StateStopped)),
 	}
 	m.agents = []agents.Agent{{
-		ID: "/home/me/stray", Kind: agents.KindStray, State: settings.StateRunning, Attention: state.AttnActive,
+		ID: "/home/me/stray", Dir: "/home/me/stray", Kind: agents.KindStray, State: settings.StateRunning, Attention: state.AttnActive,
 	}}
 	return m
 }

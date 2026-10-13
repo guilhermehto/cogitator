@@ -20,6 +20,7 @@ type ExportList struct {
 
 type ExportAgent struct {
 	ID           string `json:"id"`
+	Dir          string `json:"dir"`
 	Kind         string `json:"kind"`
 	Repo         string `json:"repo"`
 	Branch       string `json:"branch"`
@@ -56,6 +57,7 @@ func exportAgent(a agents.Agent) ExportAgent {
 
 	return ExportAgent{
 		ID:           a.ID,
+		Dir:          a.Dir,
 		Kind:         string(a.Kind),
 		Repo:         a.Repo,
 		Branch:       a.Branch,

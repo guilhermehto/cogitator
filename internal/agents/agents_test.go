@@ -317,6 +317,67 @@ func TestBuildStrayFallsBackToLowestPaneID(t *testing.T) {
 	}
 }
 
+// The zellij session "dev" has two omp tabs in the worktree /w/a.
+func siblingPanes() []mux.Pane {
+	return []mux.Pane{
+		{PaneID: "dev:terminal_1", WindowID: "dev:0", SessionID: "dev", Cwd: "/w/a", Command: "omp", CogDir: "/w/a"},
+		{PaneID: "dev:terminal_2", WindowID: "dev:1", SessionID: "dev", Cwd: "/w/a", Command: "omp", CogDir: "/w/a"},
+	}
+}
+
+func siblingView(id string, created time.Duration, attn state.Attention, paneID string) state.SessionView {
+	return state.SessionView{
+		SessionID: id, Directory: "/w/a", Source: state.SourceLive, Provider: "omp",
+		Attention: attn, Created: ago(created), LastActivity: ago(time.Minute), PaneID: paneID,
+	}
+}
+
+func TestBuildSplitsSessionsSharingAManagedDirOntoTheirHookPanes(t *testing.T) {
+	rows := []settings.Row{row("/w/a", settings.StateRunning, state.AttnActive, time.Minute)}
+	live := []state.SessionView{
+		siblingView("old", 2*time.Hour, state.AttnQuestionPending, "dev:terminal_2"),
+		siblingView("new", time.Hour, state.AttnActive, "dev:terminal_1"),
+	}
+
+	got := build(Input{Rows: rows, Live: live, Panes: siblingPanes()})
+	byID := map[string]Agent{}
+	for _, a := range got {
+		byID[a.ID] = a
+	}
+	old, okOld := byID["/w/a#old"]
+	fresh, okNew := byID["/w/a#new"]
+	if len(got) != 2 || !okOld || !okNew {
+		t.Fatalf("agents = %v, want /w/a#old and /w/a#new", ids(got))
+	}
+	if old.WindowID != "dev:1" || old.Group != GroupNeedsYou || old.Kind != KindWorktree || old.Dir != "/w/a" {
+		t.Errorf("old = %+v, want its question on tab dev:1", old)
+	}
+	if fresh.WindowID != "dev:0" || fresh.Group != GroupWorking || !fresh.Sibling() {
+		t.Errorf("new = %+v, want working on tab dev:0", fresh)
+	}
+}
+
+func TestBuildGivesUnreportedSiblingsDistinctPanes(t *testing.T) {
+	live := []state.SessionView{
+		siblingView("a", 2*time.Hour, state.AttnActive, ""),
+		siblingView("b", time.Hour, state.AttnActive, ""),
+	}
+
+	got := build(Input{Live: live, Panes: siblingPanes()})
+	if len(got) != 2 || got[0].PaneID == got[1].PaneID || got[0].Kind != KindStray {
+		t.Fatalf("agents = %+v, want two strays on different panes", got)
+	}
+}
+
+func TestBuildKeepsOneAgentPerDirForASingleSession(t *testing.T) {
+	live := []state.SessionView{siblingView("only", time.Hour, state.AttnActive, "dev:terminal_2")}
+
+	got := build(Input{Live: live, Panes: siblingPanes()})
+	if !equal(ids(got), []string{"/w/a"}) || got[0].Sibling() {
+		t.Fatalf("agents = %+v, want the directory agent /w/a", got)
+	}
+}
+
 func TestNext(t *testing.T) {
 	list := []Agent{
 		{ID: "A", Group: GroupNeedsYou},

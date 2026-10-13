@@ -180,10 +180,10 @@ func (m model) markAgentSeen(agent agents.Agent) {
 }
 
 func (m *model) focusAgent(agent agents.Agent, client string) tea.Cmd {
-	if agent.Kind == agents.KindStray {
+	if focusesPane(agent) {
 		m.recordSessionSwitch(agent.ID)
 
-		return focusStrayCmd(m.mux, agent, client)
+		return focusPaneCmd(m.mux, agent, client)
 	}
 
 	target, ok := m.managedLaunchTarget(agent)
@@ -198,16 +198,23 @@ func (m *model) focusAgent(agent agents.Agent, client string) tea.Cmd {
 	return launchForClientCmd(m.mux, target, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp), client)
 }
 
+// focusesPane reports whether focusing a selects its own pane rather than
+// launching its directory: strays have no launch target, and a sibling shares
+// its directory's window with other sessions.
+func focusesPane(a agents.Agent) bool {
+	return a.Kind == agents.KindStray || (a.Sibling() && a.PaneID != "")
+}
+
 func (m model) managedLaunchTarget(agent agents.Agent) (launchTarget, bool) {
 	for _, row := range m.workspaceRows {
-		if sameDir(row.Worktree, agent.ID) {
+		if sameDir(row.Worktree, agent.Dir) {
 			return rowLaunchTarget(row), true
 		}
 	}
 
 	for _, ws := range m.wsStatuses {
 		for _, sess := range ws.Sessions {
-			if sameDir(sess.Session.Dir, agent.ID) {
+			if sameDir(sess.Session.Dir, agent.Dir) {
 				return wsSessionLaunchTarget(ws.Workspace.Name, sess), true
 			}
 		}
@@ -216,7 +223,7 @@ func (m model) managedLaunchTarget(agent agents.Agent) (launchTarget, bool) {
 	return launchTarget{}, false
 }
 
-func sameDir(dir, canonicalID string) bool {
+func sameDir(dir, canonicalDir string) bool {
 	if dir == "" {
 		return false
 	}
@@ -226,13 +233,14 @@ func sameDir(dir, canonicalID string) bool {
 		canonical = dir
 	}
 
-	return canonical == canonicalID
+	return canonical == canonicalDir
 }
 
-func focusStrayCmd(ops mux.Backend, agent agents.Agent, client string) tea.Cmd {
+// focusPaneCmd selects the agent's own pane.
+func focusPaneCmd(ops mux.Backend, agent agents.Agent, client string) tea.Cmd {
 	return func() tea.Msg {
 		res := launchResultMsg{
-			dir:       agent.ID,
+			dir:       agent.Dir,
 			client:    client,
 			provider:  fallbackProvider(agent.Provider, agent.Harness),
 			sessionID: agent.SessionID,

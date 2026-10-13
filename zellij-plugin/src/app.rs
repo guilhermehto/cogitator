@@ -242,7 +242,10 @@ pub(crate) mod tests {
     use super::*;
 
     pub(crate) fn feed_json(ids: &[&str]) -> String {
-        let items: Vec<String> = ids.iter().map(|id| format!(r#"{{"id":"{id}"}}"#)).collect();
+        let items: Vec<String> = ids
+            .iter()
+            .map(|id| format!(r#"{{"id":"{id}","dir":"{id}"}}"#))
+            .collect();
         format!(r#"{{"version":1,"agents":[{}]}}"#, items.join(","))
     }
 

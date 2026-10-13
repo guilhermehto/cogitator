@@ -14,7 +14,7 @@ var agentListNow = time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 
 func worktreeAgent(id, repo, branch string, group agents.Group, attn state.Attention, st settings.RowState) agents.Agent {
 	return agents.Agent{
-		ID: id, Kind: agents.KindWorktree, Repo: repo, Branch: branch,
+		ID: id, Dir: id, Kind: agents.KindWorktree, Repo: repo, Branch: branch,
 		Harness: "opencode", Group: group, Attention: attn, State: st,
 		LastActivity: agentListNow.Add(-5 * time.Minute),
 	}
@@ -24,8 +24,8 @@ func agentsInEveryGroup() []agents.Agent {
 	return []agents.Agent{
 		worktreeAgent("/a", "api", "fix-auth", agents.GroupNeedsYou, state.AttnPermissionPending, settings.StateRunning),
 		worktreeAgent("/b", "web", "ui", agents.GroupDone, state.AttnFinished, settings.StateRunning),
-		{ID: "/c", Kind: agents.KindWorkspace, Workspace: "shop", SessionName: "checkout", Harness: "claude", Group: agents.GroupWorking, Attention: state.AttnActive, State: settings.StateRunning},
-		{ID: "/tmp/scratch", Kind: agents.KindStray, Harness: "opencode", Group: agents.GroupIdle, Attention: state.AttnInactive, State: settings.StateRunning},
+		{ID: "/c", Dir: "/c", Kind: agents.KindWorkspace, Workspace: "shop", SessionName: "checkout", Harness: "claude", Group: agents.GroupWorking, Attention: state.AttnActive, State: settings.StateRunning},
+		{ID: "/tmp/scratch", Dir: "/tmp/scratch", Kind: agents.KindStray, Harness: "opencode", Group: agents.GroupIdle, Attention: state.AttnInactive, State: settings.StateRunning},
 		worktreeAgent("/e", "docs", "main", agents.GroupStopped, state.AttnInactive, settings.StateStopped),
 	}
 }
@@ -81,7 +81,7 @@ func TestAgentListLabelsWorktreesByRepoNameOrHomeRelativeDir(t *testing.T) {
 		{"uses repo basename and branch", worktreeAgent("/Users/x/src/pi-platform", "/Users/x/src/pi-platform", "main", agents.GroupIdle, state.AttnInactive, settings.StateRunning), "pi-platform·main"},
 		{"falls back to the home-relative dir without a branch", worktreeAgent("/Users/x/src/pi-platform/svc/api", "/Users/x/src/pi-platform", "", agents.GroupIdle, state.AttnInactive, settings.StateRunning), "~/src/pi-platform/svc/api"},
 		{"keeps dirs outside home absolute", worktreeAgent("/opt/svc", "/opt/svc", "", agents.GroupIdle, state.AttnInactive, settings.StateRunning), "/opt/svc"},
-		{"abbreviates stray dirs and marks them", agents.Agent{ID: "/Users/x/scratch", Kind: agents.KindStray}, "~/scratch stray"},
+		{"abbreviates stray dirs and marks them", agents.Agent{ID: "/Users/x/scratch", Dir: "/Users/x/scratch", Kind: agents.KindStray}, "~/scratch stray"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

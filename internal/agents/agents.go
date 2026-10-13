@@ -38,10 +38,12 @@ const (
 	GroupStopped
 )
 
-// Agent is one session the user may want to look at or jump to. ID is the
-// canonical session directory and identifies the agent everywhere.
+// Agent is one session the user may want to look at or jump to. ID identifies
+// the agent everywhere: the canonical session directory, suffixed with the
+// session id when several live sessions share that directory.
 type Agent struct {
 	ID   string
+	Dir  string
 	Kind Kind
 
 	Repo   string
@@ -69,6 +71,10 @@ type Agent struct {
 	SessionOwned bool
 }
 
+// Sibling reports whether a shares its directory with other live sessions, so
+// only its own pane, not the directory's window, leads to it.
+func (a Agent) Sibling() bool { return a.ID != a.Dir }
+
 type Input struct {
 	Rows          []settings.Row
 	Workspaces    []workspace.WorkspaceStatus
@@ -85,10 +91,15 @@ type Input struct {
 // Build returns every agent worth surfacing, ordered by urgency.
 func Build(in Input) []Agent {
 	panes := indexPanes(in.Panes)
-	out, managedDirs := managedAgents(in, panes)
+	live := liveByDir(in.Live)
+	out, managedDirs := managedAgents(in, panes, live)
 
-	for _, a := range strayAgents(in, managedDirs) {
-		if panes.attach(&a, panes.byCwd[a.ID]) {
+	for _, base := range strayAgents(in, live, managedDirs) {
+		for _, a := range panes.sessionAgents(base, live[base.Dir], panes.byCwd[base.Dir]) {
+			if a.WindowID == "" {
+				continue
+			}
+			a.Group = groupOf(a)
 			out = append(out, a)
 		}
 	}
@@ -175,14 +186,14 @@ func indexOf(list []Agent, id string) int {
 	return -1
 }
 
-func managedAgents(in Input, panes paneIndex) (agents []Agent, managedDirs map[string]bool) {
+func managedAgents(in Input, panes paneIndex, live map[string][]state.SessionView) (agents []Agent, managedDirs map[string]bool) {
 	managedDirs = map[string]bool{}
-	liveDirs := liveSessionDirs(in.Live)
-	admit := func(a Agent) {
-		panes.attach(&a, panes.byCogDir[a.ID])
-		stopUnlessInFlight(&a, liveDirs)
-		if keep(&a, in) {
-			agents = append(agents, a)
+	admit := func(base Agent) {
+		for _, a := range panes.sessionAgents(base, live[base.Dir], panes.byCogDir[base.Dir]) {
+			stopUnlessInFlight(&a, live)
+			if keep(&a, in) {
+				agents = append(agents, a)
+			}
 		}
 	}
 
@@ -194,6 +205,7 @@ func managedAgents(in Input, panes paneIndex) (agents []Agent, managedDirs map[s
 		}
 		admit(Agent{
 			ID:           dir,
+			Dir:          dir,
 			Kind:         KindWorktree,
 			Repo:         row.Repo,
 			Branch:       row.Branch,
@@ -216,6 +228,7 @@ func managedAgents(in Input, panes paneIndex) (agents []Agent, managedDirs map[s
 			managedDirs[dir] = true
 			admit(Agent{
 				ID:           dir,
+				Dir:          dir,
 				Kind:         KindWorkspace,
 				Branch:       sess.Session.Branch,
 				Workspace:    ws.Workspace.Name,
@@ -233,14 +246,25 @@ func managedAgents(in Input, panes paneIndex) (agents []Agent, managedDirs map[s
 	return agents, managedDirs
 }
 
-func liveSessionDirs(views []state.SessionView) map[string]bool {
-	dirs := map[string]bool{}
+// liveByDir groups live sessions by canonical directory, oldest first so
+// sessions sharing a directory keep a stable order.
+func liveByDir(views []state.SessionView) map[string][]state.SessionView {
+	dirs := map[string][]state.SessionView{}
 	for _, sv := range views {
 		if sv.Source == state.SourceLive && sv.Directory != "" {
-			dirs[canonical(sv.Directory)] = true
+			dir := canonical(sv.Directory)
+			dirs[dir] = append(dirs[dir], sv)
 		}
 	}
 
+	for _, list := range dirs {
+		sort.Slice(list, func(i, j int) bool {
+			if !list[i].Created.Equal(list[j].Created) {
+				return list[i].Created.Before(list[j].Created)
+			}
+			return list[i].SessionID < list[j].SessionID
+		})
+	}
 	return dirs
 }
 
@@ -249,8 +273,8 @@ func liveSessionDirs(views []state.SessionView) map[string]bool {
 // Agents blocked on the user keep their badge until seen, as the Repos and
 // Workspaces tabs show them; a finished agent with nothing left running is
 // over, so it stops and ages out like any other.
-func stopUnlessInFlight(a *Agent, liveDirs map[string]bool) {
-	if a.State != settings.StateRunning || liveDirs[a.ID] || a.WindowID != "" || blockedOnUser(a.Attention) {
+func stopUnlessInFlight(a *Agent, live map[string][]state.SessionView) {
+	if a.State != settings.StateRunning || len(live[a.Dir]) > 0 || a.WindowID != "" || blockedOnUser(a.Attention) {
 		return
 	}
 	a.State = settings.StateStopped
@@ -271,43 +295,42 @@ func dismissed(a Agent, in Input) bool {
 	return ok && a.WindowID == "" && !a.LastActivity.After(at)
 }
 
-func strayAgents(in Input, managedDirs map[string]bool) []Agent {
+// strayAgents returns one agent per directory with live sessions that no
+// Repos row or workspace session manages, carrying its newest session.
+func strayAgents(in Input, live map[string][]state.SessionView, managedDirs map[string]bool) []Agent {
 	root := ""
 	if in.WorkspaceRoot != "" {
 		root = canonical(in.WorkspaceRoot)
 	}
 
-	newest := map[string]state.SessionView{}
-	for _, sv := range in.Live {
-		if sv.Source != state.SourceLive || sv.Directory == "" {
-			continue
-		}
-		dir := canonical(sv.Directory)
+	var out []Agent
+	for dir, views := range live {
 		if managedDirs[dir] || settings.PathUnderRoot(root, dir) {
 			continue
 		}
-		if cur, ok := newest[dir]; !ok || sv.LastActivity.After(cur.LastActivity) {
-			newest[dir] = sv
-		}
-	}
 
-	var out []Agent
-	for dir, sv := range newest {
-		a := Agent{
-			ID:           dir,
-			Kind:         KindStray,
-			Harness:      harnessOf(sv),
-			Provider:     string(sv.Provider),
-			SessionID:    sv.SessionID,
-			Title:        sv.Title,
-			State:        settings.StateRunning,
-			Attention:    sv.Attention,
-			LastActivity: sv.LastActivity,
+		newest := views[0]
+		for _, sv := range views[1:] {
+			if sv.LastActivity.After(newest.LastActivity) {
+				newest = sv
+			}
 		}
-		a.Group = groupOf(a)
-		out = append(out, a)
+		out = append(out, sessionAgent(Agent{ID: dir, Dir: dir, Kind: KindStray}, newest))
 	}
 	return out
+}
+
+// sessionAgent is base carrying sv's own identity and status.
+func sessionAgent(base Agent, sv state.SessionView) Agent {
+	a := base
+	a.Harness = harnessOf(sv)
+	a.Provider = string(sv.Provider)
+	a.SessionID = sv.SessionID
+	a.Title = sv.Title
+	a.State = settings.StateRunning
+	a.Attention = sv.Attention
+	a.LastActivity = sv.LastActivity
+	return a
 }
 
 func harnessOf(sv state.SessionView) string {
@@ -372,6 +395,7 @@ func sortAgents(list []Agent) {
 }
 
 type paneIndex struct {
+	byID     map[string]mux.Pane
 	byCogDir map[string][]mux.Pane
 	byCwd    map[string][]mux.Pane
 	// taggedWindows maps tmux session id to the set of its @cog_dir windows.
@@ -380,11 +404,13 @@ type paneIndex struct {
 
 func indexPanes(panes []mux.Pane) paneIndex {
 	ix := paneIndex{
+		byID:          map[string]mux.Pane{},
 		byCogDir:      map[string][]mux.Pane{},
 		byCwd:         map[string][]mux.Pane{},
 		taggedWindows: map[string]map[string]bool{},
 	}
 	for _, p := range panes {
+		ix.byID[p.PaneID] = p
 		if p.CogDir != "" {
 			dir := canonical(p.CogDir)
 			ix.byCogDir[dir] = append(ix.byCogDir[dir], p)
@@ -401,17 +427,67 @@ func indexPanes(panes []mux.Pane) paneIndex {
 	return ix
 }
 
+// sessionAgents returns base joined onto the best of candidates, or, when
+// several live sessions share its directory, one agent per session. Each
+// sibling takes the pane its hook reported, else the best candidate no
+// sibling holds yet, so every pane stays reachable even before a hook lands.
+func (ix paneIndex) sessionAgents(base Agent, views []state.SessionView, candidates []mux.Pane) []Agent {
+	if len(views) < 2 {
+		ix.attach(&base, candidates)
+		return []Agent{base}
+	}
+
+	out := make([]Agent, len(views))
+	taken := map[string]bool{}
+	for i, sv := range views {
+		out[i] = sessionAgent(base, sv)
+		out[i].ID = base.Dir + "#" + sv.SessionID
+		if p, ok := ix.byID[sv.PaneID]; ok && sv.PaneID != "" {
+			ix.join(&out[i], p)
+			taken[p.PaneID] = true
+		}
+	}
+
+	for i := range out {
+		if out[i].PaneID != "" {
+			continue
+		}
+		free := untaken(candidates, taken)
+		if len(free) == 0 {
+			free = candidates
+		}
+		if ix.attach(&out[i], free) {
+			taken[out[i].PaneID] = true
+		}
+	}
+	return out
+}
+
+func untaken(candidates []mux.Pane, taken map[string]bool) []mux.Pane {
+	var free []mux.Pane
+	for _, p := range candidates {
+		if !taken[p.PaneID] {
+			free = append(free, p)
+		}
+	}
+	return free
+}
+
 // attach joins the best of candidates onto a and reports whether one existed.
 func (ix paneIndex) attach(a *Agent, candidates []mux.Pane) bool {
 	p, ok := pickPane(candidates, a.Harness)
 	if !ok {
 		return false
 	}
+	ix.join(a, p)
+	return true
+}
+
+func (ix paneIndex) join(a *Agent, p mux.Pane) {
 	a.WindowID = p.WindowID
 	a.PaneID = p.PaneID
 	a.MuxSessionID = p.SessionID
 	a.SessionOwned = ix.ownsSession(p)
-	return true
 }
 
 func (ix paneIndex) ownsSession(p mux.Pane) bool {
