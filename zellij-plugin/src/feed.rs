@@ -14,6 +14,7 @@ pub struct Agent {
     pub title: String,
     pub attention: String,
     pub state: String,
+    pub group: String,
     pub last_activity: String,
     pub mux_session: String,
     pub window_id: String,
@@ -24,6 +25,12 @@ pub struct Agent {
 impl Agent {
     pub fn last_activity_secs(&self) -> Option<i64> {
         parse_rfc3339(&self.last_activity)
+    }
+
+    /// cogitator owns the attention rules; its group says whether the agent
+    /// is blocked on the user.
+    pub fn needs_you(&self) -> bool {
+        self.group == "needs_you"
     }
 }
 
@@ -160,6 +167,7 @@ mod tests {
                 title: "t".into(),
                 attention: "question".into(),
                 state: "running".into(),
+                group: "needs_you".into(),
                 last_activity: "2026-01-01T00:00:00Z".into(),
                 mux_session: "m".into(),
                 window_id: "1".into(),

@@ -154,22 +154,36 @@ fn render_list(app: &App, rows: usize, cols: usize, now: i64) -> Vec<String> {
 
     let selected = app.selected_index();
     let here = app.here_index();
-    let header = vec![
-        span("Agents", HEADER),
-        span(format!(" · {}", agents.len()), DIM),
+    // App keeps agents that need the user at the front of the list.
+    let split = agents.iter().take_while(|a| a.needs_you()).count();
+    let sections = [
+        ("Needs you", PERMISSION, 0..split),
+        ("Agents", HEADER, split..agents.len()),
     ];
-    let mut lines = vec![paint(&truncate(header, cols), None)];
+
+    let mut lines = Vec::new();
     let mut selected_line = 0;
-    for (i, agent) in agents.iter().enumerate() {
-        let is_selected = selected == Some(i);
-        if is_selected {
-            selected_line = lines.len();
+    for (title, style, range) in sections {
+        if range.is_empty() {
+            continue;
         }
-        let mark = RowMark {
-            selected: is_selected,
-            here: here == Some(i),
-        };
-        lines.push(agent_row(agent, mark, cols, now, app.home()));
+
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        let header = vec![span(title, style), span(format!(" · {}", range.len()), DIM)];
+        lines.push(paint(&truncate(header, cols), None));
+        for i in range {
+            let is_selected = selected == Some(i);
+            if is_selected {
+                selected_line = lines.len();
+            }
+            let mark = RowMark {
+                selected: is_selected,
+                here: here == Some(i),
+            };
+            lines.push(agent_row(&agents[i], mark, cols, now, app.home()));
+        }
     }
 
     let offset = scroll_offset(app.scroll.get(), selected_line, rows, lines.len());
@@ -454,20 +468,38 @@ mod tests {
     }
 
     #[test]
-    fn one_header_counts_all_agents_without_group_gaps() {
+    fn needs_you_section_sits_above_the_rest() {
         let app = app_from(
             r#"{"version":1,"agents":[
-                {"id":"/x/newer","state":"running","attention":"finished","last_activity":"2025-12-31T23:00:00Z"},
-                {"id":"/x/older","state":"running","attention":"permission","last_activity":"2025-12-31T22:00:00Z"},
-                {"id":"/x/stopped","state":"stopped"}
+                {"id":"/x/newer","group":"done","last_activity":"2025-12-31T23:00:00Z"},
+                {"id":"/x/ask","group":"needs_you","last_activity":"2025-12-31T23:30:00Z"},
+                {"id":"/x/older","group":"idle","last_activity":"2025-12-31T22:00:00Z"}
             ]}"#,
         );
-        let lines = plain_lines(&render(&app, 20, 40, NOW));
-        assert_eq!(lines[0], "Agents · 3");
-        assert!(lines[1].contains("/x/older"), "{lines:?}");
-        assert!(lines[2].contains("/x/newer"), "{lines:?}");
-        assert!(lines[3].contains("/x/stopped"), "{lines:?}");
-        assert_eq!(lines[4], "");
+        let lines: Vec<String> = plain_lines(&render(&app, 20, 40, NOW))
+            .iter()
+            .map(|l| l.split("  ").next().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(
+            lines[..6],
+            [
+                "Needs you · 1",
+                "· /x/ask",
+                "",
+                "Agents · 2",
+                "· /x/older",
+                "· /x/newer"
+            ]
+        );
+    }
+
+    #[test]
+    fn needs_you_section_is_omitted_when_nobody_waits() {
+        let app = simple_app(&["/a"]);
+        assert_eq!(
+            plain_lines(&render(&app, 4, 40, NOW))[..2],
+            ["Agents · 1", "· /a"]
+        );
     }
 
     #[test]

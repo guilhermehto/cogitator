@@ -164,12 +164,13 @@ impl App {
         false
     }
 
-    /// Oldest activity first, so agents that finished earliest sit on top;
-    /// agents without a timestamp go last in cogitator's order.
+    /// Agents that need the user come first, then the rest; each part runs
+    /// oldest activity first, so whoever has waited longest sits on top.
+    /// Agents without a timestamp close their part in cogitator's order.
     fn set_agents(&mut self, mut agents: Vec<Agent>) {
         agents.sort_by_cached_key(|a| {
             let secs = a.last_activity_secs();
-            (secs.is_none(), secs)
+            (!a.needs_you(), secs.is_none(), secs)
         });
         let prev_index = self.selected_index();
         let still_present = self
@@ -288,6 +289,18 @@ pub(crate) mod tests {
             ids(&app),
             vec!["/oldest", "/middle", "/newest", "/unknown-1", "/unknown-2"]
         );
+    }
+
+    #[test]
+    fn needs_you_agents_lead_oldest_first() {
+        let json = r#"{"version":1,"agents":[
+            {"id":"/old-idle","group":"idle","last_activity":"2026-01-01T08:00:00Z"},
+            {"id":"/new-ask","group":"needs_you","last_activity":"2026-01-01T12:00:00Z"},
+            {"id":"/old-ask","group":"needs_you","last_activity":"2026-01-01T09:00:00Z"}
+        ]}"#;
+        let mut app = App::new();
+        app.apply_list_result(Some(0), json.as_bytes(), b"");
+        assert_eq!(ids(&app), vec!["/old-ask", "/new-ask", "/old-idle"]);
     }
 
     #[test]
