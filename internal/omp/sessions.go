@@ -48,8 +48,14 @@ type Session struct {
 	// Created is the session initiation time from the header.
 	Created time.Time
 
-	// LastActivity is the timestamp of the last parseable line in the file.
+	// LastActivity is the timestamp of the last parseable line in the file,
+	// excluding session_exit records.
 	LastActivity time.Time
+
+	// ExitedAt is the timestamp of the latest session_exit record omp appends
+	// when the process ends; zero when none. The session has ended when it is
+	// not before LastActivity.
+	ExitedAt time.Time
 }
 
 // maxTitleRunes is the maximum number of Unicode code points kept in a
@@ -155,10 +161,9 @@ func parseSessionFile(path string) (Session, bool) {
 	defer f.Close()
 
 	var (
-		s            Session
-		seenHeader   bool
-		lastActivity time.Time
-		recordTitle  string
+		s           Session
+		seenHeader  bool
+		recordTitle string
 	)
 
 	scanner := bufio.NewScanner(f)
@@ -192,21 +197,10 @@ func parseSessionFile(path string) (Session, bool) {
 
 			seenHeader = true
 			s = sessionFromHeader(raw, recordTitle)
-			lastActivity = s.Created
 			continue
 		}
 
-		if ts, ok := parseTimestamp(raw.Timestamp); ok {
-			lastActivity = ts
-		}
-
-		// Derive a title from the first user message only when the header
-		// carried none.
-		if s.Title == "" && raw.Type == "message" && len(raw.Message) > 0 {
-			if title := userMessageTitle(raw.Message); title != "" {
-				s.Title = truncateTitle(title)
-			}
-		}
+		applyEntry(&s, raw)
 	}
 	// scanner.Err() is intentionally ignored: a truncated/partial final line
 	// is already handled by the json.Unmarshal skip above; a read error after
@@ -216,7 +210,6 @@ func parseSessionFile(path string) (Session, bool) {
 		return Session{}, false
 	}
 
-	s.LastActivity = lastActivity
 	return s, true
 }
 
@@ -233,10 +226,35 @@ func sessionFromHeader(header rawLine, recordTitle string) Session {
 	}
 
 	return Session{
-		ID:      header.ID,
-		Dir:     dir,
-		Title:   truncateTitle(strings.TrimSpace(title)),
-		Created: created,
+		ID:           header.ID,
+		Dir:          dir,
+		Title:        truncateTitle(strings.TrimSpace(title)),
+		Created:      created,
+		LastActivity: created,
+	}
+}
+
+// applyEntry folds one post-header line into s: exit records set ExitedAt,
+// every other timestamped line advances LastActivity, and the first user
+// message supplies a title when the header carried none.
+func applyEntry(s *Session, entry rawLine) {
+	ts, hasTimestamp := parseTimestamp(entry.Timestamp)
+	if entry.Type == "custom" && entry.CustomType == "session_exit" {
+		if hasTimestamp {
+			s.ExitedAt = ts
+		}
+
+		return
+	}
+
+	if hasTimestamp {
+		s.LastActivity = ts
+	}
+
+	if s.Title == "" && entry.Type == "message" && len(entry.Message) > 0 {
+		if title := userMessageTitle(entry.Message); title != "" {
+			s.Title = truncateTitle(title)
+		}
 	}
 }
 
@@ -308,12 +326,13 @@ func sortByLastActivityDesc(sessions []Session) {
 // header fields (id/cwd/title) and the message-entry payload so a single
 // unmarshal serves both.
 type rawLine struct {
-	Type      string          `json:"type"`
-	Timestamp string          `json:"timestamp"`
-	ID        string          `json:"id"`
-	CWD       string          `json:"cwd"`
-	Title     string          `json:"title"`
-	Message   json.RawMessage `json:"message"`
+	Type       string          `json:"type"`
+	CustomType string          `json:"customType"`
+	Timestamp  string          `json:"timestamp"`
+	ID         string          `json:"id"`
+	CWD        string          `json:"cwd"`
+	Title      string          `json:"title"`
+	Message    json.RawMessage `json:"message"`
 }
 
 // msgPayload is the relevant subset of a "message" entry's message object.

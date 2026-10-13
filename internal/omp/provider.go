@@ -32,8 +32,12 @@ type hookOverlay struct {
 	// lastError is set when a tool_result reports a failure.
 	lastError time.Time
 
-	// lastActivity is the time of the most recent hook event for this session.
+	// lastActivity is the time of the most recent hook event for this
+	// session, excluding session_shutdown.
 	lastActivity time.Time
+
+	// endedAt is the time of the latest session_shutdown hook; zero when none.
+	endedAt time.Time
 }
 
 // Provider polls the omp agent directory on a configurable interval and emits
@@ -152,7 +156,7 @@ func (p *Provider) pollOnce(sink provider.Sink, sessions []Session) {
 			continue
 		}
 		ov := p.overlays[id]
-		if ov.lastActivity.IsZero() && !ov.hasQuestion && ov.statusType == "" && ov.lastError.IsZero() {
+		if ov.lastActivity.IsZero() && ov.endedAt.IsZero() && !ov.hasQuestion && ov.statusType == "" && ov.lastError.IsZero() {
 			delete(p.sessions, id)
 			delete(p.overlays, id)
 		}
@@ -204,7 +208,11 @@ func (p *Provider) handleHookFrame(raw []byte, sink provider.Sink) {
 
 	p.mu.Lock()
 	ov := p.overlays[sessionID]
-	ov.lastActivity = now
+	if ev.EventName == "session_shutdown" {
+		ov.endedAt = now
+	} else {
+		ov.lastActivity = now
+	}
 
 	switch ev.EventName {
 	case "turn_start", "agent_start":
@@ -243,7 +251,7 @@ func (p *Provider) handleHookFrame(raw []byte, sink provider.Sink) {
 	// Seed a minimal p.sessions entry when the hook arrives before the session
 	// file is flushed to disk, so the next poll merges rather than drops it.
 	if _, known := p.sessions[sessionID]; !known {
-		p.sessions[sessionID] = Session{ID: sessionID, Dir: ev.CWD, LastActivity: now}
+		p.sessions[sessionID] = Session{ID: sessionID, Dir: ev.CWD, LastActivity: ov.lastActivity}
 	}
 
 	sess := p.sessions[sessionID]
@@ -269,11 +277,14 @@ func (p *Provider) sessionIDForCWD(cwd string) string {
 // its hook overlay. The hook overlay's statusType/hasQuestion/lastError take
 // precedence over the poll-derived defaults.
 func (p *Provider) mergeToUpdate(s Session, ov hookOverlay, now time.Time) provider.SessionUpdate {
+	lastActivity := later(s.LastActivity, ov.lastActivity)
+	endedAt := later(s.ExitedAt, ov.endedAt)
+	// An exit is not activity: a session that ended after its last activity
+	// is over, however recently it exited.
+	ended := !endedAt.IsZero() && !endedAt.Before(lastActivity)
+
 	src := "recent"
-	if p.recencyWindow > 0 && now.Sub(s.LastActivity) <= p.recencyWindow {
-		src = "live"
-	}
-	if !ov.lastActivity.IsZero() && p.recencyWindow > 0 && now.Sub(ov.lastActivity) <= p.recencyWindow {
+	if !ended && p.recencyWindow > 0 && now.Sub(lastActivity) <= p.recencyWindow {
 		src = "live"
 	}
 
@@ -285,11 +296,6 @@ func (p *Provider) mergeToUpdate(s Session, ov hookOverlay, now time.Time) provi
 	// (fire-and-forget spawn; mirrors the claudecode provider's decay).
 	if statusType == "busy" && src != "live" {
 		statusType = ""
-	}
-
-	lastActivity := s.LastActivity
-	if ov.lastActivity.After(lastActivity) {
-		lastActivity = ov.lastActivity
 	}
 
 	return provider.SessionUpdate{
@@ -306,4 +312,12 @@ func (p *Provider) mergeToUpdate(s Session, ov hookOverlay, now time.Time) provi
 		Created:      s.Created,
 		Source:       src,
 	}
+}
+
+func later(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+
+	return a
 }

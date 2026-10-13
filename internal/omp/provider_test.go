@@ -93,6 +93,48 @@ func TestPollOnce_MapsFieldsAndRecency(t *testing.T) {
 	}
 }
 
+func TestPollOnce_ExitedSessionIsNotLive(t *testing.T) {
+	p := omp.NewProvider("", 5*time.Second, 30*time.Minute, nil)
+	sink := &fakeSink{}
+	now := time.Now()
+	lastActive := now.Add(-2000 * time.Hour)
+
+	p.PollOnceForTest(sink, []omp.Session{
+		{ID: "killed", Dir: "/tmp/k", LastActivity: lastActive, ExitedAt: now.Add(-time.Minute)},
+		{ID: "resumed", Dir: "/tmp/r", LastActivity: now.Add(-time.Minute), ExitedAt: now.Add(-time.Hour)},
+	})
+
+	by := map[string]provider.SessionUpdate{}
+	for _, u := range sink.lastReplace() {
+		by[u.SessionID] = u
+	}
+	if u := by["killed"]; u.Source != "recent" || !u.LastActivity.Equal(lastActive) {
+		t.Errorf("killed: Source=%q LastActivity=%v, want recent and the pre-exit activity", u.Source, u.LastActivity)
+	}
+	if by["resumed"].Source != "live" {
+		t.Errorf("resumed: Source=%q, want live (active after its last exit)", by["resumed"].Source)
+	}
+}
+
+func TestHandleHookFrame_ShutdownEndsSessionUntilItStartsAgain(t *testing.T) {
+	p := omp.NewProvider("", 5*time.Second, 30*time.Minute, nil)
+	sink := &fakeSink{}
+	old := time.Now().Add(-2000 * time.Hour)
+	p.PollOnceForTest(sink, []omp.Session{{ID: "s3", Dir: "/tmp/wt", LastActivity: old}})
+
+	p.HandleHookFrameForTest([]byte(`{"hook_event_name":"session_shutdown","session_id":"s3"}`), sink)
+	u, _ := sink.lastUpdate()
+	if u.Source != "recent" || !u.LastActivity.Equal(old) {
+		t.Errorf("after shutdown: Source=%q LastActivity=%v, want recent and unchanged activity", u.Source, u.LastActivity)
+	}
+
+	p.HandleHookFrameForTest([]byte(`{"hook_event_name":"session_start","session_id":"s3"}`), sink)
+	u, _ = sink.lastUpdate()
+	if u.Source != "live" {
+		t.Errorf("after restart: Source=%q, want live", u.Source)
+	}
+}
+
 func TestHandleHookFrame_StatusTransitions(t *testing.T) {
 	p := omp.NewProvider("", 5*time.Second, 30*time.Minute, nil)
 	sink := &fakeSink{}
