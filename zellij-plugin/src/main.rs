@@ -16,7 +16,7 @@ struct State {
     app: App,
     cogitator: String,
     refresh_secs: f64,
-    granted: bool,
+    started: bool,
     list_in_flight: bool,
     session_name: Option<String>,
     plugin_id: u32,
@@ -30,7 +30,7 @@ impl Default for State {
             app: App::new(),
             cogitator: "cogitator".to_string(),
             refresh_secs: 2.0,
-            granted: false,
+            started: false,
             list_in_flight: false,
             session_name: None,
             plugin_id: 0,
@@ -75,13 +75,7 @@ impl ZellijPlugin for State {
     fn update(&mut self, event: Event) -> bool {
         match event {
             Event::PermissionRequestResult(PermissionStatus::Granted) => {
-                if self.granted {
-                    return false;
-                }
-                self.granted = true;
-                rename_plugin_pane(self.plugin_id, "cogitator");
-                self.list();
-                set_timeout(self.refresh_secs);
+                self.start();
                 false
             }
             Event::PermissionRequestResult(PermissionStatus::Denied) => {
@@ -103,6 +97,7 @@ impl ZellijPlugin for State {
                 false
             }
             Event::PaneUpdate(manifest) => {
+                self.start();
                 let was_floating = self.app.floating();
                 for (tab, panes) in &manifest.panes {
                     if let Some(pane) = panes.iter().find(|p| p.is_plugin && p.id == self.plugin_id)
@@ -140,11 +135,31 @@ impl ZellijPlugin for State {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
-        print!("{}", render::render(&self.app, rows, cols, now).join("\n"));
+        // A session created without a client renders at a larger size first;
+        // shrinking on attach would otherwise leave those rows as scrollback.
+        print!(
+            "\u{1b}[3J{}",
+            render::render(&self.app, rows, cols, now).join("\n")
+        );
     }
 }
 
 impl State {
+    /// Starts polling once. A session created without a client (`attach -b`)
+    /// never delivers PermissionRequestResult even when the permissions are
+    /// cached, but PaneUpdate needs ReadApplicationState, so receiving it
+    /// proves the grant.
+    fn start(&mut self) {
+        if self.started {
+            return;
+        }
+
+        self.started = true;
+        rename_plugin_pane(self.plugin_id, "cogitator");
+        self.list();
+        set_timeout(self.refresh_secs);
+    }
+
     /// The keybind pipe reaches the rail instance in every tab; only the one
     /// in the tab the user is looking at takes focus. An instance the pipe
     /// just launched learns its tab from the next PaneUpdate.
