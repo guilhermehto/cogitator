@@ -1,5 +1,5 @@
-use crate::app::{App, Status, GROUP_ORDER};
-use crate::feed::{Agent, Group};
+use crate::app::{App, Status};
+use crate::feed::Agent;
 
 // Glyphs, colours and widths mirror the TUI's Agents tab (internal/ui) so
 // both surfaces read the same.
@@ -154,36 +154,22 @@ fn render_list(app: &App, rows: usize, cols: usize, now: i64) -> Vec<String> {
 
     let selected = app.selected_index();
     let here = app.here_index();
-    let mut lines = Vec::new();
+    let header = vec![
+        span("Agents", HEADER),
+        span(format!(" · {}", agents.len()), DIM),
+    ];
+    let mut lines = vec![paint(&truncate(header, cols), None)];
     let mut selected_line = 0;
-    for group in GROUP_ORDER {
-        let members: Vec<(usize, &Agent)> = agents
-            .iter()
-            .enumerate()
-            .filter(|(_, a)| a.group == group)
-            .collect();
-        if members.is_empty() {
-            continue;
+    for (i, agent) in agents.iter().enumerate() {
+        let is_selected = selected == Some(i);
+        if is_selected {
+            selected_line = lines.len();
         }
-
-        if !lines.is_empty() {
-            lines.push(String::new());
-        }
-        lines.push(paint(
-            &truncate(group_header(group, members.len()), cols),
-            None,
-        ));
-        for (i, agent) in members {
-            let is_selected = selected == Some(i);
-            if is_selected {
-                selected_line = lines.len();
-            }
-            let mark = RowMark {
-                selected: is_selected,
-                here: here == Some(i),
-            };
-            lines.push(agent_row(agent, mark, cols, now, app.home()));
-        }
+        let mark = RowMark {
+            selected: is_selected,
+            here: here == Some(i),
+        };
+        lines.push(agent_row(agent, mark, cols, now, app.home()));
     }
 
     let offset = scroll_offset(app.scroll.get(), selected_line, rows, lines.len());
@@ -203,17 +189,6 @@ fn scroll_offset(current: usize, selected_line: usize, rows: usize, total: usize
     offset
 }
 
-fn group_header(group: Group, count: usize) -> Line {
-    let (title, style) = match group {
-        Group::NeedsYou => ("Needs you", PERMISSION),
-        Group::Done => ("Done", FINISHED),
-        Group::Working => ("Working", ACTIVE.bold()),
-        Group::Idle => ("Idle", HEADER),
-        Group::Stopped => ("Stopped", HEADER),
-    };
-    vec![span(title, style), span(format!(" · {count}"), DIM)]
-}
-
 struct RowMark {
     selected: bool,
     here: bool,
@@ -223,7 +198,8 @@ struct RowMark {
 // title on the left, harness and age on the right, as the TUI does. The
 // agent the user is sitting at gets a marker that survives the selection band.
 fn agent_row(agent: &Agent, mark: RowMark, cols: usize, now: i64, home: &str) -> String {
-    let age = parse_rfc3339(&agent.last_activity)
+    let age = agent
+        .last_activity_secs()
         .map(|ts| relative_time(now - ts))
         .unwrap_or_default();
 
@@ -426,76 +402,6 @@ pub fn relative_time(elapsed_secs: i64) -> String {
     format!("{}h", elapsed_secs / 3600)
 }
 
-pub fn parse_rfc3339(s: &str) -> Option<i64> {
-    let b = s.as_bytes();
-    if b.len() < 20 || b[4] != b'-' || b[7] != b'-' || !matches!(b[10], b'T' | b't') {
-        return None;
-    }
-    if b[13] != b':' || b[16] != b':' {
-        return None;
-    }
-
-    let year = num(s, 0, 4)?;
-    let month = num(s, 5, 7)?;
-    let day = num(s, 8, 10)?;
-    let hour = num(s, 11, 13)?;
-    let min = num(s, 14, 16)?;
-    let sec = num(s, 17, 19)?;
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 60 {
-        return None;
-    }
-
-    let mut rest = &s[19..];
-    if let Some(frac) = rest.strip_prefix('.') {
-        let digits = frac.bytes().take_while(u8::is_ascii_digit).count();
-        if digits == 0 {
-            return None;
-        }
-        rest = &frac[digits..];
-    }
-
-    let offset = parse_offset(rest)?;
-    let days = days_from_civil(year, month, day);
-    Some(days * 86400 + hour * 3600 + min * 60 + sec - offset)
-}
-
-fn parse_offset(s: &str) -> Option<i64> {
-    if s == "Z" || s == "z" {
-        return Some(0);
-    }
-
-    let b = s.as_bytes();
-    if b.len() != 6 || b[3] != b':' {
-        return None;
-    }
-    let sign = match b[0] {
-        b'+' => 1,
-        b'-' => -1,
-        _ => return None,
-    };
-    let h = num(s, 1, 3)?;
-    let m = num(s, 4, 6)?;
-    Some(sign * (h * 3600 + m * 60))
-}
-
-fn num(s: &str, from: usize, to: usize) -> Option<i64> {
-    let part = s.get(from..to)?;
-    if !part.bytes().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    part.parse().ok()
-}
-
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (m + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,8 +415,8 @@ mod tests {
         app
     }
 
-    fn simple_app(agents: &[(&str, &str)]) -> App {
-        app_from(&crate::app::tests::feed_json(agents))
+    fn simple_app(ids: &[&str]) -> App {
+        app_from(&crate::app::tests::feed_json(ids))
     }
 
     fn one_agent(fields: &str) -> App {
@@ -548,37 +454,25 @@ mod tests {
     }
 
     #[test]
-    fn groups_render_in_order_with_counts_and_gaps() {
-        let app = simple_app(&[
-            ("/x/stopped", "stopped"),
-            ("/x/idle", "idle"),
-            ("/x/needs", "needs_you"),
-            ("/x/done", "done"),
-        ]);
-        let lines = plain_lines(&render(&app, 20, 40, NOW));
-        assert_eq!(
-            lines[..11],
-            [
-                "Needs you · 1",
-                "· /x/needs",
-                "",
-                "Done · 1",
-                "· /x/done",
-                "",
-                "Idle · 1",
-                "· /x/idle",
-                "",
-                "Stopped · 1",
-                "· /x/stopped",
-            ]
+    fn one_header_counts_all_agents_without_group_gaps() {
+        let app = app_from(
+            r#"{"version":1,"agents":[
+                {"id":"/x/newer","state":"running","attention":"finished","last_activity":"2025-12-31T23:00:00Z"},
+                {"id":"/x/older","state":"running","attention":"permission","last_activity":"2025-12-31T22:00:00Z"},
+                {"id":"/x/stopped","state":"stopped"}
+            ]}"#,
         );
+        let lines = plain_lines(&render(&app, 20, 40, NOW));
+        assert_eq!(lines[0], "Agents · 3");
+        assert!(lines[1].contains("/x/older"), "{lines:?}");
+        assert!(lines[2].contains("/x/newer"), "{lines:?}");
+        assert!(lines[3].contains("/x/stopped"), "{lines:?}");
+        assert_eq!(lines[4], "");
     }
 
     #[test]
     fn worktree_row_shows_repo_folder_and_branch() {
-        let app = one_agent(
-            r#""kind":"worktree","repo":"/Users/me/.dotfiles","branch":"main","group":"idle""#,
-        );
+        let app = one_agent(r#""kind":"worktree","repo":"/Users/me/.dotfiles","branch":"main""#);
         assert_eq!(
             plain_lines(&render(&app, 5, 40, NOW))[1],
             "· .dotfiles·main"
@@ -587,38 +481,32 @@ mod tests {
 
     #[test]
     fn workspace_row_shows_workspace_and_session() {
-        let app =
-            one_agent(r#""kind":"workspace","workspace":"w","session_name":"s","group":"idle""#);
+        let app = one_agent(r#""kind":"workspace","workspace":"w","session_name":"s""#);
         assert_eq!(plain_lines(&render(&app, 5, 40, NOW))[1], "· w/s");
     }
 
     #[test]
     fn stray_row_abbreviates_home_and_tags_stray() {
-        let app = one_agent(r#""kind":"stray","group":"idle""#);
+        let app = one_agent(r#""kind":"stray""#);
         assert_eq!(plain_lines(&render(&app, 5, 40, NOW))[1], "· ~/p stray");
     }
 
     #[test]
     fn running_agents_show_coloured_attention_glyph() {
-        let app = one_agent(
-            r#""kind":"stray","state":"running","attention":"permission","group":"needs_you""#,
-        );
+        let app = one_agent(r#""kind":"stray","state":"running","attention":"permission""#);
         let row = &row_colours(&app, 40);
         assert!(
             row.contains(&format!("38;5;214m{GLYPH_PERMISSION} ")),
             "{row:?}"
         );
 
-        let app =
-            one_agent(r#""kind":"stray","state":"running","attention":"inactive","group":"idle""#);
+        let app = one_agent(r#""kind":"stray","state":"running","attention":"inactive""#);
         assert!(plain(&render(&app, 5, 40, NOW)[1]).starts_with(GLYPH_INACTIVE));
     }
 
     #[test]
     fn stopped_agents_are_dimmed() {
-        let app = one_agent(
-            r#""kind":"worktree","repo":"r","branch":"b","state":"stopped","group":"stopped""#,
-        );
+        let app = one_agent(r#""kind":"worktree","repo":"r","branch":"b","state":"stopped""#);
         let row = &row_colours(&app, 40);
         assert!(
             row.contains(&format!("38;5;240m{GLYPH_INACTIVE} ")),
@@ -630,7 +518,7 @@ mod tests {
     #[test]
     fn narrow_row_right_aligns_age_at_the_edge() {
         let app = one_agent(
-            r#""kind":"worktree","repo":"r","branch":"b","harness":"omp","group":"idle","last_activity":"2025-12-31T23:55:00Z""#,
+            r#""kind":"worktree","repo":"r","branch":"b","harness":"omp","last_activity":"2025-12-31T23:55:00Z""#,
         );
         let row = plain(&render(&app, 5, 30, NOW)[1]);
         assert_eq!(row.chars().count(), 30);
@@ -641,7 +529,7 @@ mod tests {
     #[test]
     fn wide_row_adds_title_and_harness_column() {
         let app = one_agent(
-            r#""kind":"worktree","repo":"r","branch":"b","harness":"omp","title":"fix it","group":"idle","last_activity":"2025-12-31T20:00:00Z""#,
+            r#""kind":"worktree","repo":"r","branch":"b","harness":"omp","title":"fix it","last_activity":"2025-12-31T20:00:00Z""#,
         );
         let row = &row_colours(&app, 90);
         assert!(plain(row).ends_with("omp           4h"), "{:?}", plain(row));
@@ -651,7 +539,7 @@ mod tests {
 
     #[test]
     fn selected_row_paints_background_across_full_width() {
-        let app = simple_app(&[("/a", "idle"), ("/b", "idle")]);
+        let app = simple_app(&["/a", "/b"]);
         let lines = render(&app, 5, 30, NOW);
         assert!(lines[1].contains("48;5;237"));
         assert_eq!(plain(&lines[1]).chars().count(), 30);
@@ -661,7 +549,7 @@ mod tests {
     #[test]
     fn row_the_user_sits_at_is_marked_even_when_selected() {
         let mut app = app_from(
-            r#"{"version":1,"agents":[{"id":"/a","group":"idle","window_id":"s:1"},{"id":"/b","group":"idle","window_id":"s:2"}]}"#,
+            r#"{"version":1,"agents":[{"id":"/a","window_id":"s:1"},{"id":"/b","window_id":"s:2"}]}"#,
         );
         app.set_location(crate::app::Location {
             session: "s".into(),
@@ -681,7 +569,7 @@ mod tests {
     #[test]
     fn long_names_truncate_with_ellipsis_counting_chars() {
         let app = one_agent(
-            r#""kind":"workspace","workspace":"ñandú","session_name":"日本語日本語日本語","group":"idle""#,
+            r#""kind":"workspace","workspace":"ñandú","session_name":"日本語日本語日本語""#,
         );
         let row = plain(&render(&app, 5, 16, NOW)[1]);
         assert_eq!(row.chars().count(), 16);
@@ -690,7 +578,7 @@ mod tests {
 
     #[test]
     fn footer_offers_back_when_docked_and_hide_when_floating() {
-        let mut app = simple_app(&[("/a", "idle")]);
+        let mut app = simple_app(&["/a"]);
         let docked = plain_lines(&render(&app, 6, 40, NOW));
         assert_eq!(docked.len(), 6);
         assert_eq!(docked[5], "enter jump   r refresh   q back");
@@ -702,13 +590,7 @@ mod tests {
 
     #[test]
     fn scrolling_keeps_selection_visible() {
-        let mut app = simple_app(&[
-            ("/a", "idle"),
-            ("/b", "idle"),
-            ("/c", "idle"),
-            ("/d", "idle"),
-            ("/e", "idle"),
-        ]);
+        let mut app = simple_app(&["/a", "/b", "/c", "/d", "/e"]);
         for _ in 0..4 {
             app.handle_key(Key::Down);
         }
@@ -719,12 +601,12 @@ mod tests {
             app.handle_key(Key::Up);
         }
         let lines = plain_lines(&render(&app, 4, 40, NOW));
-        assert_eq!(lines[..3], ["Idle · 5", "· /a", "· /b"]);
+        assert_eq!(lines[..3], ["Agents · 5", "· /a", "· /b"]);
     }
 
     #[test]
     fn never_renders_more_than_rows() {
-        let app = simple_app(&[("/a", "idle"), ("/b", "done"), ("/c", "working")]);
+        let app = simple_app(&["/a", "/b", "/c"]);
         assert_eq!(render(&app, 2, 40, NOW).len(), 2);
         assert!(render(&app, 0, 40, NOW).is_empty());
     }
@@ -759,21 +641,21 @@ mod tests {
 
     #[test]
     fn notice_replaces_the_footer() {
-        let mut app = simple_app(&[("/a", "idle"), ("/b", "idle"), ("/c", "idle")]);
+        let mut app = simple_app(&["/a", "/b", "/c"]);
         app.set_notice("focus failed");
         assert_eq!(
             plain_lines(&render(&app, 4, 40, NOW)),
-            ["Idle · 3", "· /a", "· /b", "focus failed"]
+            ["Agents · 3", "· /a", "· /b", "focus failed"]
         );
         assert_eq!(
             plain_lines(&render(&app, 6, 40, NOW)),
-            ["Idle · 3", "· /a", "· /b", "· /c", "", "focus failed"]
+            ["Agents · 3", "· /a", "· /b", "· /c", "", "focus failed"]
         );
     }
 
     #[test]
     fn notice_alone_fits_a_single_row() {
-        let mut app = simple_app(&[("/a", "idle")]);
+        let mut app = simple_app(&["/a"]);
         app.set_notice("focus failed");
         assert_eq!(plain_lines(&render(&app, 1, 5, NOW)), ["focu…"]);
     }
@@ -785,18 +667,5 @@ mod tests {
         assert_eq!(relative_time(300), "5m");
         assert_eq!(relative_time(3 * 3600 + 10), "3h");
         assert_eq!(relative_time(361 * 3600), "361h");
-    }
-
-    #[test]
-    fn parses_rfc3339_utc_and_offsets() {
-        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(parse_rfc3339("2026-01-01T00:00:00Z"), Some(NOW));
-        assert_eq!(parse_rfc3339("2026-01-01T00:00:00.123456789Z"), Some(NOW));
-        assert_eq!(parse_rfc3339("2026-01-01T02:00:00+02:00"), Some(NOW));
-        assert_eq!(parse_rfc3339("2025-12-31T23:00:00-01:00"), Some(NOW));
-        assert_eq!(parse_rfc3339("2024-02-29T00:00:00Z"), Some(1_709_164_800));
-        assert_eq!(parse_rfc3339(""), None);
-        assert_eq!(parse_rfc3339("2026-01-01 00:00:00"), None);
-        assert_eq!(parse_rfc3339("2026-13-01T00:00:00Z"), None);
     }
 }

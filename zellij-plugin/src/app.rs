@@ -1,4 +1,4 @@
-use crate::feed::{self, Agent, Group};
+use crate::feed::{self, Agent};
 use std::cell::Cell;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,21 +59,6 @@ impl Default for App {
             scroll: Cell::new(0),
         }
     }
-}
-
-pub const GROUP_ORDER: [Group; 5] = [
-    Group::NeedsYou,
-    Group::Done,
-    Group::Working,
-    Group::Idle,
-    Group::Stopped,
-];
-
-fn group_rank(g: Group) -> usize {
-    GROUP_ORDER
-        .iter()
-        .position(|o| *o == g)
-        .unwrap_or(GROUP_ORDER.len())
 }
 
 impl App {
@@ -179,8 +164,13 @@ impl App {
         false
     }
 
+    /// Oldest activity first, so agents that finished earliest sit on top;
+    /// agents without a timestamp go last in cogitator's order.
     fn set_agents(&mut self, mut agents: Vec<Agent>) {
-        agents.sort_by_key(|a| group_rank(a.group));
+        agents.sort_by_cached_key(|a| {
+            let secs = a.last_activity_secs();
+            (secs.is_none(), secs)
+        });
         let prev_index = self.selected_index();
         let still_present = self
             .selected
@@ -250,17 +240,14 @@ fn failure_message(exit_code: Option<i32>, err: &str) -> String {
 pub(crate) mod tests {
     use super::*;
 
-    pub(crate) fn feed_json(agents: &[(&str, &str)]) -> String {
-        let items: Vec<String> = agents
-            .iter()
-            .map(|(id, group)| format!(r#"{{"id":"{id}","group":"{group}"}}"#))
-            .collect();
+    pub(crate) fn feed_json(ids: &[&str]) -> String {
+        let items: Vec<String> = ids.iter().map(|id| format!(r#"{{"id":"{id}"}}"#)).collect();
         format!(r#"{{"version":1,"agents":[{}]}}"#, items.join(","))
     }
 
-    fn app_with(agents: &[(&str, &str)]) -> App {
+    fn app_with(ids: &[&str]) -> App {
         let mut app = App::new();
-        app.apply_list_result(Some(0), feed_json(agents).as_bytes(), b"");
+        app.apply_list_result(Some(0), feed_json(ids).as_bytes(), b"");
         app
     }
 
@@ -281,20 +268,31 @@ pub(crate) mod tests {
 
     #[test]
     fn successful_list_is_ready_and_selects_first() {
-        let app = app_with(&[("/a", "needs_you"), ("/b", "idle")]);
+        let app = app_with(&["/a", "/b"]);
         assert_eq!(app.status(), &Status::Ready);
         assert_eq!(selected(&app), Some("/a"));
     }
 
     #[test]
-    fn keeps_cogitator_order_within_groups() {
-        let app = app_with(&[("/c", "working"), ("/a", "needs_you"), ("/b", "working")]);
-        assert_eq!(ids(&app), vec!["/a", "/c", "/b"]);
+    fn orders_oldest_activity_first_and_unknown_last() {
+        let json = r#"{"version":1,"agents":[
+            {"id":"/unknown-1"},
+            {"id":"/newest","last_activity":"2026-01-01T12:00:00Z"},
+            {"id":"/unknown-2","last_activity":"garbage"},
+            {"id":"/oldest","last_activity":"2026-01-01T13:00:00+02:00"},
+            {"id":"/middle","last_activity":"2026-01-01T11:30:00Z"}
+        ]}"#;
+        let mut app = App::new();
+        app.apply_list_result(Some(0), json.as_bytes(), b"");
+        assert_eq!(
+            ids(&app),
+            vec!["/oldest", "/middle", "/newest", "/unknown-1", "/unknown-2"]
+        );
     }
 
     #[test]
     fn selection_movement_clamps_at_both_ends() {
-        let mut app = app_with(&[("/a", "idle"), ("/b", "idle")]);
+        let mut app = app_with(&["/a", "/b"]);
         assert_eq!(app.handle_key(Key::Up), None);
         assert_eq!(selected(&app), Some("/a"));
         app.handle_key(Key::Char('j'));
@@ -307,41 +305,33 @@ pub(crate) mod tests {
 
     #[test]
     fn selection_follows_id_across_refresh() {
-        let mut app = app_with(&[("/a", "idle"), ("/b", "idle")]);
+        let mut app = app_with(&["/a", "/b"]);
         app.handle_key(Key::Down);
-        app.apply_list_result(
-            Some(0),
-            feed_json(&[("/b", "needs_you"), ("/a", "idle")]).as_bytes(),
-            b"",
-        );
+        app.apply_list_result(Some(0), feed_json(&["/b", "/a"]).as_bytes(), b"");
         assert_eq!(selected(&app), Some("/b"));
         assert_eq!(app.selected_index(), Some(0));
     }
 
     #[test]
     fn removed_selection_clamps_to_same_index() {
-        let mut app = app_with(&[("/a", "idle"), ("/b", "idle"), ("/c", "idle")]);
+        let mut app = app_with(&["/a", "/b", "/c"]);
         app.handle_key(Key::Down);
-        app.apply_list_result(
-            Some(0),
-            feed_json(&[("/a", "idle"), ("/c", "idle")]).as_bytes(),
-            b"",
-        );
+        app.apply_list_result(Some(0), feed_json(&["/a", "/c"]).as_bytes(), b"");
         assert_eq!(selected(&app), Some("/c"));
     }
 
     #[test]
     fn removed_selection_clamps_to_last_row() {
-        let mut app = app_with(&[("/a", "idle"), ("/b", "idle"), ("/c", "idle")]);
+        let mut app = app_with(&["/a", "/b", "/c"]);
         app.handle_key(Key::Down);
         app.handle_key(Key::Down);
-        app.apply_list_result(Some(0), feed_json(&[("/a", "idle")]).as_bytes(), b"");
+        app.apply_list_result(Some(0), feed_json(&["/a"]).as_bytes(), b"");
         assert_eq!(selected(&app), Some("/a"));
     }
 
     #[test]
     fn empty_list_clears_selection() {
-        let mut app = app_with(&[("/a", "idle")]);
+        let mut app = app_with(&["/a"]);
         app.apply_list_result(Some(0), feed_json(&[]).as_bytes(), b"");
         assert_eq!(selected(&app), None);
         assert_eq!(app.handle_key(Key::Enter), None);
@@ -350,7 +340,7 @@ pub(crate) mod tests {
 
     #[test]
     fn enter_yields_focus_with_selected_id() {
-        let mut app = app_with(&[("/a", "idle"), ("/b", "idle")]);
+        let mut app = app_with(&["/a", "/b"]);
         app.handle_key(Key::Down);
         assert_eq!(
             app.handle_key(Key::Enter),
@@ -402,7 +392,7 @@ pub(crate) mod tests {
 
     #[test]
     fn failure_keeps_previous_agents() {
-        let mut app = app_with(&[("/a", "idle")]);
+        let mut app = app_with(&["/a"]);
         app.apply_list_result(Some(1), b"", b"boom");
         assert_eq!(ids(&app), vec!["/a"]);
         assert_eq!(selected(&app), Some("/a"));
@@ -410,7 +400,7 @@ pub(crate) mod tests {
 
     #[test]
     fn failed_focus_sets_notice_and_keeps_list() {
-        let mut app = app_with(&[("/a", "idle")]);
+        let mut app = app_with(&["/a"]);
         assert!(!app.apply_focus_result(Some(1), b"no such agent\n"));
         assert_eq!(app.notice(), Some("no such agent"));
         assert_eq!(app.status(), &Status::Ready);
@@ -433,7 +423,7 @@ pub(crate) mod tests {
 
     #[test]
     fn any_key_clears_notice() {
-        let mut app = app_with(&[("/a", "idle")]);
+        let mut app = app_with(&["/a"]);
         app.set_notice("boom");
         app.handle_key(Key::Char('x'));
         assert_eq!(app.notice(), None);
@@ -442,9 +432,9 @@ pub(crate) mod tests {
     fn located_app() -> App {
         let mut app = App::new();
         let json = r#"{"version":1,"agents":[
-            {"id":"/shared-a","group":"idle","mux_session":"main","window_id":"main:1","session_owned":false},
-            {"id":"/shared-b","group":"idle","mux_session":"main","window_id":"main:2","session_owned":false},
-            {"id":"/own","group":"idle","mux_session":"wt","window_id":"wt:0","session_owned":true}
+            {"id":"/shared-a","mux_session":"main","window_id":"main:1","session_owned":false},
+            {"id":"/shared-b","mux_session":"main","window_id":"main:2","session_owned":false},
+            {"id":"/own","mux_session":"wt","window_id":"wt:0","session_owned":true}
         ]}"#;
         app.apply_list_result(Some(0), json.as_bytes(), b"");
         app

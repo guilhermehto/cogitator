@@ -1,29 +1,6 @@
 use serde::Deserialize;
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Group {
-    NeedsYou,
-    Done,
-    Working,
-    Idle,
-    #[default]
-    Stopped,
-}
-
-impl<'de> Deserialize<'de> for Group {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(d)?;
-        Ok(match s.as_str() {
-            "needs_you" => Group::NeedsYou,
-            "done" => Group::Done,
-            "working" => Group::Working,
-            "idle" => Group::Idle,
-            _ => Group::Stopped,
-        })
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(default)]
 pub struct Agent {
@@ -37,12 +14,17 @@ pub struct Agent {
     pub title: String,
     pub attention: String,
     pub state: String,
-    pub group: Group,
     pub last_activity: String,
     pub mux_session: String,
     pub window_id: String,
     pub pane_id: String,
     pub session_owned: bool,
+}
+
+impl Agent {
+    pub fn last_activity_secs(&self) -> Option<i64> {
+        parse_rfc3339(&self.last_activity)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -86,6 +68,76 @@ pub fn parse(input: &str) -> Result<Feed, ParseError> {
     })
 }
 
+fn parse_rfc3339(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() < 20 || b[4] != b'-' || b[7] != b'-' || !matches!(b[10], b'T' | b't') {
+        return None;
+    }
+    if b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+
+    let year = num(s, 0, 4)?;
+    let month = num(s, 5, 7)?;
+    let day = num(s, 8, 10)?;
+    let hour = num(s, 11, 13)?;
+    let min = num(s, 14, 16)?;
+    let sec = num(s, 17, 19)?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 60 {
+        return None;
+    }
+
+    let mut rest = &s[19..];
+    if let Some(frac) = rest.strip_prefix('.') {
+        let digits = frac.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 {
+            return None;
+        }
+        rest = &frac[digits..];
+    }
+
+    let offset = parse_offset(rest)?;
+    let days = days_from_civil(year, month, day);
+    Some(days * 86400 + hour * 3600 + min * 60 + sec - offset)
+}
+
+fn parse_offset(s: &str) -> Option<i64> {
+    if s == "Z" || s == "z" {
+        return Some(0);
+    }
+
+    let b = s.as_bytes();
+    if b.len() != 6 || b[3] != b':' {
+        return None;
+    }
+    let sign = match b[0] {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let h = num(s, 1, 3)?;
+    let m = num(s, 4, 6)?;
+    Some(sign * (h * 3600 + m * 60))
+}
+
+fn num(s: &str, from: usize, to: usize) -> Option<i64> {
+    let part = s.get(from..to)?;
+    if !part.bytes().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    part.parse().ok()
+}
+
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,7 +160,6 @@ mod tests {
                 title: "t".into(),
                 attention: "question".into(),
                 state: "running".into(),
-                group: Group::NeedsYou,
                 last_activity: "2026-01-01T00:00:00Z".into(),
                 mux_session: "m".into(),
                 window_id: "1".into(),
@@ -130,7 +181,7 @@ mod tests {
     fn missing_fields_default_to_empty() {
         let feed = parse(r#"{"version":1,"agents":[{"id":"/x"}]}"#).unwrap();
         assert_eq!(feed.agents[0].kind, "");
-        assert_eq!(feed.agents[0].group, Group::Stopped);
+        assert_eq!(feed.agents[0].last_activity_secs(), None);
     }
 
     #[test]
@@ -147,23 +198,25 @@ mod tests {
     }
 
     #[test]
-    fn maps_known_and_unknown_groups() {
-        let input = r#"{"version":1,"agents":[{"group":"done"},{"group":"working"},{"group":"idle"},{"group":"stopped"},{"group":"weird"}]}"#;
-        let groups: Vec<Group> = parse(input)
-            .unwrap()
-            .agents
-            .iter()
-            .map(|a| a.group)
-            .collect();
+    fn parses_rfc3339_utc_and_offsets() {
+        const NEW_YEAR_2026: i64 = 1_767_225_600;
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_rfc3339("2026-01-01T00:00:00Z"), Some(NEW_YEAR_2026));
         assert_eq!(
-            groups,
-            vec![
-                Group::Done,
-                Group::Working,
-                Group::Idle,
-                Group::Stopped,
-                Group::Stopped
-            ]
+            parse_rfc3339("2026-01-01T00:00:00.123456789Z"),
+            Some(NEW_YEAR_2026)
         );
+        assert_eq!(
+            parse_rfc3339("2026-01-01T02:00:00+02:00"),
+            Some(NEW_YEAR_2026)
+        );
+        assert_eq!(
+            parse_rfc3339("2025-12-31T23:00:00-01:00"),
+            Some(NEW_YEAR_2026)
+        );
+        assert_eq!(parse_rfc3339("2024-02-29T00:00:00Z"), Some(1_709_164_800));
+        assert_eq!(parse_rfc3339(""), None);
+        assert_eq!(parse_rfc3339("2026-01-01 00:00:00"), None);
+        assert_eq!(parse_rfc3339("2026-13-01T00:00:00Z"), None);
     }
 }
