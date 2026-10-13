@@ -5,11 +5,9 @@ package state
 
 import (
 	"context"
-	"log/slog"
 	"testing"
 	"time"
 
-	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/discovery"
 	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/oc"
@@ -17,7 +15,7 @@ import (
 )
 
 func newProviderTestStore(ctx context.Context) *Store {
-	return New(ctx, config.Default(), slog.Default())
+	return newTestStore(ctx)
 }
 
 // TestCollidingSessionIDsAcrossProviders feeds two providers with the same

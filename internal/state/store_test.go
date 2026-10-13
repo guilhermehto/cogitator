@@ -14,8 +14,12 @@ import (
 	"github.com/guilhermehto/cogitator/internal/provider"
 )
 
+// newTestStore shows every attention change at once; settling is covered in
+// settle_test.go.
 func newTestStore(ctx context.Context) *Store {
-	return New(ctx, config.Default(), slog.Default())
+	cfg := config.Default()
+	cfg.AttentionSettle = 0
+	return New(ctx, cfg, slog.Default())
 }
 
 func makeSession(id string, updatedMs int64) oc.Session {

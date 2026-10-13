@@ -29,6 +29,11 @@ type Config struct {
 	// of age. A non-positive value disables the rule.
 	InactiveHideAfter time.Duration
 
+	// AttentionSettle is how long a session's new attention must hold before
+	// it shows, damping flicker from bursty status relays. Becoming active
+	// shows at once. A non-positive value shows every change immediately.
+	AttentionSettle time.Duration
+
 	// CodexEnabled enables the polled Codex session monitor. Default false.
 	// When false, no Codex provider is started and cogitator behaves exactly
 	// as before Codex support was added.
@@ -157,6 +162,7 @@ func Default() *Config {
 		SessionLookupTimeout:    5 * time.Second,
 		UnreachableThreshold:    3,
 		InactiveHideAfter:       5 * time.Minute,
+		AttentionSettle:         5 * time.Second,
 
 		CodexEnabled:       codexHomeDirExists(),
 		CodexHome:          os.Getenv("CODEX_HOME"),
