@@ -10,6 +10,7 @@ use zellij_tile::prelude::*;
 const CALL_KEY: &str = "cogitator_call";
 const LIST_CALL: &str = "list";
 const FOCUS_CALL: &str = "focus";
+const FOCUS_PIPE: &str = "cogitator_focus";
 
 struct State {
     app: App,
@@ -19,7 +20,7 @@ struct State {
     list_in_flight: bool,
     session_name: Option<String>,
     plugin_id: u32,
-    floating: bool,
+    own_tab: Option<usize>,
 }
 
 impl Default for State {
@@ -32,7 +33,7 @@ impl Default for State {
             list_in_flight: false,
             session_name: None,
             plugin_id: 0,
-            floating: false,
+            own_tab: None,
         }
     }
 }
@@ -100,15 +101,15 @@ impl ZellijPlugin for State {
                 false
             }
             Event::PaneUpdate(manifest) => {
-                if let Some(pane) = manifest
-                    .panes
-                    .values()
-                    .flatten()
-                    .find(|p| p.is_plugin && p.id == self.plugin_id)
-                {
-                    self.floating = pane.is_floating;
+                let was_floating = self.app.floating();
+                for (tab, panes) in &manifest.panes {
+                    if let Some(pane) = panes.iter().find(|p| p.is_plugin && p.id == self.plugin_id)
+                    {
+                        self.app.set_floating(pane.is_floating);
+                        self.own_tab = Some(*tab);
+                    }
                 }
-                false
+                self.app.floating() != was_floating
             }
             Event::Key(key) => match map_key(&key) {
                 Some(key) => {
@@ -122,6 +123,13 @@ impl ZellijPlugin for State {
         }
     }
 
+    fn pipe(&mut self, message: PipeMessage) -> bool {
+        if message.name == FOCUS_PIPE && self.in_viewed_tab() {
+            focus_plugin_pane(self.plugin_id, false, false);
+        }
+        false
+    }
+
     fn render(&mut self, rows: usize, cols: usize) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -131,6 +139,13 @@ impl ZellijPlugin for State {
 }
 
 impl State {
+    /// The keybind pipe reaches the rail instance in every tab; only the one
+    /// in the tab the user is looking at takes focus.
+    fn in_viewed_tab(&self) -> bool {
+        let viewed = get_focused_pane_info().ok().map(|(tab, _)| tab);
+        viewed.is_some() && viewed == self.own_tab
+    }
+
     fn list(&mut self) {
         if self.list_in_flight {
             return;
@@ -154,7 +169,7 @@ impl State {
                 true
             }
             Some(FOCUS_CALL) => {
-                if self.app.apply_focus_result(exit_code, stderr) && self.floating {
+                if self.app.apply_focus_result(exit_code, stderr) && self.app.floating() {
                     hide_self();
                 }
                 true
@@ -167,8 +182,16 @@ impl State {
         match effect {
             Some(Effect::Focus { agent_id }) => self.focus(&agent_id),
             Some(Effect::Refresh) => self.list(),
-            Some(Effect::Hide) => hide_self(),
+            Some(Effect::Dismiss) => self.dismiss(),
             None => {}
+        }
+    }
+
+    fn dismiss(&self) {
+        if self.app.floating() {
+            hide_self();
+        } else {
+            move_focus(Direction::Right);
         }
     }
 

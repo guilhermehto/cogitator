@@ -20,7 +20,7 @@ const HARNESS_PALETTE: [u8; 22] = [
     213, 219,
 ];
 
-const HINTS: [(&str, &str); 3] = [("enter", "jump"), ("r", "refresh"), ("q", "hide")];
+const HINTS: [(&str, &str); 2] = [("enter", "jump"), ("r", "refresh")];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Style {
@@ -93,7 +93,7 @@ pub fn render(app: &App, rows: usize, cols: usize, now_unix_secs: i64) -> Vec<St
 
     let bottom = match app.notice() {
         Some(notice) => Some(vec![span(notice, HINT)]),
-        None if rows > 2 => Some(footer()),
+        None if rows > 2 => Some(footer(app.floating())),
         None => None,
     };
     let Some(bottom) = bottom else {
@@ -106,9 +106,17 @@ pub fn render(app: &App, rows: usize, cols: usize, now_unix_secs: i64) -> Vec<St
     lines
 }
 
-fn footer() -> Line {
+/// A floating plugin hides on q; a docked sidebar hands focus back to the
+/// pane on its right instead, since hiding a docked pane loses its place.
+fn footer(floating: bool) -> Line {
+    let dismiss = if floating {
+        ("q", "hide")
+    } else {
+        ("q", "back")
+    };
+
     let mut line = Vec::new();
-    for (i, (key, desc)) in HINTS.iter().enumerate() {
+    for (i, (key, desc)) in HINTS.iter().chain([&dismiss]).enumerate() {
         if i > 0 {
             line.push(span("   ", PLAIN));
         }
@@ -641,11 +649,15 @@ mod tests {
     }
 
     #[test]
-    fn footer_lists_keys_on_the_bottom_row() {
-        let app = simple_app(&[("/a", "idle")]);
-        let lines = plain_lines(&render(&app, 6, 40, NOW));
-        assert_eq!(lines.len(), 6);
-        assert_eq!(lines[5], "enter jump   r refresh   q hide");
+    fn footer_offers_back_when_docked_and_hide_when_floating() {
+        let mut app = simple_app(&[("/a", "idle")]);
+        let docked = plain_lines(&render(&app, 6, 40, NOW));
+        assert_eq!(docked.len(), 6);
+        assert_eq!(docked[5], "enter jump   r refresh   q back");
+
+        app.set_floating(true);
+        let floating = plain_lines(&render(&app, 6, 40, NOW));
+        assert_eq!(floating[5], "enter jump   r refresh   q hide");
     }
 
     #[test]

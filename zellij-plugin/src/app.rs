@@ -23,7 +23,7 @@ pub enum Key {
 pub enum Effect {
     Focus { agent_id: String },
     Refresh,
-    Hide,
+    Dismiss,
 }
 
 #[derive(Debug)]
@@ -33,6 +33,7 @@ pub struct App {
     selected: Option<String>,
     status: Status,
     notice: Option<String>,
+    floating: bool,
     pub(crate) scroll: Cell<usize>,
 }
 
@@ -44,6 +45,7 @@ impl Default for App {
             selected: None,
             status: Status::Loading,
             notice: None,
+            floating: false,
             scroll: Cell::new(0),
         }
     }
@@ -92,6 +94,14 @@ impl App {
     pub fn selected_index(&self) -> Option<usize> {
         let id = self.selected.as_deref()?;
         self.agents.iter().position(|a| a.id == id)
+    }
+
+    pub fn floating(&self) -> bool {
+        self.floating
+    }
+
+    pub fn set_floating(&mut self, floating: bool) {
+        self.floating = floating;
     }
 
     pub fn set_permission_denied(&mut self) {
@@ -172,7 +182,7 @@ impl App {
                 .clone()
                 .map(|agent_id| Effect::Focus { agent_id }),
             Key::Char('r') => Some(Effect::Refresh),
-            Key::Esc | Key::Char('q') => Some(Effect::Hide),
+            Key::Esc | Key::Char('q') => Some(Effect::Dismiss),
             Key::Char(_) => None,
         }
     }
@@ -315,11 +325,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn refresh_and_hide_keys_yield_effects() {
+    fn refresh_and_dismiss_keys_yield_effects() {
         let mut app = App::new();
         assert_eq!(app.handle_key(Key::Char('r')), Some(Effect::Refresh));
-        assert_eq!(app.handle_key(Key::Char('q')), Some(Effect::Hide));
-        assert_eq!(app.handle_key(Key::Esc), Some(Effect::Hide));
+        assert_eq!(app.handle_key(Key::Char('q')), Some(Effect::Dismiss));
+        assert_eq!(app.handle_key(Key::Esc), Some(Effect::Dismiss));
         assert_eq!(app.handle_key(Key::Char('x')), None);
     }
 
