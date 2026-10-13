@@ -74,7 +74,7 @@ func TestAgentsViewListsDoneAgentUnderDoneGroup(t *testing.T) {
 
 	out := m.View()
 
-	if !strings.Contains(out, "Done (1)") {
+	if !strings.Contains(out, "Done · 1") {
 		t.Fatalf("agents view missing Done group:\n%s", out)
 	}
 }

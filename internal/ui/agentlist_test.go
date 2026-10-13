@@ -46,7 +46,7 @@ func TestAgentListShowsGroupHeadersInOrder(t *testing.T) {
 	view := l.View(agentListNow, 100, 40)
 
 	last := -1
-	for _, title := range []string{"Needs you (1)", "Done (1)", "Working (1)", "Idle (1)", "Stopped (1)"} {
+	for _, title := range []string{"Needs you · 1", "Done · 1", "Working · 1", "Idle · 1", "Stopped · 1"} {
 		idx := strings.Index(view, title)
 		if idx < 0 || idx < last {
 			t.Fatalf("header %q missing or out of order in:\n%s", title, view)
@@ -102,6 +102,25 @@ func TestAgentListShowsFullClaudeCodeHarnessAtPopupWidth(t *testing.T) {
 
 	if !strings.Contains(view, "claude-code") {
 		t.Fatalf("harness truncated in:\n%s", view)
+	}
+}
+
+func TestAgentListShowsTitleAndHarnessOnWideRowsOnly(t *testing.T) {
+	a := worktreeAgent("/a", "/r/api", "main", agents.GroupIdle, state.AttnInactive, settings.StateRunning)
+	a.Title = "Fix flaky test"
+	l := newAgentList()
+	l.SetAgents([]agents.Agent{a})
+
+	wide, narrow := l.View(agentListNow, 100, 40), l.View(agentListNow, 50, 40)
+
+	if !strings.Contains(wide, "Fix flaky test") || !strings.Contains(wide, "opencode") {
+		t.Fatalf("wide row missing title or harness:\n%s", wide)
+	}
+	if strings.Contains(narrow, "Fix flaky test") || strings.Contains(narrow, "opencode") {
+		t.Fatalf("narrow row should keep only status, name and age:\n%s", narrow)
+	}
+	if !strings.Contains(narrow, "api·main") || !strings.Contains(narrow, "5m") {
+		t.Fatalf("narrow row missing name or age:\n%s", narrow)
 	}
 }
 

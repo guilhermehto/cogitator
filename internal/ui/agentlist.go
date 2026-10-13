@@ -9,17 +9,18 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/guilhermehto/cogitator/internal/agents"
 	"github.com/guilhermehto/cogitator/internal/settings"
-	"github.com/guilhermehto/cogitator/internal/state"
 )
 
 const (
-	agentNameWidth    = 40
 	agentHarnessWidth = 11
-	agentReasonWidth  = 11
+	// agentDetailMinWidth is the narrowest row that still fits the session
+	// title and harness; narrower rows keep only status, name and age.
+	agentDetailMinWidth = 80
 )
 
 // agentHomeDir is read once so row labels can abbreviate it to "~".
@@ -31,6 +32,14 @@ var agentGroupTitles = map[agents.Group]string{
 	agents.GroupWorking:  "Working",
 	agents.GroupIdle:     "Idle",
 	agents.GroupStopped:  "Stopped",
+}
+
+var agentGroupStyles = map[agents.Group]lipgloss.Style{
+	agents.GroupNeedsYou: attnPermStyle,
+	agents.GroupDone:     attnFinishedStyle,
+	agents.GroupWorking:  attnActiveStyle.Bold(true),
+	agents.GroupIdle:     headerStyle,
+	agents.GroupStopped:  headerStyle,
 }
 
 type agentListIntent int
@@ -148,6 +157,17 @@ func (l *agentList) moveTo(last bool) {
 	l.cursorID = list[0].ID
 }
 
+// Current returns the agent under the cursor.
+func (l agentList) Current() (agents.Agent, bool) {
+	list := l.visible()
+	idx := l.cursorIndex(list)
+	if idx < 0 {
+		return agents.Agent{}, false
+	}
+
+	return list[idx], true
+}
+
 func (l agentList) Filtering() bool {
 	return l.filtering
 }
@@ -228,7 +248,10 @@ func (l agentList) View(now time.Time, width, height int) string {
 	lastGroup := agents.Group(-1)
 	for _, a := range list {
 		if a.Group != lastGroup {
-			lines = append(lines, headerStyle.Render(fmt.Sprintf("%s (%d)", agentGroupTitles[a.Group], counts[a.Group])))
+			if lastGroup >= 0 {
+				lines = append(lines, "")
+			}
+			lines = append(lines, agentGroupHeader(a.Group, counts[a.Group]))
 			lastGroup = a.Group
 		}
 		if a.ID == l.cursorID {
@@ -238,7 +261,7 @@ func (l agentList) View(now time.Time, width, height int) string {
 	}
 
 	if len(list) == 0 {
-		lines = append(lines, dimStyle.Render("  no agents"))
+		lines = append(lines, dimStyle.Render("no agents in flight"))
 	}
 
 	if l.filtering {
@@ -246,6 +269,10 @@ func (l agentList) View(now time.Time, width, height int) string {
 	}
 
 	return strings.Join(windowLines(lines, cursorLine, height), "\n")
+}
+
+func agentGroupHeader(g agents.Group, count int) string {
+	return agentGroupStyles[g].Render(agentGroupTitles[g]) + dimStyle.Render(fmt.Sprintf(" · %d", count))
 }
 
 func agentGroupCounts(list []agents.Agent) map[agents.Group]int {
@@ -267,25 +294,60 @@ func windowLines(lines []string, cursorLine, height int) []string {
 	return lines[start : start+height]
 }
 
+// renderAgentRow lays out status, name and (when wide enough) the muted
+// session title on the left, harness and age on the right, like a Repos row.
 func renderAgentRow(now time.Time, a agents.Agent, selected bool, width int) string {
-	marker := "  "
+	left := agentStatusCell(a) + agentStyledName(a)
+	right := dimStyle.Render(formatRelative(now, a.LastActivity))
+
+	if width >= agentDetailMinWidth {
+		if a.Title != "" {
+			left += "  " + wtPathStyle.Render(a.Title)
+		}
+		right = fitCell(agentColor(a.Harness).Render(a.Harness), agentHarnessWidth) + " " + alignRight(right, 4)
+	}
+
+	row := left + "  " + right
+	if width > 0 {
+		gap := width - ansi.StringWidth(right) - 2
+		row = fitCell(left, max(gap, 0)) + "  " + right
+	}
+
 	if selected {
-		marker = promptMarkerStyle.Render("▌ ")
+		return highlightSelectedRow(row)
 	}
 
-	status := worktreeStatusCell(settings.Row{State: a.State, Attention: a.Attention})
-	name := fitCell(agentName(a), agentNameWidth)
-	harness := fitCell(dimStyle.Render(a.Harness), agentHarnessWidth)
-	reason := fitCell(agentReason(a), agentReasonWidth)
-	age := dimStyle.Render(formatRelative(now, a.LastActivity))
+	return row
+}
 
-	row := marker + status + name + " " + harness + " " + reason + " " + age
+// agentStatusCell renders the same status glyph the Repos and Workspaces
+// tabs show for the agent's session.
+func agentStatusCell(a agents.Agent) string {
+	return worktreeStatusCell(settings.Row{State: a.State, Attention: a.Attention})
+}
 
-	if width <= 0 {
-		return row
+// agentStyledName is agentName with the repo or workspace muted so the branch
+// or session reads first; stopped agents are dimmed as in the Repos tab.
+func agentStyledName(a agents.Agent) string {
+	lead := lipgloss.NewStyle()
+	if a.State == settings.StateStopped {
+		lead = wtStoppedStyle
 	}
 
-	return ansi.Truncate(row, width, "…")
+	switch {
+	case a.Kind == agents.KindWorkspace:
+		return wtRepoStyle.UnsetBold().Render(a.Workspace) + dimStyle.Render("/") + lead.Render(a.SessionName)
+	case a.Kind == agents.KindStray:
+		return lead.Render(abbreviateHome(a.ID)) + " " + recentStyle.Render("stray")
+	case a.Branch == "":
+		return lead.Render(abbreviateHome(a.ID))
+	}
+
+	return wtRepoStyle.UnsetBold().Render(filepath.Base(a.Repo)) + dimStyle.Render("·") + lead.Render(a.Branch)
+}
+
+func alignRight(s string, width int) string {
+	return strings.Repeat(" ", max(0, width-ansi.StringWidth(s))) + s
 }
 
 func fitCell(s string, width int) string {
@@ -321,26 +383,4 @@ func abbreviateHome(dir string) string {
 	}
 
 	return dir
-}
-
-func agentReason(a agents.Agent) string {
-	switch a.Attention {
-	case state.AttnPermissionPending:
-		return attnPermStyle.Render("permission")
-	case state.AttnQuestionPending:
-		return attnQuestionStyle.Render("question")
-	case state.AttnErrored:
-		return attnErrStyle.Render("error")
-	case state.AttnFinished:
-		return attnFinishedStyle.Render("finished")
-	}
-
-	switch a.Group {
-	case agents.GroupWorking:
-		return attnActiveStyle.Render("working")
-	case agents.GroupStopped:
-		return dimStyle.Render("stopped")
-	}
-
-	return dimStyle.Render("idle")
 }

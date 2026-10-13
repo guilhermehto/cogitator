@@ -174,7 +174,7 @@ func newPreviewPick(t *testing.T, width int) (pickModel, *captureRecorder) {
 	}
 	recorder := &captureRecorder{}
 	m := newTestPick(&fakeAgentFeed{list: list})
-	m.runner = recorder
+	m.preview.runner = recorder
 
 	model, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: 30})
 	m = model.(pickModel)
@@ -192,7 +192,7 @@ func step(m pickModel, msg tea.Msg) (pickModel, tea.Cmd) {
 func TestPreviewShowsReasonAndPaneTailForCursorAgent(t *testing.T) {
 	m, recorder := newPreviewPick(t, 120)
 
-	m, cmd := step(m, previewDebounceMsg{seq: m.previewSeq})
+	m, cmd := step(m, previewDebounceMsg{seq: m.preview.seq})
 	m, _ = step(m, cmd())
 
 	view := m.View()
@@ -209,8 +209,8 @@ func TestPreviewShowsReasonAndPaneTailForCursorAgent(t *testing.T) {
 func TestPreviewKeepsOneCaptureInFlightAndFinalSelectionWins(t *testing.T) {
 	m, recorder := newPreviewPick(t, 120)
 
-	m, cmd := step(m, previewDebounceMsg{seq: m.previewSeq})
-	staleSeq := m.previewSeq
+	m, cmd := step(m, previewDebounceMsg{seq: m.preview.seq})
+	staleSeq := m.preview.seq
 	firstCapture := cmd
 
 	m, _ = step(m, keyMsg("j"))
@@ -221,7 +221,7 @@ func TestPreviewKeepsOneCaptureInFlightAndFinalSelectionWins(t *testing.T) {
 		t.Fatal("stale debounce must not start a capture")
 	}
 
-	m, cmd = step(m, previewDebounceMsg{seq: m.previewSeq})
+	m, cmd = step(m, previewDebounceMsg{seq: m.preview.seq})
 	if cmd != nil {
 		t.Fatal("debounce must not start a second capture while one is in flight")
 	}
@@ -235,14 +235,14 @@ func TestPreviewKeepsOneCaptureInFlightAndFinalSelectionWins(t *testing.T) {
 	if got := recorder.targets; len(got) != 2 || got[1] != "@/c" {
 		t.Fatalf("capture targets = %v, want second capture of @/c", got)
 	}
-	if m.previewAgentID != "/c" {
-		t.Fatalf("preview agent = %q, want /c", m.previewAgentID)
+	if m.preview.agentID != "/c" {
+		t.Fatalf("preview agent = %q, want /c", m.preview.agentID)
 	}
 }
 
 func TestPreviewToggleHidesPreviewAndWidensList(t *testing.T) {
 	m, _ := newPreviewPick(t, 120)
-	m, cmd := step(m, previewDebounceMsg{seq: m.previewSeq})
+	m, cmd := step(m, previewDebounceMsg{seq: m.preview.seq})
 	m, _ = step(m, cmd())
 	if !strings.Contains(m.View(), "needs permission") {
 		t.Fatal("preview should be visible by default on a wide popup")

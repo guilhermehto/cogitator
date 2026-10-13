@@ -795,9 +795,10 @@ type model struct {
 	focusPolling bool
 	// visits holds, per tmux client, the Done agent it is looking at; the
 	// focus poll marks it seen once the client switches away.
-	visits     map[string]agents.Visit
-	agents     []agents.Agent
-	agentsList agentList
+	visits       map[string]agents.Visit
+	agents       []agents.Agent
+	agentsList   agentList
+	agentPreview agentPreview
 
 	// prompt/input drive the sessions-pane input bar shared by every prompt
 	// mode (new worktree, fetch branch, repo finder, session switcher, ...).
@@ -1930,7 +1931,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.wsHint = ""
 			m.tmuxHint = ""
 			m.view = nextView(m.view)
-			return m, nil
+			return m, m.syncAgentPreview()
 		}
 
 		if m.view == viewAgents {
@@ -2215,6 +2216,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.Width = max(0, paneInnerWidth(m.width)-promptLabelLen)
 		m.syncSessionScroll()
 		m.syncWsScroll()
+		return m, m.syncAgentPreview()
 
 	case launchResultMsg:
 		// A launch/resume Cmd completed.
@@ -2568,6 +2570,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case focusPollMsg:
 		return m, m.applyFocusPoll(msg)
+
+	case previewDebounceMsg, previewRefreshMsg, previewCaptureMsg:
+		return m, m.handleAgentPreviewMsg(msg)
 
 	case badgeWriteMsg:
 		return m, nil

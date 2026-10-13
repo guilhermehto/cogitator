@@ -27,11 +27,48 @@ func (m model) updateAgentsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	return m, nil
+	return m, m.syncAgentPreview()
 }
 
-// renderAgentsView draws the grouped agent list, reserving the last line for
-// a transient hint (e.g. a failed jump) when one is set.
+// syncAgentPreview points the preview at the Agents cursor while the tab is
+// shown wide enough to hold it, and stops it otherwise.
+func (m *model) syncAgentPreview() tea.Cmd {
+	if m.view != viewAgents || m.badgeRunner == nil || m.paneWidth()-2 < agentSplitMinWidth {
+		m.agentPreview.Hide()
+
+		return nil
+	}
+
+	m.agentsList.SetAgents(m.agents)
+	current, ok := m.agentsList.Current()
+
+	return m.agentPreview.Follow(current, ok)
+}
+
+func (m *model) handleAgentPreviewMsg(msg tea.Msg) tea.Cmd {
+	m.agentsList.SetAgents(m.agents)
+	current, ok := m.agentsList.Current()
+
+	switch msg := msg.(type) {
+	case previewDebounceMsg:
+		return m.agentPreview.Debounced(msg, current, ok)
+	case previewRefreshMsg:
+		if m.view != viewAgents {
+			m.agentPreview.Hide()
+
+			return nil
+		}
+
+		return m.agentPreview.Refresh(msg, current, ok)
+	case previewCaptureMsg:
+		return m.agentPreview.Captured(msg, current, ok)
+	}
+
+	return nil
+}
+
+// renderAgentsView draws the grouped agent list beside the cursor agent's
+// preview, reserving the last line for a transient hint (e.g. a failed jump).
 func (m model) renderAgentsView(width, height int) string {
 	now := m.tickNow
 	if now.IsZero() {
@@ -41,11 +78,25 @@ func (m model) renderAgentsView(width, height int) string {
 	list := m.agentsList
 	list.SetAgents(m.agents)
 
-	if m.tmuxHint == "" {
-		return list.View(now, width, height)
+	// The pane's horizontal padding takes two columns, as for Repos rows.
+	width = max(0, width-2)
+	bodyHeight := max(1, height-1)
+	if m.tmuxHint != "" {
+		bodyHeight = max(1, bodyHeight-1)
 	}
 
-	return list.View(now, width, max(1, height-1)) + "\n" + wtHintStyle.Render(singleLineCell(m.tmuxHint))
+	preview := m.agentPreview
+	body := list.View(now, width, bodyHeight)
+	if m.badgeRunner != nil {
+		body = renderAgentSplit(list, preview, now, width, bodyHeight)
+	}
+
+	view := headerStyle.Render("Agents") + "\n" + body
+	if m.tmuxHint != "" {
+		view += "\n" + wtHintStyle.Render(singleLineCell(m.tmuxHint))
+	}
+
+	return view
 }
 
 func (m model) agentKeyHints() []keyHint {

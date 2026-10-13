@@ -67,9 +67,10 @@ func applyBadgesCmd(r tmuxctl.Runner, writes []tmuxctl.OptionWrite) tea.Cmd {
 }
 
 // attachBadges enables the focus poll that publishes @cog_* options and
-// clears Done agents the user visited and left.
+// clears Done agents the user visited and left, and the Agents tab preview.
 func (m *model) attachBadges(r tmuxctl.Runner) {
 	m.badgeRunner = r
+	m.agentPreview.runner = r
 }
 
 func (m *model) handleFocusTick() tea.Cmd {
@@ -80,7 +81,7 @@ func (m *model) handleFocusTick() tea.Cmd {
 
 	m.focusPolling = true
 
-	return tea.Batch(next, pollTmuxCmd(m.badgeRunner))
+	return tea.Batch(next, pollTmuxCmd(m.badgeRunner), m.syncAgentPreview())
 }
 
 func (m *model) applyFocusPoll(msg focusPollMsg) tea.Cmd {
