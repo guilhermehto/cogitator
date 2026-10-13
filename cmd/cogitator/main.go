@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 
@@ -16,7 +18,9 @@ import (
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/logging"
 	"github.com/guilhermehto/cogitator/internal/omp"
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
+	"github.com/guilhermehto/cogitator/internal/tmuxinstall"
 	"github.com/guilhermehto/cogitator/internal/ui"
 )
 
@@ -92,6 +96,11 @@ func main() {
 
 	if len(os.Args) > 1 && os.Args[1] == "next" {
 		runNextCommand(os.Args[2:])
+		return
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "tmux" {
+		runTmuxCommand(os.Args[2:])
 		return
 	}
 
@@ -186,6 +195,63 @@ func runNextCommand(args []string) {
 	if err := agentfeed.RunNext(context.Background(), *client, *windowID, *sessionID, logger); err != nil {
 		logger.Error("next failed", "err", err)
 	}
+}
+
+// runTmuxCommand wires or removes the tmux key bindings. Unlike pick and next
+// it runs from a terminal, so it reports to stdout/stderr and exits non-zero
+// on failure.
+func runTmuxCommand(args []string) {
+	if len(args) == 0 || (args[0] != "install" && args[0] != "uninstall") {
+		fmt.Fprintln(os.Stderr, "usage: cogitator tmux install|uninstall [flags]")
+		os.Exit(2)
+	}
+
+	action := args[0]
+	flags := flag.NewFlagSet("tmux "+action, flag.ExitOnError)
+	opts := tmuxinstall.Options{}
+	flags.StringVar(&opts.ConfigPath, "config", "", "tmux config file to edit (default: tmux's lookup order)")
+	flags.BoolVar(&opts.DryRun, "dry-run", false, "print the changes without writing anything")
+	flags.BoolVar(&opts.NoReload, "no-reload", false, "do not touch the running tmux server")
+	if action == "install" {
+		flags.StringVar(&opts.NextKey, "next-key", tmuxinstall.DefaultNextKey, "prefix key that jumps to the next agent needing attention")
+		flags.StringVar(&opts.PickKey, "pick-key", tmuxinstall.DefaultPickKey, "prefix key that opens the agent picker")
+		flags.StringVar(&opts.Binary, "binary", "", "cogitator binary to bind (default: PATH lookup, then this executable)")
+	}
+	flags.Parse(args[1:])
+
+	installer, err := newTmuxInstaller()
+	if err == nil && action == "install" {
+		err = installer.Install(opts)
+	} else if err == nil {
+		err = installer.Uninstall(opts)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func newTmuxInstaller() (tmuxinstall.Installer, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return tmuxinstall.Installer{}, fmt.Errorf("resolve home directory: %w", err)
+	}
+
+	configPath, err := settings.ConfigPath()
+	if err != nil {
+		return tmuxinstall.Installer{}, err
+	}
+
+	return tmuxinstall.Installer{
+		Home:          home,
+		XDGConfigHome: os.Getenv("XDG_CONFIG_HOME"),
+		OwnedPath:     filepath.Join(filepath.Dir(configPath), "tmux.conf"),
+		LookPath:      exec.LookPath,
+		Executable:    os.Executable,
+		Tmux:          tmuxctl.DefaultRunner,
+		Out:           os.Stdout,
+		Warn:          os.Stderr,
+	}, nil
 }
 
 // setupSubcommandLogger logs to the cogitator log file; a failure to open it
