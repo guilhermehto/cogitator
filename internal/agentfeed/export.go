@@ -34,6 +34,9 @@ type ExportAgent struct {
 	MuxSession   string `json:"mux_session"`
 	WindowID     string `json:"window_id"`
 	PaneID       string `json:"pane_id"`
+	// SessionOwned lets consumers treat a client anywhere in MuxSession as
+	// being at this agent, matching agents.AgentAt.
+	SessionOwned bool `json:"session_owned"`
 }
 
 func ExportJSON(list []agents.Agent, home string) ([]byte, error) {
@@ -67,6 +70,7 @@ func exportAgent(a agents.Agent) ExportAgent {
 		MuxSession:   a.MuxSessionID,
 		WindowID:     a.WindowID,
 		PaneID:       a.PaneID,
+		SessionOwned: a.SessionOwned,
 	}
 }
 

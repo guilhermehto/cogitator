@@ -40,6 +40,7 @@ func TestExportJSON_MapsEveryField(t *testing.T) {
 		MuxSessionID: "mux",
 		WindowID:     "@1",
 		PaneID:       "%2",
+		SessionOwned: true,
 	}
 
 	raw, err := ExportJSON([]agents.Agent{a}, "/home/me")
@@ -52,13 +53,13 @@ func TestExportJSON_MapsEveryField(t *testing.T) {
 		ID: "/repo/wt", Kind: "worktree", Repo: "repo", Branch: "feat", Workspace: "ws",
 		SessionName: "sess", Harness: "omp", Title: "title", Attention: "permission", State: "running",
 		Group: "needs_you", LastActivity: "2026-01-02T02:04:05Z", MuxSession: "mux",
-		WindowID: "@1", PaneID: "%2",
+		WindowID: "@1", PaneID: "%2", SessionOwned: true,
 	}
 	if got.Version != 1 || got.Home != "/home/me" || len(got.Agents) != 1 || got.Agents[0] != want {
 		t.Fatalf("export = %+v, want version 1 with %+v", got, want)
 	}
 
-	for _, key := range []string{`"session_name"`, `"last_activity"`, `"mux_session"`, `"window_id"`, `"pane_id"`} {
+	for _, key := range []string{`"session_name"`, `"last_activity"`, `"mux_session"`, `"window_id"`, `"pane_id"`, `"session_owned"`} {
 		if !strings.Contains(string(raw), key) {
 			t.Errorf("export missing key %s: %s", key, raw)
 		}
