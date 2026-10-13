@@ -97,6 +97,24 @@ func TestAgentsViewEnterJumpsToAgentAndMarksItViewed(t *testing.T) {
 	}
 }
 
+func TestAgentsViewJumpLeavesAgentDoneWhileFocusPollTracksVisits(t *testing.T) {
+	tmux := &fakeTmuxOps{available: true, findWindowResult: "s:1", processAlive: true}
+	marker := &recordingViewMarker{}
+	m := agentsTabModel(t, tmux, marker)
+	m.attachBadges(newFakeTmuxServer(t.TempDir()))
+	m.view = viewAgents
+
+	m, cmd := pressKey(t, m, "enter")
+	if cmd == nil {
+		t.Fatal("enter produced no jump command")
+	}
+	m.Update(cmd())
+
+	if len(marker.viewed) != 0 {
+		t.Fatalf("viewed = %v, want none until the user leaves the agent", marker.viewed)
+	}
+}
+
 func TestAgentsViewMarkSeenKeyMarksViewedWithoutJumping(t *testing.T) {
 	marker := &recordingViewMarker{}
 	m := agentsTabModel(t, &fakeTmuxOps{available: true}, marker)

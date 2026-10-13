@@ -137,42 +137,68 @@ func TestClearAllUnsetsPresentWindowOptionsAndGlobals(t *testing.T) {
 	}
 }
 
-func TestSeenOnFocus(t *testing.T) {
+func TestSeenOnLeave(t *testing.T) {
 	done := agentOn("/done", "@1", GroupDone, state.AttnFinished, 60)
 	needs := agentOn("/needs", "@2", GroupNeedsYou, state.AttnPermissionPending, 60)
-	list := []Agent{needs, done}
+	prompted := done
+	prompted.Group, prompted.Attention, prompted.LastActivity = GroupWorking, state.AttnActive, now
+	refinished := done
+	refinished.LastActivity = now
+	on := func(window string) []tmuxctl.ClientFocus {
+		return []tmuxctl.ClientFocus{{Client: "c1", SessionID: "$1", WindowID: window}}
+	}
+	visiting := map[string]Visit{"c1": {AgentID: "/done", LastActivity: done.LastActivity}}
 
 	cases := []struct {
-		name   string
-		client tmuxctl.ClientFocus
-		want   []string
+		name       string
+		list       []Agent
+		clients    []tmuxctl.ClientFocus
+		visits     map[string]Visit
+		wantSeen   []string
+		wantVisits map[string]Visit
 	}{
-		{"returns done agent on focused window after activity",
-			tmuxctl.ClientFocus{SessionID: "$1", WindowID: "@1", ActivityUnixSecs: now.Unix()}, []string{"/done"}},
-		{"ignores client idle since before the agent finished",
-			tmuxctl.ClientFocus{SessionID: "$1", WindowID: "@1", ActivityUnixSecs: now.Unix() - 120}, nil},
-		{"never returns needs-you agents",
-			tmuxctl.ClientFocus{SessionID: "$1", WindowID: "@2", ActivityUnixSecs: now.Unix()}, nil},
+		{"records a visit without marking seen while the client is there",
+			[]Agent{needs, done}, on("@1"), nil, nil, visiting},
+		{"marks seen once the visitor switches away",
+			[]Agent{needs, done}, on("@2"), visiting, []string{"/done"}, map[string]Visit{}},
+		{"marks seen once the visitor detaches",
+			[]Agent{needs, done}, nil, visiting, []string{"/done"}, map[string]Visit{}},
+		{"keeps the visit while the client stays",
+			[]Agent{needs, done}, on("@1"), visiting, nil, visiting},
+		{"drops the visit when the user prompted the agent",
+			[]Agent{needs, prompted}, on("@2"), visiting, nil, map[string]Visit{}},
+		{"drops the visit when the agent finished a newer turn",
+			[]Agent{needs, refinished}, on("@2"), visiting, nil, map[string]Visit{}},
+		{"never visits needs-you agents",
+			[]Agent{needs, done}, on("@2"), nil, nil, map[string]Visit{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ids(SeenOnFocus(list, []tmuxctl.ClientFocus{tc.client}))
-			if !reflect.DeepEqual(got, tc.want) && !(len(got) == 0 && len(tc.want) == 0) {
-				t.Fatalf("got %v want %v", got, tc.want)
+			visits, seen := SeenOnLeave(tc.list, tc.clients, tc.visits)
+			if got := ids(seen); !(len(got) == 0 && len(tc.wantSeen) == 0) && !reflect.DeepEqual(got, tc.wantSeen) {
+				t.Fatalf("seen = %v, want %v", got, tc.wantSeen)
+			}
+			if !(len(visits) == 0 && len(tc.wantVisits) == 0) && !reflect.DeepEqual(visits, tc.wantVisits) {
+				t.Fatalf("visits = %v, want %v", visits, tc.wantVisits)
 			}
 		})
 	}
 }
 
-func TestSeenOnFocusHonoursSessionOwnership(t *testing.T) {
+func TestSeenOnLeaveHonoursSessionOwnership(t *testing.T) {
 	owned := agentOn("/owned", "@1", GroupDone, state.AttnFinished, 60)
 	owned.SessionOwned = true
-	client := tmuxctl.ClientFocus{SessionID: "$1", WindowID: "@7", ActivityUnixSecs: now.Unix()}
+	sibling := []tmuxctl.ClientFocus{{Client: "c1", SessionID: "$1", WindowID: "@7"}}
+	elsewhere := []tmuxctl.ClientFocus{{Client: "c1", SessionID: "$9", WindowID: "@9"}}
 
-	got := ids(SeenOnFocus([]Agent{owned}, []tmuxctl.ClientFocus{client}))
+	visits, seen := SeenOnLeave([]Agent{owned}, sibling, nil)
+	if len(seen) != 0 || visits["c1"].AgentID != "/owned" {
+		t.Fatalf("sibling window: seen %v visits %v, want a visit", ids(seen), visits)
+	}
 
-	if !reflect.DeepEqual(got, []string{"/owned"}) {
-		t.Fatalf("got %v", got)
+	_, seen = SeenOnLeave([]Agent{owned}, elsewhere, visits)
+	if !reflect.DeepEqual(ids(seen), []string{"/owned"}) {
+		t.Fatalf("after leaving the session: seen %v", ids(seen))
 	}
 }
 

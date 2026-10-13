@@ -793,8 +793,11 @@ type model struct {
 	// badges; nil disables it (--demo, no feed).
 	badgeRunner  tmuxctl.Runner
 	focusPolling bool
-	agents       []agents.Agent
-	agentsList   agentList
+	// visits holds, per tmux client, the Done agent it is looking at; the
+	// focus poll marks it seen once the client switches away.
+	visits     map[string]agents.Visit
+	agents     []agents.Agent
+	agentsList agentList
 
 	// prompt/input drive the sessions-pane input bar shared by every prompt
 	// mode (new worktree, fetch branch, repo finder, session switcher, ...).
@@ -2228,8 +2231,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if m.viewMarker != nil && msg.sessionID != "" {
+		if m.viewMarker != nil && msg.sessionID != "" && m.badgeRunner == nil {
 			// The user landed in the session — clear any "work finished" badge.
+			// With the focus poll running it clears once they leave instead.
 			m.viewMarker.MarkViewed(harness.Kind(msg.provider), msg.instanceID, msg.sessionID)
 		}
 		// When a configured default overrode the row's recorded harness on a

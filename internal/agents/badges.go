@@ -84,21 +84,44 @@ func ClearAll(panes []Pane, globals map[string]string) []tmuxctl.OptionWrite {
 	return writes
 }
 
-// SeenOnFocus returns Done agents a client is looking at and has touched since
-// the agent last moved, so an idle parked client never clears fresh badges.
-func SeenOnFocus(list []Agent, clients []tmuxctl.ClientFocus) []Agent {
-	seen := map[string]bool{}
-	for _, client := range clients {
-		id, ok := AgentAt(list, client.WindowID, client.SessionID)
-		if !ok {
-			continue
-		}
+// Visit is a client looking at a Done agent; LastActivity pins the turn it
+// saw, so a prompt sent during the visit never counts as seen.
+type Visit struct {
+	AgentID      string
+	LastActivity time.Time
+}
 
-		active := time.Unix(client.ActivityUnixSecs, 0)
-		for _, a := range list {
-			if a.ID == id && a.Group == GroupDone && active.After(a.LastActivity) {
-				seen[id] = true
-			}
+// SeenOnLeave tracks the Done agent each client is looking at and returns the
+// agents whose visitor has switched away or detached while the agent stayed
+// on the same finished turn. visits is keyed by client name and the returned
+// map replaces it on every poll.
+func SeenOnLeave(list []Agent, clients []tmuxctl.ClientFocus, visits map[string]Visit) (map[string]Visit, []Agent) {
+	done := map[string]Agent{}
+	for _, a := range list {
+		if a.Group == GroupDone {
+			done[a.ID] = a
+		}
+	}
+
+	at := map[string]string{}
+	for _, client := range clients {
+		if id, ok := AgentAt(list, client.WindowID, client.SessionID); ok {
+			at[client.Client] = id
+		}
+	}
+
+	seen := map[string]bool{}
+	for client, visit := range visits {
+		a, ok := done[visit.AgentID]
+		if ok && a.LastActivity.Equal(visit.LastActivity) && at[client] != visit.AgentID {
+			seen[visit.AgentID] = true
+		}
+	}
+
+	next := map[string]Visit{}
+	for client, id := range at {
+		if a, ok := done[id]; ok && !seen[id] {
+			next[client] = Visit{AgentID: id, LastActivity: a.LastActivity}
 		}
 	}
 
@@ -108,7 +131,7 @@ func SeenOnFocus(list []Agent, clients []tmuxctl.ClientFocus) []Agent {
 			out = append(out, a)
 		}
 	}
-	return out
+	return next, out
 }
 
 func currentWindowOptions(panes []Pane) map[string]windowBadge {

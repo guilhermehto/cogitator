@@ -20,11 +20,13 @@ type fakeTmuxServer struct {
 	window         map[string]string
 	globals        map[string]string
 	clientActivity int64
-	setCalls       int
+	// clientAt is the "session\twindow" the one client is looking at.
+	clientAt string
+	setCalls int
 }
 
 func newFakeTmuxServer(dir string) *fakeTmuxServer {
-	return &fakeTmuxServer{dir: dir, window: map[string]string{}, globals: map[string]string{}}
+	return &fakeTmuxServer{dir: dir, window: map[string]string{}, globals: map[string]string{}, clientAt: "$1\t@1"}
 }
 
 func (s *fakeTmuxServer) Run(args ...string) (string, error) {
@@ -33,7 +35,7 @@ func (s *fakeTmuxServer) Run(args ...string) (string, error) {
 		return fmt.Sprintf("%%1\t@1\t$1\tmain\t%s\tnode\t%s\t%s\t%s\t%s\n",
 			s.dir, s.dir, s.window["@cog_status"], s.window["@cog_reason"], s.window["@cog_since"]), nil
 	case "list-clients":
-		return fmt.Sprintf("/dev/ttys001\t$1\t@1\t%d\n", s.clientActivity), nil
+		return fmt.Sprintf("/dev/ttys001\t%s\t%d\n", s.clientAt, s.clientActivity), nil
 	case "show-options":
 		return s.showGlobals(args), nil
 	case "set-option":
@@ -195,11 +197,28 @@ func TestBadgesSkipWritesWhenNothingChanged(t *testing.T) {
 	}
 }
 
-func TestFocusMarksDoneAgentViewedWhenClientIsActive(t *testing.T) {
+func TestFocusKeepsAgentDoneWhileClientIsOnIt(t *testing.T) {
 	server := newFakeTmuxServer(t.TempDir())
 	server.clientActivity = time.Now().Add(time.Minute).Unix()
 	m, marker := badgeTestModel(t, state.AttnFinished, server)
 
+	m = pollOnce(t, m)
+	pollOnce(t, m)
+
+	if len(marker.viewed) != 0 {
+		t.Fatalf("viewed = %v, want none while the client is on the agent", marker.viewed)
+	}
+	if got := server.paneOption("@cog_status"); got != "done" {
+		t.Fatalf("@cog_status = %q, want done", got)
+	}
+}
+
+func TestFocusMarksDoneAgentViewedOnceClientLeaves(t *testing.T) {
+	server := newFakeTmuxServer(t.TempDir())
+	m, marker := badgeTestModel(t, state.AttnFinished, server)
+	m = pollOnce(t, m)
+
+	server.clientAt = "$9\t@9"
 	pollOnce(t, m)
 
 	if len(marker.viewed) != 1 || marker.viewed[0] != "ses_1" {
@@ -207,18 +226,16 @@ func TestFocusMarksDoneAgentViewedWhenClientIsActive(t *testing.T) {
 	}
 }
 
-func TestFocusKeepsAgentDoneWhenClientIsIdle(t *testing.T) {
+func TestFocusLeavesAgentUnseenWhenClientNeverVisited(t *testing.T) {
 	server := newFakeTmuxServer(t.TempDir())
-	server.clientActivity = time.Now().Add(-time.Hour).Unix()
+	server.clientAt = "$9\t@9"
 	m, marker := badgeTestModel(t, state.AttnFinished, server)
 
+	m = pollOnce(t, m)
 	pollOnce(t, m)
 
 	if len(marker.viewed) != 0 {
-		t.Fatalf("viewed = %v, want none for an idle parked client", marker.viewed)
-	}
-	if got := server.paneOption("@cog_status"); got != "done" {
-		t.Fatalf("@cog_status = %q, want done", got)
+		t.Fatalf("viewed = %v, want none for an agent nobody looked at", marker.viewed)
 	}
 }
 
