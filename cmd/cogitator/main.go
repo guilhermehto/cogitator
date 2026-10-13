@@ -109,6 +109,11 @@ func main() {
 		return
 	}
 
+	if len(os.Args) > 1 && os.Args[1] == "agents" {
+		runAgentsCommand(os.Args[2:])
+		return
+	}
+
 	bell := flag.Bool("bell", false, "ring terminal bell on transitions into attention states")
 	status := flag.Bool("status", false, "print a one-shot icons-only attention summary and exit")
 	demo := flag.Bool("demo", false, "run the TUI with a curated synthetic snapshot (for screenshots); no mDNS, no shell-outs")
@@ -303,6 +308,58 @@ func runZellijCommand(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// runAgentsCommand exposes the running TUI's agent feed to callers that cannot
+// dial its socket, such as the zellij plugin.
+func runAgentsCommand(args []string) {
+	if len(args) == 0 || (args[0] != "list" && args[0] != "focus") {
+		fmt.Fprintln(os.Stderr, "usage: cogitator agents list | focus --client <client> <agent-id>")
+		os.Exit(2)
+	}
+
+	ctx := context.Background()
+	feed := agentfeed.NewClient()
+
+	if args[0] == "list" {
+		exitOnAgentsError(printAgents(ctx, feed))
+		return
+	}
+
+	flags := flag.NewFlagSet("agents focus", flag.ExitOnError)
+	client := flags.String("client", "", "client to jump (under zellij: the viewed session name)")
+	_ = flags.Parse(args[1:])
+	if flags.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: cogitator agents focus --client <client> <agent-id>")
+		os.Exit(2)
+	}
+
+	exitOnAgentsError(feed.Focus(ctx, flags.Arg(0), *client))
+}
+
+func printAgents(ctx context.Context, feed agentfeed.Client) error {
+	list, err := feed.List(ctx)
+	if err != nil {
+		return err
+	}
+
+	out, err := agentfeed.ExportJSON(list)
+	if err != nil {
+		return err
+	}
+
+	_, err = os.Stdout.Write(append(out, '\n'))
+
+	return err
+}
+
+func exitOnAgentsError(err error) {
+	if err == nil {
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, err)
+	os.Exit(1)
 }
 
 // setupSubcommandLogger logs to the cogitator log file; a failure to open it
