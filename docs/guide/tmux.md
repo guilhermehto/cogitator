@@ -1,8 +1,8 @@
 # tmux integration
 
 Jump to whatever needs you from any tmux window, and see agent state in your status line and
-window list. cogitator publishes the state; you wire it into your own `tmux.conf`. cogitator
-never edits your tmux config, bindings, or formats.
+window list. cogitator publishes the state. It edits your tmux config only when you run
+`cogitator tmux install`, and never touches your themes or status and window formats.
 
 ## Requirements
 
@@ -12,7 +12,75 @@ never edits your tmux config, bindings, or formats.
 
 ## Setup
 
-Add this block to `~/.tmux.conf`, then reload with `tmux source-file ~/.tmux.conf`:
+```bash
+cogitator tmux install
+```
+
+This writes a cogitator-owned file (`tmux.conf` in cogitator's config dir, typically
+`~/.config/cogitator/tmux.conf`) with the two key bindings, and adds one
+`source-file -q` line to your tmux config. It is idempotent, and the bindings are live
+immediately in a running tmux server. The bindings use the absolute path of the cogitator
+binary, so tmux's `PATH` does not matter.
+
+Your tmux config is found in tmux's lookup order (`~/.tmux.conf`,
+`$XDG_CONFIG_HOME/tmux/tmux.conf`, `~/.config/tmux/tmux.conf`); if none exists,
+`~/.tmux.conf` is created. Symlinks are resolved, so dotfiles setups keep working.
+
+| Flag               | Default             | Meaning                                                   |
+| ------------------ | ------------------- | --------------------------------------------------------- |
+| `--next-key KEY`   | `Space`             | prefix key that jumps to the next agent needing attention |
+| `--pick-key KEY`   | `a`                 | prefix key that opens the agent picker                    |
+| `--config PATH`    | tmux's lookup order | tmux config file to edit                                  |
+| `--binary PATH`    | `PATH` lookup, then this executable | cogitator binary to bind                  |
+| `--dry-run`        | off                 | print the changes without writing anything                |
+| `--no-reload`      | off                 | do not touch the running tmux server                      |
+
+Install warns when a key is already bound and still installs. Without `--no-reload` it
+reloads into the running tmux server, or prints "no running tmux server" when there is none.
+
+To remove everything:
+
+```bash
+cogitator tmux uninstall
+```
+
+It removes the `source-file` line and the owned file, and unbinds the keys in the running
+server only if they still run cogitator. Pass the same `--config` if you used a custom one at
+install; `--dry-run` and `--no-reload` work here too.
+
+### Status line and window badges
+
+The installer does not touch `status-right` or window formats. Add them yourself, merged into
+your own formats. These use plain `set -g`, so reloading your config repeatedly does not
+duplicate the badge. The window formats below are tmux's defaults plus the badge:
+
+```bash
+# status line counts (each part hides when its count is zero)
+set -g status-right "#{?@cog_needs,#[fg=red]! #{@cog_needs} ,}#{?@cog_done,#[fg=green]✓ #{@cog_done} ,}#{?@cog_working,#[fg=yellow]● #{@cog_working} ,}#[default]%H:%M"
+
+# window badge: tmux's default formats plus the badge
+set -g window-status-format "#I:#W#{?window_flags,#{window_flags}, }#{?@cog_status, [#{@cog_status}],}"
+set -g window-status-current-format "#I:#W#{?window_flags,#{window_flags}, }#{?@cog_status, [#{@cog_status}],}"
+```
+
+If you already customise these options, add `#{?@cog_status, [#{@cog_status}],}` to your own
+format instead of copying the lines above, and keep your own `status-right` segments next to
+the cogitator ones.
+
+### Themes
+
+Themes usually own the window formats, so a `set -g window-status-format` in your config may
+be overwritten. Put `#{@cog_status}` in whatever window-title option the theme exposes. For
+PowerKit, set these before `run tpm`:
+
+```bash
+set -g @powerkit_active_window_title '#W#{?@cog_status, [#{@cog_status}],}'
+set -g @powerkit_inactive_window_title '#W#{?@cog_status, [#{@cog_status}],}'
+```
+
+### Manual bindings
+
+To skip the installer, add the bindings to your tmux config yourself:
 
 ```bash
 # prefix + Space: jump to the next agent that needs you
@@ -20,18 +88,7 @@ bind Space run-shell -b 'cogitator next --client "#{client_name}" --window "#{wi
 
 # prefix + a: popup list of all agents
 bind a display-popup -E -w 70% -h 60% -b rounded -T ' agents ' "cogitator pick --client '#{client_name}'"
-
-# status line counts (each part hides when its count is zero)
-set -g status-right "#{?@cog_needs,#[fg=red]! #{@cog_needs} ,}#{?@cog_done,#[fg=green]✓ #{@cog_done} ,}#{?@cog_working,#[fg=yellow]● #{@cog_working} ,}#[default]%H:%M"
-
-# window badge: appended to your existing format, not replacing it
-set -ga window-status-format "#{?@cog_status, [#{@cog_status}],}"
-set -ga window-status-current-format "#{?@cog_status, [#{@cog_status}],}"
 ```
-
-`set -ga` appends to whatever format is already set, so put these lines after any
-`window-status-format` you define yourself. Adjust `status-right` to taste; keep your own
-segments alongside the cogitator ones.
 
 ## next: jump to what needs you
 
@@ -61,7 +118,8 @@ Agents that stopped are listed for 30 minutes after they stop.
 
 ## Going back
 
-cogitator has no "back" command; use tmux built-ins, bound to whatever key you like:
+cogitator has no "back" command, and the installer adds no back key (many users already bind
+`switch-client -l`). Use tmux built-ins, bound to whatever key you like:
 
 - `session` launch mode (jumps cross sessions): `bind b switch-client -l`
 - `window` launch mode (jumps stay in one session): `bind b last-window`

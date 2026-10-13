@@ -30,7 +30,12 @@ These drive the [tmux integration](/guide/tmux) and talk to the running TUI:
   you. Always exits 0 and prints nothing, reporting through a tmux message; exits 2 only on
   usage errors.
 
-All flags are optional and fall back to tmux's current client, window, and session.
+- `cogitator tmux install [--next-key KEY] [--pick-key KEY] [--config PATH] [--binary PATH] [--dry-run] [--no-reload]`:
+  write the key bindings to a cogitator-owned file and add one `source-file -q` line to your
+  tmux config. Defaults: `--next-key Space`, `--pick-key a`.
+- `cogitator tmux uninstall [--config PATH] [--dry-run] [--no-reload]`: undo the install.
+
+See [tmux integration](/guide/tmux#setup) for details. All `pick` and `next` flags are optional and fall back to tmux's current client, window, and session.
 
 ## Hook subcommands
 
