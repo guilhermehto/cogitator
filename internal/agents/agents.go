@@ -93,13 +93,8 @@ type Input struct {
 // Build returns every agent worth surfacing, ordered by urgency.
 func Build(in Input) []Agent {
 	panes := indexPanes(in.Panes)
-	managed, managedDirs := managedAgents(in)
+	out, managedDirs := managedAgents(in, panes)
 
-	var out []Agent
-	for _, a := range managed {
-		panes.attach(&a, panes.byCogDir[a.ID])
-		out = append(out, a)
-	}
 	for _, a := range strayAgents(in, managedDirs) {
 		if panes.attach(&a, panes.byCwd[a.ID]) {
 			out = append(out, a)
@@ -188,9 +183,16 @@ func indexOf(list []Agent, id string) int {
 	return -1
 }
 
-func managedAgents(in Input) (agents []Agent, managedDirs map[string]bool) {
+func managedAgents(in Input, panes paneIndex) (agents []Agent, managedDirs map[string]bool) {
 	managedDirs = map[string]bool{}
 	liveDirs := liveSessionDirs(in.Live)
+	admit := func(a Agent) {
+		panes.attach(&a, panes.byCogDir[a.ID])
+		stopUnlessInFlight(&a, liveDirs)
+		if keep(&a, in) {
+			agents = append(agents, a)
+		}
+	}
 
 	for _, row := range in.Rows {
 		dir := canonical(row.Worktree)
@@ -198,7 +200,7 @@ func managedAgents(in Input) (agents []Agent, managedDirs map[string]bool) {
 		if row.SessionID == "" && row.LastActivity.IsZero() {
 			continue
 		}
-		a := Agent{
+		admit(Agent{
 			ID:           dir,
 			Kind:         KindWorktree,
 			Repo:         row.Repo,
@@ -210,11 +212,7 @@ func managedAgents(in Input) (agents []Agent, managedDirs map[string]bool) {
 			State:        row.State,
 			Attention:    row.Attention,
 			LastActivity: row.LastActivity,
-		}
-		demoteWithoutLiveSession(&a, liveDirs)
-		if keep(&a, in) {
-			agents = append(agents, a)
-		}
+		})
 	}
 
 	for _, ws := range in.Workspaces {
@@ -224,7 +222,7 @@ func managedAgents(in Input) (agents []Agent, managedDirs map[string]bool) {
 			}
 			dir := canonical(sess.Session.Dir)
 			managedDirs[dir] = true
-			a := Agent{
+			admit(Agent{
 				ID:           dir,
 				Kind:         KindWorkspace,
 				Branch:       sess.Session.Branch,
@@ -237,11 +235,7 @@ func managedAgents(in Input) (agents []Agent, managedDirs map[string]bool) {
 				State:        sess.State,
 				Attention:    sess.Attention,
 				LastActivity: sess.LastActivity,
-			}
-			demoteWithoutLiveSession(&a, liveDirs)
-			if keep(&a, in) {
-				agents = append(agents, a)
-			}
+			})
 		}
 	}
 	return agents, managedDirs
@@ -258,12 +252,24 @@ func liveSessionDirs(views []state.SessionView) map[string]bool {
 	return dirs
 }
 
-// demoteWithoutLiveSession stops a "running" agent backed only by recent-history
-// views: merge reports running for any session view, but only a live one is in flight.
-func demoteWithoutLiveSession(a *Agent, liveDirs map[string]bool) {
-	if a.State == settings.StateRunning && !liveDirs[a.ID] {
-		a.State = settings.StateStopped
+// stopUnlessInFlight stops a "running" agent that has neither a live session
+// nor a tmux window: merge reports running for recent-history views too.
+// Agents awaiting the user keep their badge until seen, as the Repos and
+// Workspaces tabs show them.
+func stopUnlessInFlight(a *Agent, liveDirs map[string]bool) {
+	if a.State != settings.StateRunning || liveDirs[a.ID] || a.WindowID != "" || awaitsUser(a.Attention) {
+		return
 	}
+	a.State = settings.StateStopped
+}
+
+func awaitsUser(attn state.Attention) bool {
+	switch attn {
+	case state.AttnPermissionPending, state.AttnQuestionPending, state.AttnErrored, state.AttnFinished:
+		return true
+	}
+
+	return false
 }
 
 func strayAgents(in Input, managedDirs map[string]bool) []Agent {

@@ -109,18 +109,24 @@ func TestBuildStoppedAgentsFollowRecentWindow(t *testing.T) {
 	}
 }
 
-func TestBuildTreatsRecentOnlySessionsAsStopped(t *testing.T) {
+func TestBuildLivenessOfRecentOnlySessions(t *testing.T) {
 	recent := func(dir string) []state.SessionView {
 		views := liveViews(dir)
 		views[0].Source = state.SourceRecent
 
 		return views
 	}
-	workspaceAt := func(dir string, attn state.Attention, age time.Duration) []workspace.WorkspaceStatus {
+	windowAt := func(dir string) []Pane {
+		return []Pane{{PaneID: "%1", WindowID: "@1", SessionID: "$1", CogDir: dir}}
+	}
+	rowAt := func(attn state.Attention, age time.Duration) []settings.Row {
+		return []settings.Row{row("/w/a", settings.StateRunning, attn, age)}
+	}
+	workspaceAt := func(attn state.Attention, age time.Duration) []workspace.WorkspaceStatus {
 		return []workspace.WorkspaceStatus{{
 			Workspace: workspace.Workspace{Name: "ws"},
 			Sessions: []workspace.SessionStatus{{
-				Session: workspace.Session{Name: "feat", Dir: dir},
+				Session: workspace.Session{Name: "feat", Dir: "/w/a"},
 				State:   settings.StateRunning, Attention: attn, LastActivity: ago(age),
 			}},
 		}}
@@ -132,13 +138,17 @@ func TestBuildTreatsRecentOnlySessionsAsStopped(t *testing.T) {
 		want  []string
 		group Group
 	}{
-		{"drops finished row backed only by a recent view past the window", Input{Rows: []settings.Row{row("/w/a", settings.StateRunning, state.AttnFinished, 2*time.Hour)}, Live: recent("/w/a")}, nil, 0},
-		{"lists finished row backed only by a recent view as stopped inside the window", Input{Rows: []settings.Row{row("/w/a", settings.StateRunning, state.AttnFinished, 10*time.Minute)}, Live: recent("/w/a")}, []string{"/w/a"}, GroupStopped},
-		{"lists finished row backed by a live view as done", Input{Rows: []settings.Row{row("/w/a", settings.StateRunning, state.AttnFinished, 2*time.Hour)}, Live: liveViews("/w/a")}, []string{"/w/a"}, GroupDone},
-		{"lists inactive row backed by a live view as idle", Input{Rows: []settings.Row{row("/w/a", settings.StateRunning, state.AttnInactive, 2*time.Hour)}, Live: liveViews("/w/a")}, []string{"/w/a"}, GroupIdle},
-		{"lists active row backed by a live view as working", Input{Rows: []settings.Row{row("/w/a", settings.StateRunning, state.AttnActive, time.Minute)}, Live: liveViews("/w/a")}, []string{"/w/a"}, GroupWorking},
-		{"drops workspace session backed only by a recent view past the window", Input{Workspaces: workspaceAt("/ws/a", state.AttnFinished, 2*time.Hour), Live: recent("/ws/a")}, nil, 0},
-		{"lists workspace session backed only by a recent view as stopped inside the window", Input{Workspaces: workspaceAt("/ws/a", state.AttnFinished, 10*time.Minute), Live: recent("/ws/a")}, []string{"/ws/a"}, GroupStopped},
+		{"keeps unseen finished row done past the window", Input{Rows: rowAt(state.AttnFinished, 30*time.Hour), Live: recent("/w/a")}, []string{"/w/a"}, GroupDone},
+		{"keeps pending permission row needing you past the window", Input{Rows: rowAt(state.AttnPermissionPending, 2*time.Hour), Live: recent("/w/a")}, []string{"/w/a"}, GroupNeedsYou},
+		{"keeps unseen finished workspace session done past the window", Input{Workspaces: workspaceAt(state.AttnFinished, 2*time.Hour), Live: recent("/w/a")}, []string{"/w/a"}, GroupDone},
+		{"lists seen row with a tmux window as idle", Input{Rows: rowAt(state.AttnInactive, 2*time.Hour), Live: recent("/w/a"), Panes: windowAt("/w/a")}, []string{"/w/a"}, GroupIdle},
+		{"lists busy row with a tmux window as working", Input{Rows: rowAt(state.AttnActive, 40*time.Minute), Live: recent("/w/a"), Panes: windowAt("/w/a")}, []string{"/w/a"}, GroupWorking},
+		{"lists seen row without a window as stopped inside the window", Input{Rows: rowAt(state.AttnInactive, 10*time.Minute), Live: recent("/w/a")}, []string{"/w/a"}, GroupStopped},
+		{"drops seen row without a window past the window", Input{Rows: rowAt(state.AttnInactive, 2*time.Hour), Live: recent("/w/a")}, nil, 0},
+		{"drops stale busy row without a window past the window", Input{Rows: rowAt(state.AttnActive, 2*time.Hour), Live: recent("/w/a")}, nil, 0},
+		{"drops seen workspace session without a window past the window", Input{Workspaces: workspaceAt(state.AttnInactive, 2*time.Hour), Live: recent("/w/a")}, nil, 0},
+		{"lists seen row backed by a live view as idle", Input{Rows: rowAt(state.AttnInactive, 2*time.Hour), Live: liveViews("/w/a")}, []string{"/w/a"}, GroupIdle},
+		{"lists busy row backed by a live view as working", Input{Rows: rowAt(state.AttnActive, time.Minute), Live: liveViews("/w/a")}, []string{"/w/a"}, GroupWorking},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
