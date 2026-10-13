@@ -1040,6 +1040,7 @@ var (
 	helpAgents = helpSection{"Agents", [][2]string{
 		{"enter", "jump to agent"},
 		{"x", "mark seen"},
+		{"K", "kill agent window"},
 		{"/", "filter"},
 	}}
 	helpGeneral = helpSection{"General", [][2]string{

@@ -201,6 +201,10 @@ const (
 	// skips entirely. Placed last so existing model{} literals keep their
 	// iota values.
 	promptWorkspaceBackfill
+	// promptConfirmKillAgent confirms closing the tmux window of the agent
+	// under the Agents cursor ('K'), captured in killAgentTarget. 'y' kills
+	// the window; any other key cancels.
+	promptConfirmKillAgent
 )
 
 // launchResultMsg is returned by launchCmd / resumeCmd after the tmux
@@ -569,6 +573,12 @@ type model struct {
 	// presses 'R' to untrack the repo under the cursor. Empty when no removal
 	// is in progress; cleared on cancel and on dispatch of removeRepoCmd.
 	removeRepoTarget string
+	// killAgentTarget is the agent captured when the user presses 'K' in the
+	// Agents view; zero when no kill confirmation is open.
+	killAgentTarget agents.Agent
+	// selfPaneID is cogitator's own tmux pane ($TMUX_PANE), used to refuse
+	// killing the window the TUI runs in. Empty outside tmux.
+	selfPaneID string
 	// launchMode is the resolved tmux launch mode (window vs session) read from
 	// workspace config. Refreshed on each buildWorkspaceRows so config edits
 	// take effect without a restart. The zero value never drives a real launch —
@@ -1832,6 +1842,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			case promptWorkspaceBackfill:
 				return m.updateWorkspaceBackfillActive(msg)
+
+			case promptConfirmKillAgent:
+				return m.updateKillAgentConfirm(msg)
 			}
 		}
 
@@ -2542,6 +2555,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case panesMsg:
 		return m, m.applyPanes(msg)
+
+	case agentKilledMsg:
+		return m, m.applyAgentKilled(msg)
 
 	case focusTickMsg:
 		return m, m.handleFocusTick()

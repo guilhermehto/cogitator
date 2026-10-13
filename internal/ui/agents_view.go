@@ -25,6 +25,10 @@ func (m model) updateAgentsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if agent, ok := m.agentByID(result.agentID); ok {
 			return m, m.focusAgent(agent, "")
 		}
+	case agentIntentKill:
+		if agent, ok := m.agentByID(result.agentID); ok {
+			m.startAgentKill(agent)
+		}
 	}
 
 	return m, m.syncAgentPreview()
@@ -81,7 +85,8 @@ func (m model) renderAgentsView(width, height int) string {
 	// The pane's horizontal padding takes two columns, as for Repos rows.
 	width = max(0, width-2)
 	bodyHeight := max(1, height-1)
-	if m.tmuxHint != "" {
+	footer := m.agentsFooter()
+	if footer != "" {
 		bodyHeight = max(1, bodyHeight-1)
 	}
 
@@ -92,11 +97,25 @@ func (m model) renderAgentsView(width, height int) string {
 	}
 
 	view := headerStyle.Render("Agents") + "\n" + body
-	if m.tmuxHint != "" {
-		view += "\n" + wtHintStyle.Render(singleLineCell(m.tmuxHint))
+	if footer != "" {
+		view += "\n" + footer
 	}
 
 	return view
+}
+
+// agentsFooter is the line under the agent list: the kill confirmation while
+// it is open, else the transient hint.
+func (m model) agentsFooter() string {
+	if m.prompt == promptConfirmKillAgent {
+		return m.agentKillPromptLine()
+	}
+
+	if m.tmuxHint == "" {
+		return ""
+	}
+
+	return wtHintStyle.Render(singleLineCell(m.tmuxHint))
 }
 
 func (m model) agentKeyHints() []keyHint {
@@ -104,5 +123,5 @@ func (m model) agentKeyHints() []keyHint {
 		return []keyHint{{"enter", "jump"}, {"esc", "clear"}}
 	}
 
-	return []keyHint{{"enter", "jump"}, {"x", "mark seen"}, {"/", "filter"}}
+	return []keyHint{{"enter", "jump"}, {"x", "mark seen"}, {"K", "kill"}, {"/", "filter"}}
 }

@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"log/slog"
+	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -103,6 +104,7 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 	m.viewMarker = store
 	// Wire the workspace store so the Workspaces view can load workspaces.json.
 	m.store = wsStore
+	m.selfPaneID = os.Getenv("TMUX_PANE")
 	feedHolder, feedActions, stopFeed := startAgentFeed(ctx, agentfeed.SocketPath(), logger)
 	defer stopFeed()
 	if feedHolder != nil {

@@ -49,10 +49,11 @@ const (
 	agentIntentJump
 	agentIntentSeen
 	agentIntentQuit
+	agentIntentKill
 )
 
 // agentListResult tells the host what a key press asked for; agentID is set
-// for jump and seen.
+// for jump, seen and kill.
 type agentListResult struct {
 	intent  agentListIntent
 	agentID string
@@ -188,6 +189,8 @@ func (l *agentList) HandleKey(msg tea.KeyMsg) agentListResult {
 		return l.selection(agentIntentJump)
 	case "x":
 		return l.selection(agentIntentSeen)
+	case "K":
+		return l.selection(agentIntentKill)
 	case "j", "down":
 		l.move(1)
 	case "k", "up":
