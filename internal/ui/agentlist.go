@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -16,10 +17,13 @@ import (
 )
 
 const (
-	agentNameWidth    = 34
-	agentHarnessWidth = 10
+	agentNameWidth    = 40
+	agentHarnessWidth = 11
 	agentReasonWidth  = 11
 )
+
+// agentHomeDir is read once so row labels can abbreviate it to "~".
+var agentHomeDir, _ = os.UserHomeDir()
 
 var agentGroupTitles = map[agents.Group]string{
 	agents.GroupNeedsYou: "Needs you",
@@ -296,13 +300,27 @@ func agentName(a agents.Agent) string {
 	case agents.KindWorkspace:
 		return a.Workspace + "/" + a.SessionName
 	case agents.KindStray:
-		return filepath.Base(a.ID) + " stray"
+		return abbreviateHome(a.ID) + " stray"
 	}
 	if a.Branch == "" {
-		return a.Repo
+		return abbreviateHome(a.ID)
 	}
 
-	return a.Repo + "·" + a.Branch
+	return filepath.Base(a.Repo) + "·" + a.Branch
+}
+
+func abbreviateHome(dir string) string {
+	if agentHomeDir == "" {
+		return dir
+	}
+	if dir == agentHomeDir {
+		return "~"
+	}
+	if rest, ok := strings.CutPrefix(dir, agentHomeDir+string(filepath.Separator)); ok {
+		return "~" + string(filepath.Separator) + rest
+	}
+
+	return dir
 }
 
 func agentReason(a agents.Agent) string {

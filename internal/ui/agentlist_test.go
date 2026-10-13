@@ -68,6 +68,43 @@ func TestAgentListNamesRowsByKind(t *testing.T) {
 	}
 }
 
+func TestAgentListLabelsWorktreesByRepoNameOrHomeRelativeDir(t *testing.T) {
+	previous := agentHomeDir
+	agentHomeDir = "/Users/x"
+	t.Cleanup(func() { agentHomeDir = previous })
+
+	tests := []struct {
+		name  string
+		agent agents.Agent
+		want  string
+	}{
+		{"uses repo basename and branch", worktreeAgent("/Users/x/src/pi-platform", "/Users/x/src/pi-platform", "main", agents.GroupIdle, state.AttnInactive, settings.StateRunning), "pi-platform·main"},
+		{"falls back to the home-relative dir without a branch", worktreeAgent("/Users/x/src/pi-platform/svc/api", "/Users/x/src/pi-platform", "", agents.GroupIdle, state.AttnInactive, settings.StateRunning), "~/src/pi-platform/svc/api"},
+		{"keeps dirs outside home absolute", worktreeAgent("/opt/svc", "/opt/svc", "", agents.GroupIdle, state.AttnInactive, settings.StateRunning), "/opt/svc"},
+		{"abbreviates stray dirs and marks them", agents.Agent{ID: "/Users/x/scratch", Kind: agents.KindStray}, "~/scratch stray"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := agentName(tt.agent); got != tt.want {
+				t.Fatalf("agentName = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAgentListShowsFullClaudeCodeHarnessAtPopupWidth(t *testing.T) {
+	a := worktreeAgent("/a", "/r/api", "main", agents.GroupIdle, state.AttnInactive, settings.StateRunning)
+	a.Harness = "claude-code"
+	l := newAgentList()
+	l.SetAgents([]agents.Agent{a})
+
+	view := l.View(agentListNow, 100, 40)
+
+	if !strings.Contains(view, "claude-code") {
+		t.Fatalf("harness truncated in:\n%s", view)
+	}
+}
+
 func TestAgentListUsesStatusGlyphsOfMainTUI(t *testing.T) {
 	l := newAgentList()
 	l.SetAgents(agentsInEveryGroup())
