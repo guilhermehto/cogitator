@@ -1,56 +1,114 @@
 package zellijctl
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"reflect"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
 )
 
-// fakeRunner answers by action name (args[1]) and records every call.
+// fakeRunner answers by command (the action name of `[--session S] action X
+// …`, else the zellij subcommand), preferring a per-session answer, and
+// records every call. A session in down fails every action.
 type fakeRunner struct {
+	mu        sync.Mutex
 	calls     [][]string
 	responses map[string]string
 	errs      map[string]error
+	sessions  map[string]map[string]string
+	down      map[string]bool
+}
+
+func command(args []string) (session, cmd string) {
+	if len(args) > 2 && args[0] == "--session" {
+		session, args = args[1], args[2:]
+	}
+	if len(args) > 1 && args[0] == "action" {
+		args = args[1:]
+	}
+	if len(args) == 0 {
+		return session, ""
+	}
+	return session, args[0]
 }
 
 func (f *fakeRunner) Run(args ...string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	f.calls = append(f.calls, slices.Clone(args))
-	if len(args) < 2 || args[0] != "action" {
-		return "", errors.New("fake: not an action call")
+	session, cmd := command(args)
+	if f.down[session] {
+		return "", errors.New("fake: session " + session + " not found")
 	}
-	return f.responses[args[1]], f.errs[args[1]]
+	if out, ok := f.sessions[session][cmd]; ok {
+		return out, nil
+	}
+	return f.responses[cmd], f.errs[cmd]
 }
 
-func (f *fakeRunner) callsTo(action string) [][]string {
+func (f *fakeRunner) callsTo(cmd string) [][]string {
 	var out [][]string
 	for _, c := range f.calls {
-		if len(c) > 1 && c[1] == action {
+		if _, got := command(c); got == cmd {
 			out = append(out, c)
 		}
 	}
 	return out
 }
 
-// newBackend returns a Backend inside a fake session unique to the test, so
-// the package-level tab dir memo never leaks between tests.
+// mutations are the calls that change zellij state, in order.
+func (f *fakeRunner) mutations() [][]string {
+	var out [][]string
+	for _, c := range f.calls {
+		if _, cmd := command(c); !strings.HasPrefix(cmd, "list-") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// ownSession is the fake session newBackend runs in.
+func ownSession(t *testing.T) string { return "sess-" + t.Name() }
+
+// newBackend returns a Backend inside a fake session named after the test,
+// with a fresh package-level tab dir memo so no test sees another's dirs.
 func newBackend(t *testing.T, r *fakeRunner) Backend {
 	t.Helper()
+	tabDirs = &tabDirMemo{dirs: map[string]string{}}
 	env := map[string]string{
 		"ZELLIJ":              "0",
-		"ZELLIJ_SESSION_NAME": "sess-" + t.Name(),
+		"ZELLIJ_SESSION_NAME": ownSession(t),
 		"ZELLIJ_PANE_ID":      "4",
 	}
 	return Backend{Runner: r, Getenv: func(k string) string { return env[k] }}
 }
 
+// sessionsList renders `list-sessions -n` output; a name ending in "!" is
+// listed as exited.
+func sessionsList(names ...string) string {
+	var b strings.Builder
+	for _, name := range names {
+		if exited, ok := strings.CutSuffix(name, "!"); ok {
+			b.WriteString(exited + " [Created 3m ago] (EXITED - attach to resurrect)\n")
+			continue
+		}
+		b.WriteString(name + " [Created 1h 2m 3s ago] \n")
+	}
+	return b.String()
+}
+
 type paneFixture struct {
 	ID      int
 	Plugin  bool
+	URL     string
 	Exited  bool
 	Held    bool
 	Tab     int
@@ -79,7 +137,7 @@ func panesJSON(t *testing.T, panes ...paneFixture) string {
 			"terminal_command": nil,
 		}
 		if p.Plugin {
-			m["plugin_url"] = "tab-bar"
+			m["plugin_url"] = cmp.Or(p.URL, "tab-bar")
 		} else {
 			m["pane_command"] = nilIfEmpty(p.Command)
 			m["pane_cwd"] = nilIfEmpty(p.Cwd)
@@ -111,6 +169,23 @@ func canonicalTempDir(t *testing.T) (raw, canonical string) {
 	return raw, c
 }
 
+func TestSplitAddress_RoundTripsSessionNamesWithColons(t *testing.T) {
+	for _, session := range []string{"main", "work:1", "a:b:c", "repo-feat.x_y"} {
+		for _, local := range []string{"3", "terminal_12"} {
+			gotSession, gotLocal, err := splitAddress(address(session, local))
+			if err != nil || gotSession != session || gotLocal != local {
+				t.Errorf("splitAddress(address(%q, %q)) = %q, %q, %v", session, local, gotSession, gotLocal, err)
+			}
+		}
+	}
+
+	for _, bad := range []string{"3", ":3", "main:", ""} {
+		if _, _, err := splitAddress(bad); err == nil {
+			t.Errorf("splitAddress(%q): want error", bad)
+		}
+	}
+}
+
 func TestListPanes_TerminalPanesOnlyWithCanonicalCwds(t *testing.T) {
 	raw, canonical := canonicalTempDir(t)
 	r := &fakeRunner{responses: map[string]string{"list-panes": panesJSON(t,
@@ -126,32 +201,82 @@ func TestListPanes_TerminalPanesOnlyWithCanonicalCwds(t *testing.T) {
 		t.Fatalf("ListPanes: %v", err)
 	}
 
-	session := "sess-" + t.Name()
+	own := ownSession(t)
 	want := []mux.Pane{
-		{PaneID: "terminal_0", WindowID: "0", SessionID: session, SessionName: session, Cwd: canonical, Command: "/bin/zsh", CogDir: canonical},
-		{PaneID: "terminal_2", WindowID: "1", SessionID: session, SessionName: session, Cwd: canonical, Command: "sh -c echo hi2; sleep 300", CogDir: canonical},
+		{PaneID: own + ":terminal_0", WindowID: own + ":0", SessionID: own, SessionName: own, Cwd: canonical, Command: "/bin/zsh", CogDir: canonical},
+		{PaneID: own + ":terminal_2", WindowID: own + ":1", SessionID: own, SessionName: own, Cwd: canonical, Command: "sh -c echo hi2; sleep 300", CogDir: canonical},
 	}
 	if !reflect.DeepEqual(panes, want) {
 		t.Errorf("ListPanes =\n%+v\nwant\n%+v", panes, want)
 	}
-	if got := r.calls[0]; !slices.Equal(got, []string{"action", "list-panes", "-a", "-j"}) {
-		t.Errorf("call = %v", got)
+
+	wantCalls := [][]string{{"list-sessions", "-n"}, {"action", "list-panes", "-a", "-j"}}
+	if !reflect.DeepEqual(r.calls, wantCalls) {
+		t.Errorf("calls = %v, want %v", r.calls, wantCalls)
+	}
+}
+
+func TestListPanes_MergesLiveSessionsSkippingExitedAndVanished(t *testing.T) {
+	raw, canonical := canonicalTempDir(t)
+	own := ownSession(t)
+	r := &fakeRunner{
+		responses: map[string]string{"list-sessions": sessionsList("work:1", own, "old!", "gone")},
+		sessions: map[string]map[string]string{
+			"":       {"list-panes": panesJSON(t, paneFixture{ID: 4, Tab: 0, Command: "cogitator", Cwd: raw})},
+			"work:1": {"list-panes": panesJSON(t, paneFixture{ID: 1, Tab: 2, Command: "claude", Cwd: raw})},
+			"old":    {"list-panes": panesJSON(t, paneFixture{ID: 9, Tab: 0, Command: "claude", Cwd: raw})},
+		},
+		down: map[string]bool{"gone": true},
+	}
+
+	panes, err := newBackend(t, r).ListPanes()
+	if err != nil {
+		t.Fatalf("ListPanes: %v", err)
+	}
+
+	want := []mux.Pane{
+		{PaneID: own + ":terminal_4", WindowID: own + ":0", SessionID: own, SessionName: own, Cwd: canonical, Command: "cogitator", CogDir: canonical},
+		{PaneID: "work:1:terminal_1", WindowID: "work:1:2", SessionID: "work:1", SessionName: "work:1", Cwd: canonical, Command: "claude", CogDir: canonical},
+	}
+	if !reflect.DeepEqual(panes, want) {
+		t.Errorf("ListPanes =\n%+v\nwant\n%+v", panes, want)
+	}
+
+	for _, c := range r.callsTo("list-panes") {
+		if session, _ := command(c); session == "old" || session == own {
+			t.Errorf("unexpected list-panes call %v", c)
+		}
+	}
+}
+
+func TestListPanes_OwnSessionFailureIsAnError(t *testing.T) {
+	r := &fakeRunner{errs: map[string]error{"list-panes": errors.New("boom")}}
+
+	if _, err := newBackend(t, r).ListPanes(); err == nil {
+		t.Error("expected error when the own session cannot be listed")
 	}
 }
 
 func TestListDirs_CanonicalTerminalCwds(t *testing.T) {
 	raw, canonical := canonicalTempDir(t)
-	r := &fakeRunner{responses: map[string]string{"list-panes": panesJSON(t,
-		paneFixture{ID: 1, Plugin: true},
-		paneFixture{ID: 0, Command: "/bin/zsh", Cwd: raw},
-		paneFixture{ID: 3, Tab: 2, Exited: true, Held: true},
-	)}}
+	other, otherCanonical := canonicalTempDir(t)
+	r := &fakeRunner{
+		responses: map[string]string{
+			"list-sessions": sessionsList("work"),
+			"list-panes": panesJSON(t,
+				paneFixture{ID: 1, Plugin: true},
+				paneFixture{ID: 0, Command: "/bin/zsh", Cwd: raw},
+				paneFixture{ID: 3, Tab: 2, Exited: true, Held: true},
+			),
+		},
+		sessions: map[string]map[string]string{"work": {"list-panes": panesJSON(t, paneFixture{ID: 1, Command: "codex", Cwd: other})}},
+	}
 
 	dirs, err := newBackend(t, r).ListDirs()
 	if err != nil {
 		t.Fatalf("ListDirs: %v", err)
 	}
-	if !reflect.DeepEqual(dirs, map[string]bool{canonical: true}) {
+	if !reflect.DeepEqual(dirs, map[string]bool{canonical: true, otherCanonical: true}) {
 		t.Errorf("ListDirs = %v", dirs)
 	}
 }
@@ -169,8 +294,8 @@ func TestFindWindowByDir_PrefersHarnessPane(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindWindowByDir: %v", err)
 	}
-	if got != "3" {
-		t.Errorf("FindWindowByDir = %q, want harness tab 3", got)
+	if want := mux.Target(ownSession(t) + ":3"); got != want {
+		t.Errorf("FindWindowByDir = %q, want harness tab %q", got, want)
 	}
 }
 
@@ -186,8 +311,27 @@ func TestFindWindowByDir_LowestPaneWithoutHarness(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindWindowByDir: %v", err)
 	}
-	if got != "2" {
-		t.Errorf("FindWindowByDir = %q, want lowest pane's tab 2", got)
+	if want := mux.Target(ownSession(t) + ":2"); got != want {
+		t.Errorf("FindWindowByDir = %q, want lowest pane's tab %q", got, want)
+	}
+}
+
+func TestFindWindowByDir_FindsHarnessInOtherSession(t *testing.T) {
+	raw, _ := canonicalTempDir(t)
+	r := &fakeRunner{
+		responses: map[string]string{
+			"list-sessions": sessionsList("repo-feat"),
+			"list-panes":    panesJSON(t, paneFixture{ID: 1, Tab: 1, Command: "/bin/zsh", Cwd: raw}),
+		},
+		sessions: map[string]map[string]string{"repo-feat": {"list-panes": panesJSON(t, paneFixture{ID: 1, Tab: 0, Command: "claude", Cwd: raw})}},
+	}
+
+	got, err := newBackend(t, r).FindWindowByDir(raw)
+	if err != nil {
+		t.Fatalf("FindWindowByDir: %v", err)
+	}
+	if got != "repo-feat:0" {
+		t.Errorf("FindWindowByDir = %q, want repo-feat:0", got)
 	}
 }
 
@@ -211,59 +355,122 @@ func TestWindowProcessAlive(t *testing.T) {
 		paneFixture{ID: 4, Tab: 2, Command: "/bin/zsh", Cwd: raw},
 	)}}
 	b := newBackend(t, r)
+	own := ownSession(t)
 
-	alive, err := b.WindowProcessAlive("1")
+	alive, err := b.WindowProcessAlive(mux.Target(own + ":1"))
 	if err != nil || alive {
 		t.Errorf("held-only tab: alive=%v err=%v, want false nil", alive, err)
 	}
 
-	alive, err = b.WindowProcessAlive("2")
+	alive, err = b.WindowProcessAlive(mux.Target(own + ":2"))
 	if err != nil || !alive {
 		t.Errorf("tab with live pane: alive=%v err=%v, want true nil", alive, err)
 	}
 
-	if _, err := b.WindowProcessAlive("9"); !errors.Is(err, mux.ErrWindowNotFound) {
+	if _, err := b.WindowProcessAlive(mux.Target(own + ":9")); !errors.Is(err, mux.ErrWindowNotFound) {
 		t.Errorf("missing tab err = %v, want ErrWindowNotFound", err)
 	}
 }
 
-func TestEnsureWindow_NewTab(t *testing.T) {
+func TestEnsureWindow_WindowModeOpensTabInOwnSession(t *testing.T) {
 	raw, canonical := canonicalTempDir(t)
 	r := &fakeRunner{responses: map[string]string{
 		"list-panes": "[]",
 		"new-tab":    "7\n",
 	}}
 
-	got, err := newBackend(t, r).EnsureWindow(raw+"/.", "repo/branch", []string{"sh", "-c", "echo hi"}, mux.ModeSession)
+	got, err := newBackend(t, r).EnsureWindow(raw+"/.", "repo/branch", []string{"sh", "-c", "echo hi"}, mux.ModeWindow)
 	if err != nil {
 		t.Fatalf("EnsureWindow: %v", err)
 	}
-	if got != "7" {
-		t.Errorf("EnsureWindow = %q, want 7", got)
+	if want := mux.Target(ownSession(t) + ":7"); got != want {
+		t.Errorf("EnsureWindow = %q, want %q", got, want)
 	}
 
-	calls := r.callsTo("new-tab")
-	want := []string{"action", "new-tab", "--name", "repo/branch", "--cwd", canonical, "--", "sh", "-c", "echo hi"}
-	if len(calls) != 1 || !slices.Equal(calls[0], want) {
-		t.Errorf("new-tab calls = %v, want [%v]", calls, want)
+	want := [][]string{{"action", "new-tab", "--name", "repo/branch", "--cwd", canonical, "--", "sh", "-c", "echo hi"}}
+	if got := r.mutations(); !reflect.DeepEqual(got, want) {
+		t.Errorf("mutations = %v, want %v", got, want)
 	}
 }
 
-func TestEnsureWindow_DedupsExistingTab(t *testing.T) {
-	raw, _ := canonicalTempDir(t)
-	r := &fakeRunner{responses: map[string]string{"list-panes": panesJSON(t,
-		paneFixture{ID: 2, Tab: 5, Command: "claude", Cwd: raw},
-	)}}
+func TestEnsureWindow_SessionModeCreatesFreeSessionAndSwapsInHarness(t *testing.T) {
+	cases := []struct {
+		name     string
+		sessions []string
+		want     string
+	}{
+		{"free name", []string{"main"}, "cz-repo-feat-x"},
+		{"live name taken", []string{"cz-repo-feat-x"}, "cz-repo-feat-x-2"},
+		{"exited names taken", []string{"cz-repo-feat-x!", "cz-repo-feat-x-2!"}, "cz-repo-feat-x-3"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			raw, canonical := canonicalTempDir(t)
+			r := &fakeRunner{
+				responses: map[string]string{"list-sessions": sessionsList(c.sessions...), "list-panes": "[]"},
+				sessions: map[string]map[string]string{c.want: {"list-panes": panesJSON(t,
+					paneFixture{ID: 1, Plugin: true, Tab: 0},
+					paneFixture{ID: 3, Plugin: true, URL: "about", Tab: 0},
+					paneFixture{ID: 0, Tab: 0, Command: "/bin/zsh", Cwd: t.TempDir()},
+				)}},
+			}
 
-	got, err := newBackend(t, r).EnsureWindow(raw, "repo/branch", []string{"claude"}, mux.ModeWindow)
-	if err != nil {
-		t.Fatalf("EnsureWindow: %v", err)
+			got, err := newBackend(t, r).EnsureWindow(raw, "cz-repo/feat/x", []string{"claude", "--resume"}, mux.ModeSession)
+			if err != nil {
+				t.Fatalf("EnsureWindow: %v", err)
+			}
+			if want := mux.Target(c.want + ":0"); got != want {
+				t.Errorf("EnsureWindow = %q, want %q", got, want)
+			}
+
+			want := [][]string{
+				{"attach", "-b", c.want, "options", "--show-startup-tips", "false"},
+				{"--session", c.want, "action", "close-pane", "--pane-id", "plugin_3"},
+				{"--session", c.want, "action", "new-pane", "--in-place", "--close-replaced-pane", "--pane-id", "terminal_0", "--cwd", canonical, "--", "claude", "--resume"},
+			}
+			if got := r.mutations(); !reflect.DeepEqual(got, want) {
+				t.Errorf("mutations =\n%v\nwant\n%v", got, want)
+			}
+		})
 	}
-	if got != "5" {
-		t.Errorf("EnsureWindow = %q, want existing tab 5", got)
+}
+
+func TestEnsureWindow_SessionModeDeletesSessionWhenSwapFails(t *testing.T) {
+	raw, _ := canonicalTempDir(t)
+	r := &fakeRunner{
+		responses: map[string]string{"list-panes": panesJSON(t, paneFixture{ID: 0, Tab: 0, Command: "/bin/zsh"})},
+		errs:      map[string]error{"new-pane": errors.New("boom")},
 	}
-	if calls := r.callsTo("new-tab"); len(calls) != 0 {
-		t.Errorf("unexpected new-tab calls: %v", calls)
+
+	if _, err := newBackend(t, r).EnsureWindow(raw, "repo/swapfail", []string{"claude"}, mux.ModeSession); err == nil {
+		t.Fatal("expected error")
+	}
+
+	want := []string{"delete-session", "--force", "repo-swapfail"}
+	if calls := r.callsTo("delete-session"); len(calls) != 1 || !slices.Equal(calls[0], want) {
+		t.Errorf("delete-session calls = %v, want [%v]", calls, want)
+	}
+}
+
+func TestEnsureWindow_DedupsExistingTabInAnySession(t *testing.T) {
+	raw, _ := canonicalTempDir(t)
+	r := &fakeRunner{
+		responses: map[string]string{"list-sessions": sessionsList("repo-branch"), "list-panes": "[]"},
+		sessions:  map[string]map[string]string{"repo-branch": {"list-panes": panesJSON(t, paneFixture{ID: 2, Tab: 5, Command: "claude", Cwd: raw})}},
+	}
+	b := newBackend(t, r)
+
+	for _, mode := range []mux.LaunchMode{mux.ModeWindow, mux.ModeSession} {
+		got, err := b.EnsureWindow(raw, "repo/branch", []string{"claude"}, mode)
+		if err != nil {
+			t.Fatalf("EnsureWindow(%v): %v", mode, err)
+		}
+		if got != "repo-branch:5" {
+			t.Errorf("EnsureWindow(%v) = %q, want existing repo-branch:5", mode, got)
+		}
+	}
+	if got := r.mutations(); len(got) != 0 {
+		t.Errorf("unexpected mutations: %v", got)
 	}
 }
 
@@ -295,11 +502,11 @@ func TestHeldTab_FoundByDirAndRelaunchedInPlace(t *testing.T) {
 	r.responses["list-panes"] = panesJSON(t, paneFixture{ID: 6, Tab: 3, Exited: true, Held: true})
 
 	found, err := b.FindWindowByDir(raw)
-	if err != nil || found != "3" {
-		t.Fatalf("FindWindowByDir = %q, %v; want 3", found, err)
+	if want := mux.Target(ownSession(t) + ":3"); err != nil || found != want {
+		t.Fatalf("FindWindowByDir = %q, %v; want %q", found, err, want)
 	}
 
-	if err := b.RelaunchInWindow("3", []string{"claude", "--resume", "x"}); err != nil {
+	if err := b.RelaunchInWindow(found, []string{"claude", "--resume", "x"}); err != nil {
 		t.Fatalf("RelaunchInWindow: %v", err)
 	}
 
@@ -317,7 +524,7 @@ func TestRelaunchInWindow_PrefersExitedPane(t *testing.T) {
 		paneFixture{ID: 4, Tab: 1, Exited: true, Held: true},
 	)}}
 
-	if err := newBackend(t, r).RelaunchInWindow("1", []string{"codex"}); err != nil {
+	if err := newBackend(t, r).RelaunchInWindow(mux.Target(ownSession(t)+":1"), []string{"codex"}); err != nil {
 		t.Fatalf("RelaunchInWindow: %v", err)
 	}
 
@@ -328,12 +535,29 @@ func TestRelaunchInWindow_PrefersExitedPane(t *testing.T) {
 	}
 }
 
+func TestRelaunchInWindow_OtherSessionUsesSessionFlag(t *testing.T) {
+	raw, canonical := canonicalTempDir(t)
+	r := &fakeRunner{sessions: map[string]map[string]string{"repo-relaunch": {"list-panes": panesJSON(t,
+		paneFixture{ID: 1, Tab: 0, Command: "/bin/zsh", Cwd: raw},
+		paneFixture{ID: 3, Tab: 0, Exited: true, Held: true},
+	)}}}
+
+	if err := newBackend(t, r).RelaunchInWindow("repo-relaunch:0", []string{"codex"}); err != nil {
+		t.Fatalf("RelaunchInWindow: %v", err)
+	}
+
+	want := [][]string{{"--session", "repo-relaunch", "action", "new-pane", "--in-place", "--close-replaced-pane", "--pane-id", "terminal_3", "--cwd", canonical, "--", "codex"}}
+	if got := r.mutations(); !reflect.DeepEqual(got, want) {
+		t.Errorf("mutations = %v, want %v", got, want)
+	}
+}
+
 func TestRelaunchInWindow_UnknownCwd(t *testing.T) {
 	r := &fakeRunner{responses: map[string]string{"list-panes": panesJSON(t,
 		paneFixture{ID: 4, Tab: 1, Exited: true, Held: true},
 	)}}
 
-	if err := newBackend(t, r).RelaunchInWindow("1", []string{"codex"}); err == nil {
+	if err := newBackend(t, r).RelaunchInWindow(mux.Target(ownSession(t)+":1"), []string{"codex"}); err == nil {
 		t.Error("expected error when the held pane's dir is unknown")
 	}
 	if calls := r.callsTo("new-pane"); len(calls) != 0 {
@@ -341,23 +565,33 @@ func TestRelaunchInWindow_UnknownCwd(t *testing.T) {
 	}
 }
 
-func TestSelectAndKill(t *testing.T) {
-	r := &fakeRunner{}
-	b := newBackend(t, r)
+func TestSelect_SameSessionGoesToTabElseSwitchesSession(t *testing.T) {
+	own := ownSession(t)
+	cases := []struct {
+		name   string
+		target string
+		mode   mux.LaunchMode
+		client string
+		want   []string
+	}{
+		{"own session", own + ":4", mux.ModeSession, "", []string{"action", "go-to-tab-by-id", "4"}},
+		{"client already in target session", "work:1:2", mux.ModeWindow, "work:1", []string{"--session", "work:1", "action", "go-to-tab-by-id", "2"}},
+		{"session mode lands where zellij left it", "work:1:2", mux.ModeSession, "", []string{"action", "switch-session", "work:1"}},
+		{"window mode lands on the harness pane", "work:1:2", mux.ModeWindow, "", []string{"action", "switch-session", "work:1", "--pane-id", "terminal_5"}},
+		{"client elsewhere returns to own session", own + ":0", mux.ModeWindow, "work:1", []string{"--session", "work:1", "action", "switch-session", own, "--pane-id", "terminal_4"}},
+	}
+	for _, c := range cases {
+		r := &fakeRunner{sessions: map[string]map[string]string{
+			"":       {"list-panes": panesJSON(t, paneFixture{ID: 4, Tab: 0, Command: "cogitator"})},
+			"work:1": {"list-panes": panesJSON(t, paneFixture{ID: 1, Tab: 2, Command: "/bin/zsh"}, paneFixture{ID: 5, Tab: 2, Command: "claude"})},
+		}}
 
-	if err := b.Select("4", mux.ModeSession, "client"); err != nil {
-		t.Fatalf("Select: %v", err)
-	}
-	if err := b.Kill("4", mux.ModeSession); err != nil {
-		t.Fatalf("Kill: %v", err)
-	}
-
-	want := [][]string{
-		{"action", "go-to-tab-by-id", "4"},
-		{"action", "close-tab-by-id", "4"},
-	}
-	if !reflect.DeepEqual(r.calls, want) {
-		t.Errorf("calls = %v, want %v", r.calls, want)
+		if err := newBackend(t, r).Select(mux.Target(c.target), c.mode, c.client); err != nil {
+			t.Fatalf("%s: Select: %v", c.name, err)
+		}
+		if got := r.mutations(); !reflect.DeepEqual(got, [][]string{c.want}) {
+			t.Errorf("%s: mutations = %v, want [%v]", c.name, got, c.want)
+		}
 	}
 }
 
@@ -368,8 +602,9 @@ func TestSelectPane_GoesToTabThenFocuses(t *testing.T) {
 		paneFixture{ID: 5, Tab: 3, Command: "claude", Cwd: raw},
 	)}}
 	b := newBackend(t, r)
+	own := ownSession(t)
 
-	if err := b.SelectPane("terminal_5", ""); err != nil {
+	if err := b.SelectPane(own+":terminal_5", ""); err != nil {
 		t.Fatalf("SelectPane: %v", err)
 	}
 
@@ -382,8 +617,61 @@ func TestSelectPane_GoesToTabThenFocuses(t *testing.T) {
 		t.Errorf("calls = %v, want %v", r.calls, want)
 	}
 
-	if err := b.SelectPane("terminal_9", ""); err == nil {
+	if err := b.SelectPane(own+":terminal_9", ""); err == nil {
 		t.Error("expected error for unknown pane")
+	}
+}
+
+func TestSelectPane_CrossSessionSwitchesToPane(t *testing.T) {
+	r := &fakeRunner{sessions: map[string]map[string]string{
+		"":          {"list-panes": panesJSON(t, paneFixture{ID: 4, Tab: 0, Command: "cogitator"})},
+		"repo:feat": {"list-panes": panesJSON(t, paneFixture{ID: 5, Tab: 3, Command: "claude"})},
+	}}
+	b := newBackend(t, r)
+
+	if err := b.SelectPane("repo:feat:terminal_5", ""); err != nil {
+		t.Fatalf("SelectPane: %v", err)
+	}
+	if err := b.SelectPane(ownSession(t)+":terminal_4", "repo:feat"); err != nil {
+		t.Fatalf("SelectPane back: %v", err)
+	}
+
+	want := [][]string{
+		{"action", "switch-session", "repo:feat", "--pane-id", "terminal_5"},
+		{"--session", "repo:feat", "action", "switch-session", ownSession(t), "--pane-id", "terminal_4"},
+	}
+	if got := r.mutations(); !reflect.DeepEqual(got, want) {
+		t.Errorf("mutations = %v, want %v", got, want)
+	}
+}
+
+func TestKill_DeletesWorktreeSessionsButNeverOwn(t *testing.T) {
+	own := ownSession(t)
+	oneTab := `[{"position":0,"name":"Tab #1","active":true,"tab_id":2}]`
+	twoTabs := `[{"position":0,"tab_id":2},{"position":1,"tab_id":7}]`
+	cases := []struct {
+		name   string
+		target string
+		mode   mux.LaunchMode
+		tabs   string
+		want   []string
+	}{
+		{"session mode deletes a single-tab session", "repo-feat:2", mux.ModeSession, oneTab, []string{"delete-session", "--force", "repo-feat"}},
+		{"session mode on a multi-tab session closes only the tab", "repo-feat:2", mux.ModeSession, twoTabs, []string{"--session", "repo-feat", "action", "close-tab-by-id", "2"}},
+		{"last tab of another session deletes it", "repo-feat:2", mux.ModeWindow, oneTab, []string{"delete-session", "--force", "repo-feat"}},
+		{"one of several tabs closes the tab", "repo-feat:2", mux.ModeWindow, twoTabs, []string{"--session", "repo-feat", "action", "close-tab-by-id", "2"}},
+		{"own session in session mode closes the tab", own + ":3", mux.ModeSession, oneTab, []string{"action", "close-tab-by-id", "3"}},
+		{"own session in window mode closes the tab", own + ":3", mux.ModeWindow, oneTab, []string{"action", "close-tab-by-id", "3"}},
+	}
+	for _, c := range cases {
+		r := &fakeRunner{responses: map[string]string{"list-tabs": c.tabs}}
+
+		if err := newBackend(t, r).Kill(mux.Target(c.target), c.mode); err != nil {
+			t.Fatalf("%s: Kill: %v", c.name, err)
+		}
+		if got := r.mutations(); !reflect.DeepEqual(got, [][]string{c.want}) {
+			t.Errorf("%s: mutations = %v, want [%v]", c.name, got, c.want)
+		}
 	}
 }
 
@@ -397,7 +685,7 @@ func TestCapture_TabResolvesPreferredPane(t *testing.T) {
 		"dump-screen": "one\ntwo\nthree\nfour\n\n   \n\n",
 	}}
 
-	got, err := newBackend(t, r).Capture("1", 2)
+	got, err := newBackend(t, r).Capture(ownSession(t)+":1", 2)
 	if err != nil {
 		t.Fatalf("Capture: %v", err)
 	}
@@ -413,23 +701,33 @@ func TestCapture_TabResolvesPreferredPane(t *testing.T) {
 
 func TestCapture_PaneID(t *testing.T) {
 	r := &fakeRunner{responses: map[string]string{"dump-screen": "a\nb\n"}}
+	b := newBackend(t, r)
 
-	got, err := newBackend(t, r).Capture("terminal_8", 10)
+	got, err := b.Capture(ownSession(t)+":terminal_8", 10)
 	if err != nil {
 		t.Fatalf("Capture: %v", err)
 	}
 	if got != "a\nb" {
 		t.Errorf("Capture = %q", got)
 	}
-	if !reflect.DeepEqual(r.calls, [][]string{{"action", "dump-screen", "-p", "terminal_8"}}) {
-		t.Errorf("calls = %v", r.calls)
+
+	if _, err := b.Capture("repo:feat:terminal_3", 10); err != nil {
+		t.Fatalf("Capture other session: %v", err)
+	}
+
+	want := [][]string{
+		{"action", "dump-screen", "-p", "terminal_8"},
+		{"--session", "repo:feat", "action", "dump-screen", "-p", "terminal_3"},
+	}
+	if !reflect.DeepEqual(r.calls, want) {
+		t.Errorf("calls = %v, want %v", r.calls, want)
 	}
 }
 
 func TestCapture_MissingTab(t *testing.T) {
 	r := &fakeRunner{responses: map[string]string{"list-panes": "[]"}}
 
-	if _, err := newBackend(t, r).Capture("3", 10); !errors.Is(err, mux.ErrWindowNotFound) {
+	if _, err := newBackend(t, r).Capture(ownSession(t)+":3", 10); !errors.Is(err, mux.ErrWindowNotFound) {
 		t.Errorf("err = %v, want ErrWindowNotFound", err)
 	}
 }
@@ -441,8 +739,8 @@ func TestMessageUnsupported(t *testing.T) {
 }
 
 func TestSelfPaneID(t *testing.T) {
-	if got := newBackend(t, &fakeRunner{}).SelfPaneID(); got != "terminal_4" {
-		t.Errorf("SelfPaneID = %q", got)
+	if got, want := newBackend(t, &fakeRunner{}).SelfPaneID(), ownSession(t)+":terminal_4"; got != want {
+		t.Errorf("SelfPaneID = %q, want %q", got, want)
 	}
 
 	b := Backend{Getenv: func(string) string { return "" }}
@@ -459,7 +757,8 @@ func TestCurrentLocation(t *testing.T) {
 		t.Fatalf("CurrentLocation: %v", err)
 	}
 
-	want := mux.Location{WindowID: "6", SessionID: "sess-" + t.Name()}
+	own := ownSession(t)
+	want := mux.Location{Client: own, WindowID: own + ":6", SessionID: own}
 	if loc != want {
 		t.Errorf("CurrentLocation = %+v, want %+v", loc, want)
 	}
@@ -475,7 +774,8 @@ func TestCurrentLocation_NoClient(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if loc.SessionID != "sess-"+t.Name() || loc.WindowID != "" {
+	own := ownSession(t)
+	if loc != (mux.Location{Client: own, SessionID: own}) {
 		t.Errorf("loc = %+v", loc)
 	}
 }
@@ -504,15 +804,15 @@ func TestNotAvailable(t *testing.T) {
 
 	checks := map[string]error{}
 	_, checks["FindWindowByDir"] = b.FindWindowByDir("/tmp")
-	_, checks["WindowProcessAlive"] = b.WindowProcessAlive("1")
-	checks["RelaunchInWindow"] = b.RelaunchInWindow("1", []string{"sh"})
+	_, checks["WindowProcessAlive"] = b.WindowProcessAlive("s:1")
+	checks["RelaunchInWindow"] = b.RelaunchInWindow("s:1", []string{"sh"})
 	_, checks["EnsureWindow"] = b.EnsureWindow("/tmp", "n", []string{"sh"}, mux.ModeWindow)
-	checks["Select"] = b.Select("1", mux.ModeWindow, "")
-	checks["SelectPane"] = b.SelectPane("terminal_1", "")
-	checks["Kill"] = b.Kill("1", mux.ModeWindow)
+	checks["Select"] = b.Select("s:1", mux.ModeWindow, "")
+	checks["SelectPane"] = b.SelectPane("s:terminal_1", "")
+	checks["Kill"] = b.Kill("s:1", mux.ModeWindow)
 	_, checks["ListDirs"] = b.ListDirs()
 	_, checks["ListPanes"] = b.ListPanes()
-	_, checks["Capture"] = b.Capture("1", 10)
+	_, checks["Capture"] = b.Capture("s:1", 10)
 	_, checks["CurrentLocation"] = b.CurrentLocation()
 
 	for name, err := range checks {

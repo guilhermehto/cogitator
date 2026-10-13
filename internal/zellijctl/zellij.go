@@ -1,7 +1,8 @@
-// Package zellijctl implements mux.Backend over the zellij CLI. Every call is
-// a `zellij action …` issued from inside cogitator's own zellij session, and
-// each worktree is a tab of that session identified by its pane cwd (zellij
-// has no user options to tag tabs with).
+// Package zellijctl implements mux.Backend over the zellij CLI. Actions on
+// cogitator's own zellij session are issued from inside it; other sessions
+// are addressed with `--session`. A worktree is a tab of cogitator's session
+// (ModeWindow) or a session of its own (ModeSession), identified by its pane
+// cwd (zellij has no user options to tag tabs with).
 //
 // No import of bubbletea or internal/ui is permitted in this package.
 package zellijctl
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/mux"
@@ -54,10 +56,17 @@ var DefaultRunner Runner = execRunner{}
 
 const paneIDPrefix = "terminal_"
 
-// Backend implements mux.Backend over zellij: one tab per worktree in the
-// current session regardless of LaunchMode, Target = tab id, pane ids
-// "terminal_<id>". A zero Runner uses DefaultRunner; a nil Getenv reads the
-// process environment.
+// startupWait bounds how long EnsureWindow polls a new session for its shell.
+const (
+	startupWait = 3 * time.Second
+	startupPoll = 100 * time.Millisecond
+)
+
+// Backend implements mux.Backend over zellij across every live session.
+// Target = "<session>:<tab id>", pane ids "<session>:terminal_<id>"; both
+// split on the last ':' since session names may contain one. A client is the
+// name of the session the user is viewing, "" meaning cogitator's own. A zero
+// Runner uses DefaultRunner; a nil Getenv reads the process environment.
 type Backend struct {
 	Runner Runner
 	Getenv func(string) string
@@ -85,6 +94,33 @@ func (b Backend) action(args ...string) (string, error) {
 	return b.runner().Run(append([]string{"action"}, args...)...)
 }
 
+// in runs an action in session: implicitly for cogitator's own session, with
+// --session for any other.
+func (b Backend) in(session string, args ...string) (string, error) {
+	if session == b.session() {
+		return b.action(args...)
+	}
+	return b.runner().Run(append([]string{"--session", session, "action"}, args...)...)
+}
+
+// viewing is the session client is looking at; "" is cogitator's own.
+func (b Backend) viewing(client string) string {
+	if client == "" {
+		return b.session()
+	}
+	return client
+}
+
+func address(session, local string) string { return session + ":" + local }
+
+func splitAddress(addr string) (session, local string, err error) {
+	i := strings.LastIndex(addr, ":")
+	if i <= 0 || i == len(addr)-1 {
+		return "", "", fmt.Errorf("zellijctl: malformed address %q", addr)
+	}
+	return addr[:i], addr[i+1:], nil
+}
+
 // Name implements mux.Backend.
 func (Backend) Name() string { return "zellij" }
 
@@ -94,7 +130,7 @@ func (b Backend) Available() bool {
 }
 
 // FindWindowByDir implements mux.Backend: the tab of the preferred terminal
-// pane whose canonical cwd is dir.
+// pane whose canonical cwd is dir, in any live session.
 func (b Backend) FindWindowByDir(dir string) (mux.Target, error) {
 	if !b.Available() {
 		return "", mux.ErrNotAvailable
@@ -125,7 +161,7 @@ func (b Backend) findCanonical(canonicalDir string) (mux.Target, error) {
 	if !ok {
 		return "", mux.ErrWindowNotFound
 	}
-	return mux.Target(best.tab), nil
+	return best.target(), nil
 }
 
 // WindowProcessAlive implements mux.Backend: false once every terminal pane
@@ -168,16 +204,17 @@ func (b Backend) RelaunchInWindow(t mux.Target, argv []string) error {
 		return fmt.Errorf("zellijctl: relaunch in tab %s: pane %s has no known cwd", t, victim.paneID())
 	}
 
-	args := []string{"new-pane", "--in-place", "--close-replaced-pane", "--pane-id", victim.paneID(), "--cwd", victim.cwd, "--"}
-	if _, err := b.action(append(args, argv...)...); err != nil {
+	args := []string{"new-pane", "--in-place", "--close-replaced-pane", "--pane-id", victim.localID(), "--cwd", victim.cwd, "--"}
+	if _, err := b.in(victim.session, append(args, argv...)...); err != nil {
 		return fmt.Errorf("zellijctl: relaunch in tab %s: %w", t, err)
 	}
 	return nil
 }
 
-// EnsureWindow implements mux.Backend: the existing tab for dir, else a new
-// tab named name running argv in dir. mode is ignored (always a tab).
-func (b Backend) EnsureWindow(dir, name string, argv []string, _ mux.LaunchMode) (mux.Target, error) {
+// EnsureWindow implements mux.Backend: the existing tab for dir in any
+// session, else argv in dir as a new tab of cogitator's session named name
+// (ModeWindow) or as a new session named after name (ModeSession).
+func (b Backend) EnsureWindow(dir, name string, argv []string, mode mux.LaunchMode) (mux.Target, error) {
 	if !b.Available() {
 		return "", mux.ErrNotAvailable
 	}
@@ -198,6 +235,13 @@ func (b Backend) EnsureWindow(dir, name string, argv []string, _ mux.LaunchMode)
 		return "", err
 	}
 
+	if mode == mux.ModeSession {
+		return b.newSession(canonicalDir, name, argv)
+	}
+	return b.newTab(canonicalDir, name, argv)
+}
+
+func (b Backend) newTab(canonicalDir, name string, argv []string) (mux.Target, error) {
 	args := []string{"new-tab", "--name", name, "--cwd", canonicalDir, "--"}
 	out, err := b.action(append(args, argv...)...)
 	if err != nil {
@@ -210,36 +254,140 @@ func (b Backend) EnsureWindow(dir, name string, argv []string, _ mux.LaunchMode)
 	}
 
 	tabDirs.set(b.session(), tab, canonicalDir)
-	return mux.Target(tab), nil
+	return mux.Target(address(b.session(), tab)), nil
 }
 
-// Select implements mux.Backend. zellij has no client flag: the action moves
-// the client focused on the issuing pane, else the most recently active one.
-func (b Backend) Select(t mux.Target, _ mux.LaunchMode, _ string) error {
+// newSession starts a client-less session and swaps its initial shell for
+// argv in dir: `attach -b` cannot take options and a command together, and
+// its shell starts in cogitator's cwd.
+func (b Backend) newSession(canonicalDir, name string, argv []string) (mux.Target, error) {
+	session, err := b.freeSessionName(strings.ReplaceAll(name, "/", "-"))
+	if err != nil {
+		return "", err
+	}
+
+	if _, err := b.runner().Run("attach", "-b", session, "options", "--show-startup-tips", "false"); err != nil {
+		return "", fmt.Errorf("zellijctl: create session %s: %w", session, err)
+	}
+
+	shell, err := b.initialPane(session)
+	if err == nil {
+		args := []string{"new-pane", "--in-place", "--close-replaced-pane", "--pane-id", shell.localID(), "--cwd", canonicalDir, "--"}
+		_, err = b.in(session, append(args, argv...)...)
+	}
+	if err != nil {
+		_ = b.deleteSession(session)
+		return "", fmt.Errorf("zellijctl: start session %s: %w", session, err)
+	}
+
+	tabDirs.set(session, shell.tab, canonicalDir)
+	return shell.target(), nil
+}
+
+// freeSessionName is base, else the first free base-2, base-3, …: `attach -b`
+// on a live or exited name attaches to or resurrects it instead.
+func (b Backend) freeSessionName(base string) (string, error) {
+	sessions, err := b.listSessions()
+	if err != nil {
+		return "", err
+	}
+
+	taken := make(map[string]bool, len(sessions))
+	for _, s := range sessions {
+		taken[s.name] = true
+	}
+
+	name := base
+	for n := 2; taken[name]; n++ {
+		name = base + "-" + strconv.Itoa(n)
+	}
+	return name, nil
+}
+
+// initialPane waits for a new session's shell, which materialises shortly
+// after `attach -b` returns together with the About popup zellij opens over
+// it regardless of --show-startup-tips; the popup is closed so the session
+// opens on the harness.
+func (b Backend) initialPane(session string) (pane, error) {
+	deadline := time.Now().Add(startupWait)
+	for {
+		raw, err := b.rawPanes(session)
+		if panes := toPanes(session, raw); err == nil && len(panes) > 0 {
+			b.closeAbout(session, raw)
+			return panes[0], nil
+		}
+		if time.Now().After(deadline) {
+			return pane{}, fmt.Errorf("zellijctl: session %s: no pane after %s", session, startupWait)
+		}
+		time.Sleep(startupPoll)
+	}
+}
+
+// closeAbout closes the About popups in raw; one left open is harmless.
+func (b Backend) closeAbout(session string, raw []paneJSON) {
+	for _, r := range raw {
+		if r.IsPlugin && strings.TrimPrefix(r.PluginURL, "zellij:") == "about" {
+			_, _ = b.in(session, "close-pane", "--pane-id", "plugin_"+strconv.Itoa(r.ID))
+		}
+	}
+}
+
+// Select implements mux.Backend. Within the client's session it goes to the
+// tab; across sessions it switches the client there, landing where zellij
+// last left it (ModeSession) or on the tab's preferred pane.
+func (b Backend) Select(t mux.Target, mode mux.LaunchMode, client string) error {
 	if !b.Available() {
 		return mux.ErrNotAvailable
 	}
 
-	if _, err := b.action("go-to-tab-by-id", string(t)); err != nil {
-		return fmt.Errorf("zellijctl: go-to-tab-by-id %s: %w", t, err)
+	session, tab, err := splitAddress(string(t))
+	if err != nil {
+		return err
+	}
+
+	viewing := b.viewing(client)
+	if session == viewing {
+		if _, err := b.in(viewing, "go-to-tab-by-id", tab); err != nil {
+			return fmt.Errorf("zellijctl: go-to-tab-by-id %s: %w", t, err)
+		}
+		return nil
+	}
+
+	args := []string{"switch-session", session}
+	if mode != mux.ModeSession {
+		inTab, err := b.tabPanes(t)
+		if err != nil {
+			return err
+		}
+		best, _ := choose(inTab)
+		args = append(args, "--pane-id", best.localID())
+	}
+	if _, err := b.in(viewing, args...); err != nil {
+		return fmt.Errorf("zellijctl: switch-session %s: %w", session, err)
 	}
 	return nil
 }
 
-// SelectPane implements mux.Backend: focuses the pane's tab, then the pane.
-func (b Backend) SelectPane(paneID, _ string) error {
+// SelectPane implements mux.Backend: focuses the pane's tab, then the pane,
+// switching the client's session first when the pane lives elsewhere.
+func (b Backend) SelectPane(paneID, client string) error {
 	if !b.Available() {
 		return mux.ErrNotAvailable
 	}
 
-	panes, err := b.panes()
+	session, local, err := splitAddress(paneID)
+	if err != nil {
+		return err
+	}
+
+	panes, err := b.sessionPanes(session)
 	if err != nil {
 		return err
 	}
 
 	tab := ""
 	for _, p := range panes {
-		if p.paneID() == paneID {
+		if p.localID() == local {
 			tab = p.tab
 		}
 	}
@@ -247,23 +395,74 @@ func (b Backend) SelectPane(paneID, _ string) error {
 		return fmt.Errorf("zellijctl: pane %s not found", paneID)
 	}
 
-	if _, err := b.action("go-to-tab-by-id", tab); err != nil {
+	viewing := b.viewing(client)
+	if session != viewing {
+		if _, err := b.in(viewing, "switch-session", session, "--pane-id", local); err != nil {
+			return fmt.Errorf("zellijctl: switch-session %s: %w", session, err)
+		}
+		return nil
+	}
+
+	if _, err := b.in(viewing, "go-to-tab-by-id", tab); err != nil {
 		return fmt.Errorf("zellijctl: go-to-tab-by-id %s: %w", tab, err)
 	}
-	if _, err := b.action("focus-pane-id", paneID); err != nil {
+	if _, err := b.in(viewing, "focus-pane-id", local); err != nil {
 		return fmt.Errorf("zellijctl: focus-pane-id %s: %w", paneID, err)
 	}
 	return nil
 }
 
-// Kill implements mux.Backend: closes the tab.
+// Kill implements mux.Backend: deletes the tab's session when the tab is its
+// only one and it is not cogitator's own, else closes the tab. Identity is by
+// pane cwd, so a matched tab can sit in a session the user opened; mode never
+// widens a kill to the whole of such a session.
 func (b Backend) Kill(t mux.Target, _ mux.LaunchMode) error {
 	if !b.Available() {
 		return mux.ErrNotAvailable
 	}
 
-	if _, err := b.action("close-tab-by-id", string(t)); err != nil {
+	session, tab, err := splitAddress(string(t))
+	if err != nil {
+		return err
+	}
+
+	if session != b.session() {
+		whole, err := b.onlyTab(session, tab)
+		if err != nil {
+			return err
+		}
+		if whole {
+			return b.deleteSession(session)
+		}
+	}
+
+	if _, err := b.in(session, "close-tab-by-id", tab); err != nil {
 		return fmt.Errorf("zellijctl: close-tab-by-id %s: %w", t, err)
+	}
+	return nil
+}
+
+func (b Backend) onlyTab(session, tab string) (bool, error) {
+	out, err := b.in(session, "list-tabs", "-j")
+	if err != nil {
+		return false, fmt.Errorf("zellijctl: list-tabs %s: %w", session, err)
+	}
+
+	var tabs []struct {
+		TabID int `json:"tab_id"`
+	}
+	if err := json.Unmarshal([]byte(out), &tabs); err != nil {
+		return false, fmt.Errorf("zellijctl: parse list-tabs %s: %w", session, err)
+	}
+	return len(tabs) == 1 && strconv.Itoa(tabs[0].TabID) == tab, nil
+}
+
+// deleteSession kills and forgets session in one step: closing its last tab
+// would leave it resurrectable, and delete-session after kill-session fails
+// for a session zellij never serialised.
+func (b Backend) deleteSession(session string) error {
+	if _, err := b.runner().Run("delete-session", "--force", session); err != nil {
+		return fmt.Errorf("zellijctl: delete-session %s: %w", session, err)
 	}
 	return nil
 }
@@ -299,14 +498,13 @@ func (b Backend) ListPanes() ([]mux.Pane, error) {
 		return nil, err
 	}
 
-	session := b.session()
 	out := make([]mux.Pane, 0, len(panes))
 	for _, p := range panes {
 		out = append(out, mux.Pane{
 			PaneID:      p.paneID(),
-			WindowID:    p.tab,
-			SessionID:   session,
-			SessionName: session,
+			WindowID:    string(p.target()),
+			SessionID:   p.session,
+			SessionName: p.session,
 			Cwd:         p.cwd,
 			Command:     p.command,
 			CogDir:      p.cwd,
@@ -315,27 +513,31 @@ func (b Backend) ListPanes() ([]mux.Pane, error) {
 	return out, nil
 }
 
-// Capture implements mux.Backend. target is a pane id ("terminal_N") or a tab
-// id (its preferred pane); the result is the last lines lines of the viewport
-// with trailing blank lines dropped.
+// Capture implements mux.Backend. target is a pane id or a tab target (its
+// preferred pane); the result is the last lines lines of the viewport with
+// trailing blank lines dropped.
 func (b Backend) Capture(target string, lines int) (string, error) {
 	if !b.Available() {
 		return "", mux.ErrNotAvailable
 	}
 
-	paneID := target
-	if !strings.HasPrefix(target, paneIDPrefix) {
+	session, local, err := splitAddress(target)
+	if err != nil {
+		return "", err
+	}
+
+	if !strings.HasPrefix(local, paneIDPrefix) {
 		inTab, err := b.tabPanes(mux.Target(target))
 		if err != nil {
 			return "", err
 		}
 		best, _ := choose(inTab)
-		paneID = best.paneID()
+		local = best.localID()
 	}
 
-	out, err := b.action("dump-screen", "-p", paneID)
+	out, err := b.in(session, "dump-screen", "-p", local)
 	if err != nil {
-		return "", fmt.Errorf("zellijctl: dump-screen %s: %w", paneID, err)
+		return "", fmt.Errorf("zellijctl: dump-screen %s: %w", address(session, local), err)
 	}
 	return lastLines(out, lines), nil
 }
@@ -349,17 +551,18 @@ func (b Backend) SelfPaneID() string {
 	if id == "" {
 		return ""
 	}
-	return paneIDPrefix + id
+	return address(b.session(), paneIDPrefix+id)
 }
 
 // CurrentLocation implements mux.Backend: the issuing client's tab in the
-// current session. Client is always empty (zellij has no client addressing).
+// current session, which is also the client.
 func (b Backend) CurrentLocation() (mux.Location, error) {
 	if !b.Available() {
 		return mux.Location{}, mux.ErrNotAvailable
 	}
 
-	loc := mux.Location{SessionID: b.session()}
+	session := b.session()
+	loc := mux.Location{Client: session, SessionID: session}
 	out, err := b.action("current-tab-info", "-j")
 	if err != nil {
 		return loc, fmt.Errorf("zellijctl: current-tab-info: %w", err)
@@ -375,8 +578,49 @@ func (b Backend) CurrentLocation() (mux.Location, error) {
 		return loc, errors.New("zellijctl: current-tab-info: no tab_id")
 	}
 
-	loc.WindowID = strconv.Itoa(*info.TabID)
+	loc.WindowID = address(session, strconv.Itoa(*info.TabID))
 	return loc, nil
+}
+
+type sessionInfo struct {
+	name   string
+	exited bool
+}
+
+// listSessions parses `list-sessions -n` lines such as
+// "NAME [Created 1s ago] (EXITED - attach to resurrect)".
+func (b Backend) listSessions() ([]sessionInfo, error) {
+	out, err := b.runner().Run("list-sessions", "-n")
+	if err != nil {
+		return nil, fmt.Errorf("zellijctl: list-sessions: %w", err)
+	}
+
+	var sessions []sessionInfo
+	for _, line := range strings.Split(out, "\n") {
+		name, rest, ok := strings.Cut(line, " [Created ")
+		if !ok {
+			continue
+		}
+		sessions = append(sessions, sessionInfo{name: name, exited: strings.Contains(rest, "(EXITED")})
+	}
+	return sessions, nil
+}
+
+// liveSessions is cogitator's own session, then every other live one.
+func (b Backend) liveSessions() ([]string, error) {
+	sessions, err := b.listSessions()
+	if err != nil {
+		return nil, err
+	}
+
+	own := b.session()
+	names := []string{own}
+	for _, s := range sessions {
+		if !s.exited && s.name != own {
+			names = append(names, s.name)
+		}
+	}
+	return names, nil
 }
 
 type paneJSON struct {
@@ -387,9 +631,11 @@ type paneJSON struct {
 	TabID       int    `json:"tab_id"`
 	PaneCommand string `json:"pane_command"`
 	PaneCwd     string `json:"pane_cwd"`
+	PluginURL   string `json:"plugin_url"`
 }
 
 type pane struct {
+	session string
 	id      int
 	tab     string
 	cwd     string
@@ -397,7 +643,11 @@ type pane struct {
 	dead    bool
 }
 
-func (p pane) paneID() string { return paneIDPrefix + strconv.Itoa(p.id) }
+func (p pane) localID() string { return paneIDPrefix + strconv.Itoa(p.id) }
+
+func (p pane) paneID() string { return address(p.session, p.localID()) }
+
+func (p pane) target() mux.Target { return mux.Target(address(p.session, p.tab)) }
 
 func (p pane) runsHarness() bool {
 	if p.dead {
@@ -413,20 +663,58 @@ func (p pane) runsHarness() bool {
 	return false
 }
 
-// panes lists the session's terminal panes. A held pane reports no cwd, so
-// it inherits the dir remembered for its tab.
+// panes lists the terminal panes of every live session, cogitator's own
+// first. A session that vanished since list-sessions is skipped; only a
+// failure to list the own session is an error.
 func (b Backend) panes() ([]pane, error) {
-	out, err := b.action("list-panes", "-a", "-j")
+	sessions, err := b.liveSessions()
 	if err != nil {
-		return nil, fmt.Errorf("zellijctl: list-panes: %w", err)
+		return nil, err
+	}
+
+	perSession := make([][]pane, len(sessions))
+	errs := make([]error, len(sessions))
+	var wg sync.WaitGroup
+	for i, session := range sessions {
+		wg.Go(func() { perSession[i], errs[i] = b.sessionPanes(session) })
+	}
+	wg.Wait()
+
+	if errs[0] != nil {
+		return nil, errs[0]
+	}
+
+	var panes []pane
+	for _, ps := range perSession {
+		panes = append(panes, ps...)
+	}
+	return panes, nil
+}
+
+func (b Backend) sessionPanes(session string) ([]pane, error) {
+	raw, err := b.rawPanes(session)
+	if err != nil {
+		return nil, err
+	}
+	return toPanes(session, raw), nil
+}
+
+func (b Backend) rawPanes(session string) ([]paneJSON, error) {
+	out, err := b.in(session, "list-panes", "-a", "-j")
+	if err != nil {
+		return nil, fmt.Errorf("zellijctl: list-panes %s: %w", session, err)
 	}
 
 	var raw []paneJSON
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
-		return nil, fmt.Errorf("zellijctl: parse list-panes: %w", err)
+		return nil, fmt.Errorf("zellijctl: parse list-panes %s: %w", session, err)
 	}
+	return raw, nil
+}
 
-	session := b.session()
+// toPanes keeps session's terminal panes. A held pane reports no cwd, so it
+// inherits the dir remembered for its tab.
+func toPanes(session string, raw []paneJSON) []pane {
 	panes := make([]pane, 0, len(raw))
 	for _, r := range raw {
 		if r.IsPlugin {
@@ -434,6 +722,7 @@ func (b Backend) panes() ([]pane, error) {
 		}
 
 		p := pane{
+			session: session,
 			id:      r.ID,
 			tab:     strconv.Itoa(r.TabID),
 			cwd:     canonical(r.PaneCwd),
@@ -451,18 +740,23 @@ func (b Backend) panes() ([]pane, error) {
 			panes[i].cwd = tabDirs.get(session, panes[i].tab)
 		}
 	}
-	return panes, nil
+	return panes
 }
 
 func (b Backend) tabPanes(t mux.Target) ([]pane, error) {
-	panes, err := b.panes()
+	session, tab, err := splitAddress(string(t))
+	if err != nil {
+		return nil, err
+	}
+
+	panes, err := b.sessionPanes(session)
 	if err != nil {
 		return nil, err
 	}
 
 	var inTab []pane
 	for _, p := range panes {
-		if p.tab == string(t) {
+		if p.tab == tab {
 			inTab = append(inTab, p)
 		}
 	}
