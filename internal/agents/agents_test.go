@@ -287,6 +287,23 @@ func TestBuildStrayPrefersPaneRunningTheHarness(t *testing.T) {
 	}
 }
 
+// The panes are zellijctl.ListPanes output for a zellij session with a shell
+// and a claude pane in the stray dir; the claude-code harness launches "claude".
+func TestBuildStrayPrefersClaudePaneOverShellInZellij(t *testing.T) {
+	live := []state.SessionView{{SessionID: "x", Directory: "/stray", Source: state.SourceLive, Provider: "claude-code", LastActivity: ago(time.Minute)}}
+	for _, command := range []string{"claude --resume abc", "sleep 100000 claude"} {
+		panes := []mux.Pane{
+			{PaneID: "cogtest-agent:terminal_0", WindowID: "cogtest-agent:0", SessionID: "cogtest-agent", Cwd: "/stray", Command: "/bin/zsh", CogDir: "/stray"},
+			{PaneID: "cogtest-agent:terminal_1", WindowID: "cogtest-agent:0", SessionID: "cogtest-agent", Cwd: "/stray", Command: command, CogDir: "/stray"},
+		}
+
+		got := build(Input{Live: live, Panes: panes})
+		if got[0].PaneID != "cogtest-agent:terminal_1" {
+			t.Errorf("command %q: pane = %s, want cogtest-agent:terminal_1", command, got[0].PaneID)
+		}
+	}
+}
+
 func TestBuildStrayFallsBackToLowestPaneID(t *testing.T) {
 	live := []state.SessionView{{SessionID: "x", Directory: "/stray", Source: state.SourceLive, LastActivity: ago(time.Minute)}}
 	panes := []mux.Pane{

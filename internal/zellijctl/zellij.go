@@ -624,14 +624,15 @@ func (b Backend) liveSessions() ([]string, error) {
 }
 
 type paneJSON struct {
-	ID          int    `json:"id"`
-	IsPlugin    bool   `json:"is_plugin"`
-	Exited      bool   `json:"exited"`
-	IsHeld      bool   `json:"is_held"`
-	TabID       int    `json:"tab_id"`
-	PaneCommand string `json:"pane_command"`
-	PaneCwd     string `json:"pane_cwd"`
-	PluginURL   string `json:"plugin_url"`
+	ID              int    `json:"id"`
+	IsPlugin        bool   `json:"is_plugin"`
+	Exited          bool   `json:"exited"`
+	IsHeld          bool   `json:"is_held"`
+	TabID           int    `json:"tab_id"`
+	PaneCommand     string `json:"pane_command"`
+	TerminalCommand string `json:"terminal_command"`
+	PaneCwd         string `json:"pane_cwd"`
+	PluginURL       string `json:"plugin_url"`
 }
 
 type pane struct {
@@ -726,7 +727,7 @@ func toPanes(session string, raw []paneJSON) []pane {
 			id:      r.ID,
 			tab:     strconv.Itoa(r.TabID),
 			cwd:     canonical(r.PaneCwd),
-			command: r.PaneCommand,
+			command: paneCommand(r),
 			dead:    r.Exited || r.IsHeld,
 		}
 		if p.cwd != "" {
@@ -741,6 +742,17 @@ func toPanes(session string, raw []paneJSON) []pane {
 		}
 	}
 	return panes
+}
+
+// paneCommand is the pane's foreground command plus, for a live command pane,
+// the command it was started with: `zellij run -- claude` may exec into a
+// process that no longer names the harness.
+func paneCommand(r paneJSON) string {
+	started := r.TerminalCommand
+	if started == "" || r.Exited || r.IsHeld || strings.Contains(r.PaneCommand, started) {
+		return r.PaneCommand
+	}
+	return strings.TrimSpace(r.PaneCommand + " " + started)
 }
 
 func (b Backend) tabPanes(t mux.Target) ([]pane, error) {

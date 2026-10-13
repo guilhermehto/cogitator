@@ -5,11 +5,13 @@
 package agents
 
 import (
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
 	"github.com/guilhermehto/cogitator/internal/settings"
@@ -423,29 +425,52 @@ func (ix paneIndex) ownsSession(p mux.Pane) bool {
 
 // pickPane prefers a pane running the harness, then the lowest pane id.
 func pickPane(candidates []mux.Pane, harnessName string) (mux.Pane, bool) {
+	names := harnessNames(harnessName)
+
 	var best mux.Pane
 	found := false
 	for _, p := range candidates {
-		if !found || betterPane(p, best, harnessName) {
+		if !found || betterPane(p, best, names) {
 			best, found = p, true
 		}
 	}
 	return best, found
 }
 
-func betterPane(p, best mux.Pane, harnessName string) bool {
-	pRuns, bestRuns := runsHarness(p, harnessName), runsHarness(best, harnessName)
+func betterPane(p, best mux.Pane, names []string) bool {
+	pRuns, bestRuns := runsHarness(p, names), runsHarness(best, names)
 	if pRuns != bestRuns {
 		return pRuns
 	}
 	return paneNumber(p.PaneID) < paneNumber(best.PaneID)
 }
 
-func runsHarness(p mux.Pane, harnessName string) bool {
-	if harnessName == "" {
-		return false
+func runsHarness(p mux.Pane, names []string) bool {
+	command := strings.ToLower(p.Command)
+	for _, name := range names {
+		if strings.Contains(command, name) {
+			return true
+		}
 	}
-	return strings.Contains(strings.ToLower(p.Command), strings.ToLower(harnessName))
+	return false
+}
+
+// harnessNames are the lowercased kind and launch binary of harnessName: a
+// claude-code pane runs "claude".
+func harnessNames(harnessName string) []string {
+	if harnessName == "" {
+		return nil
+	}
+
+	names := []string{strings.ToLower(harnessName)}
+	h, err := harness.DefaultRegistry.Get(harness.Kind(harnessName))
+	if err != nil {
+		return names
+	}
+	if argv := h.LaunchArgv("", ""); len(argv) > 0 {
+		names = append(names, strings.ToLower(filepath.Base(argv[0])))
+	}
+	return names
 }
 
 // paneNumber orders tmux ids like "%12" numerically; unparseable ids sort last.

@@ -113,6 +113,7 @@ type paneFixture struct {
 	Held    bool
 	Tab     int
 	Command string
+	Started string
 	Cwd     string
 }
 
@@ -134,7 +135,7 @@ func panesJSON(t *testing.T, panes ...paneFixture) string {
 			"tab_id":           p.Tab,
 			"tab_position":     p.Tab,
 			"tab_name":         "tab",
-			"terminal_command": nil,
+			"terminal_command": nilIfEmpty(p.Started),
 		}
 		if p.Plugin {
 			m["plugin_url"] = cmp.Or(p.URL, "tab-bar")
@@ -213,6 +214,32 @@ func TestListPanes_TerminalPanesOnlyWithCanonicalCwds(t *testing.T) {
 	wantCalls := [][]string{{"list-sessions", "-n"}, {"action", "list-panes", "-a", "-j"}}
 	if !reflect.DeepEqual(r.calls, wantCalls) {
 		t.Errorf("calls = %v, want %v", r.calls, wantCalls)
+	}
+}
+
+// The panes are as probed in zellij 0.45.1: a shell, then `zellij run --
+// claude` where the claude script execs `sleep`.
+func TestListPanes_CommandPaneKeepsTheCommandItWasStartedWith(t *testing.T) {
+	raw, _ := canonicalTempDir(t)
+	r := &fakeRunner{responses: map[string]string{"list-panes": panesJSON(t,
+		paneFixture{ID: 0, Tab: 0, Command: "/bin/zsh", Cwd: raw},
+		paneFixture{ID: 1, Tab: 0, Command: "sleep 100000", Started: "claude", Cwd: raw},
+		paneFixture{ID: 2, Tab: 0, Command: "claude --resume x", Started: "claude --resume x", Cwd: raw},
+		paneFixture{ID: 3, Tab: 0, Started: "claude", Exited: true, Held: true},
+	)}}
+
+	panes, err := newBackend(t, r).ListPanes()
+	if err != nil {
+		t.Fatalf("ListPanes: %v", err)
+	}
+
+	var got []string
+	for _, p := range panes {
+		got = append(got, p.Command)
+	}
+	want := []string{"/bin/zsh", "sleep 100000 claude", "claude --resume x", ""}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("commands = %q, want %q", got, want)
 	}
 }
 
@@ -295,6 +322,22 @@ func TestFindWindowByDir_PrefersHarnessPane(t *testing.T) {
 		t.Fatalf("FindWindowByDir: %v", err)
 	}
 	if want := mux.Target(ownSession(t) + ":3"); got != want {
+		t.Errorf("FindWindowByDir = %q, want harness tab %q", got, want)
+	}
+}
+
+func TestFindWindowByDir_PrefersPaneStartedAsHarnessOverShell(t *testing.T) {
+	raw, _ := canonicalTempDir(t)
+	r := &fakeRunner{responses: map[string]string{"list-panes": panesJSON(t,
+		paneFixture{ID: 0, Tab: 0, Command: "/bin/zsh", Cwd: raw},
+		paneFixture{ID: 1, Tab: 1, Command: "sleep 100000", Started: "claude", Cwd: raw},
+	)}}
+
+	got, err := newBackend(t, r).FindWindowByDir(raw)
+	if err != nil {
+		t.Fatalf("FindWindowByDir: %v", err)
+	}
+	if want := mux.Target(ownSession(t) + ":1"); got != want {
 		t.Errorf("FindWindowByDir = %q, want harness tab %q", got, want)
 	}
 }
