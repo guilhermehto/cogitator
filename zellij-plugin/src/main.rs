@@ -21,6 +21,7 @@ struct State {
     session_name: Option<String>,
     plugin_id: u32,
     own_tab: Option<usize>,
+    focus_pending: bool,
 }
 
 impl Default for State {
@@ -34,6 +35,7 @@ impl Default for State {
             session_name: None,
             plugin_id: 0,
             own_tab: None,
+            focus_pending: false,
         }
     }
 }
@@ -109,6 +111,9 @@ impl ZellijPlugin for State {
                         self.own_tab = Some(*tab);
                     }
                 }
+                if self.focus_pending {
+                    self.take_focus_if_viewed();
+                }
                 self.app.floating() != was_floating
             }
             Event::Key(key) => match map_key(&key) {
@@ -124,8 +129,9 @@ impl ZellijPlugin for State {
     }
 
     fn pipe(&mut self, message: PipeMessage) -> bool {
-        if message.name == FOCUS_PIPE && self.in_viewed_tab() {
-            focus_plugin_pane(self.plugin_id, false, false);
+        if message.name == FOCUS_PIPE {
+            self.focus_pending = true;
+            self.take_focus_if_viewed();
         }
         false
     }
@@ -140,10 +146,18 @@ impl ZellijPlugin for State {
 
 impl State {
     /// The keybind pipe reaches the rail instance in every tab; only the one
-    /// in the tab the user is looking at takes focus.
-    fn in_viewed_tab(&self) -> bool {
+    /// in the tab the user is looking at takes focus. An instance the pipe
+    /// just launched learns its tab from the next PaneUpdate.
+    fn take_focus_if_viewed(&mut self) {
+        let Some(own_tab) = self.own_tab else {
+            return;
+        };
+
+        self.focus_pending = false;
         let viewed = get_focused_pane_info().ok().map(|(tab, _)| tab);
-        viewed.is_some() && viewed == self.own_tab
+        if viewed == Some(own_tab) {
+            focus_plugin_pane(self.plugin_id, false, false);
+        }
     }
 
     fn list(&mut self) {
