@@ -454,12 +454,115 @@ func TestInstallBindsPluginToSidebarKey(t *testing.T) {
 	}
 
 	content := readFile(t, env.conf)
-	want := `        bind "g" { LaunchOrFocusPlugin "file:` + wasm + `" { floating true; move_to_focused_tab true; cogitator "/opt/bin/cogitator"; }; SwitchToMode "locked"; }` + "\n    }\n    " + endMarker
+	want := `        bind "g" { MessagePlugin "file:` + wasm + `" { name "cogitator_focus"; floating true; cogitator "/opt/bin/cogitator"; }; SwitchToMode "locked"; }` + "\n    }\n    " + endMarker
 	if !strings.Contains(content, want) {
 		t.Fatalf("missing %q in:\n%s", want, content)
 	}
 	if !strings.Contains(env.out.String(), "sidebar g") {
 		t.Fatalf("summary does not mention the sidebar key: %q", env.out.String())
+	}
+}
+
+func TestInstallWithPluginDocksSidebarInNewSessions(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+	wasm := writePlugin(t)
+
+	if err := env.installer.Install(Options{Plugin: wasm}); err != nil {
+		t.Fatal(err)
+	}
+
+	layoutPath := filepath.Join(filepath.Dir(env.conf), "layouts", "cogitator.kdl")
+	content := readFile(t, env.conf)
+	wantDefault := beginLine + "\ndefault_layout \"" + layoutPath + "\"\n" + endMarker + "\n"
+	if !strings.HasSuffix(content, wantDefault) {
+		t.Fatalf("default_layout not set at top level:\n%s", content)
+	}
+
+	layout := readFile(t, layoutPath)
+	wantPlugin := "plugin location=\"file:" + wasm + "\" {\n                cogitator \"/opt/bin/cogitator\"\n"
+	if !strings.Contains(layout, wantPlugin) || !strings.Contains(layout, "pane focus=true") {
+		t.Fatalf("layout does not dock the plugin beside a focused pane:\n%s", layout)
+	}
+}
+
+func TestInstallWithPluginRefusesUserDefaultLayoutWithoutWriting(t *testing.T) {
+	env := newTestEnv(t)
+	original := userShapedConfig + "default_layout \"compact\"\n"
+	writeFile(t, env.conf, original, 0o644)
+	wasm := writePlugin(t)
+
+	err := env.installer.Install(Options{Plugin: wasm})
+	if err == nil || !strings.Contains(err.Error(), "default_layout is already set") {
+		t.Fatalf("err = %v, want default_layout refusal", err)
+	}
+
+	if got := readFile(t, env.conf); got != original {
+		t.Fatalf("config changed:\n%s", got)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(env.conf), "layouts", "cogitator.kdl")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("layout written despite refusal: %v", err)
+	}
+}
+
+func TestReinstallWithPluginRestoresDeletedLayout(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+	wasm := writePlugin(t)
+	layoutPath := filepath.Join(filepath.Dir(env.conf), "layouts", "cogitator.kdl")
+
+	if err := env.installer.Install(Options{Plugin: wasm}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(layoutPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.installer.Install(Options{Plugin: wasm}); err != nil {
+		t.Fatal(err)
+	}
+
+	if layout := readFile(t, layoutPath); !strings.HasPrefix(layout, layoutHeader) {
+		t.Fatalf("layout not restored:\n%s", layout)
+	}
+}
+
+func TestUninstallRemovesPluginBlocksAndLayout(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+	wasm := writePlugin(t)
+	layoutPath := filepath.Join(filepath.Dir(env.conf), "layouts", "cogitator.kdl")
+
+	if err := env.installer.Install(Options{Plugin: wasm}); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.installer.Uninstall(Options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := readFile(t, env.conf); got != userShapedConfig {
+		t.Fatalf("uninstall did not restore the original:\n%s", got)
+	}
+	if _, err := os.Stat(layoutPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("layout still present: %v", err)
+	}
+}
+
+func TestUninstallKeepsUserLayoutOfTheSameName(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+	if err := env.installer.Install(Options{}); err != nil {
+		t.Fatal(err)
+	}
+	layoutPath := filepath.Join(filepath.Dir(env.conf), "layouts", "cogitator.kdl")
+	userLayout := "layout {\n    pane\n}\n"
+	writeFile(t, layoutPath, userLayout, 0o644)
+
+	if err := env.installer.Uninstall(Options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := readFile(t, layoutPath); got != userLayout {
+		t.Fatalf("user layout changed:\n%s", got)
 	}
 }
 
@@ -560,17 +663,17 @@ func TestInstallWithPluginTwiceReplacesBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := readFile(t, env.conf)
-	if got := strings.Count(content, beginMarker); got != 1 {
-		t.Fatalf("want 1 owned block, got %d in:\n%s", got, content)
+	if got := strings.Count(content, beginMarker); got != 2 {
+		t.Fatalf("want keybinds and layout blocks, got %d in:\n%s", got, content)
 	}
-	if got := strings.Count(content, "LaunchOrFocusPlugin \"file:"); got != 1 || !strings.Contains(content, `bind "S" { LaunchOrFocusPlugin`) {
+	if got := strings.Count(content, "MessagePlugin \"file:"); got != 1 || !strings.Contains(content, `bind "S" { MessagePlugin`) {
 		t.Fatalf("re-install did not replace the plugin bind:\n%s", content)
 	}
 
 	if err := env.installer.Install(Options{}); err != nil {
 		t.Fatal(err)
 	}
-	if got := readFile(t, env.conf); strings.Contains(got, "LaunchOrFocusPlugin \"file:") {
+	if got := readFile(t, env.conf); strings.Contains(got, "MessagePlugin \"file:") || strings.Contains(got, "default_layout") {
 		t.Fatalf("install without --plugin kept the plugin bind:\n%s", got)
 	}
 }
@@ -761,7 +864,7 @@ func TestInstallAcceptsExplicitlyPassedClashingKeys(t *testing.T) {
 	}
 
 	content := readFile(t, env.conf)
-	for _, want := range []string{`bind "s" { LaunchOrFocusPlugin "file:` + wasm, `bind "c" { Run "/opt/bin/cogitator" "pick"`} {
+	for _, want := range []string{`bind "s" { MessagePlugin "file:` + wasm, `bind "c" { Run "/opt/bin/cogitator" "pick"`} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("missing %q in:\n%s", want, content)
 		}

@@ -281,8 +281,8 @@ func runZellijCommand(args []string) {
 		flags.StringVar(&opts.NextKey, "next-key", "", fmt.Sprintf("normal-mode key that jumps to the next agent needing attention (default %q)", zellijinstall.DefaultNextKey))
 		flags.StringVar(&opts.PickKey, "pick-key", "", fmt.Sprintf("normal-mode key that opens the agent picker (default %q)", zellijinstall.DefaultPickKey))
 		flags.StringVar(&opts.Binary, "binary", "", "cogitator binary to bind (default: PATH lookup, then this executable)")
-		flags.StringVar(&opts.Plugin, "plugin", "", "cogitator zellij plugin wasm to bind to the sidebar key (default: no plugin bind)")
-		flags.StringVar(&opts.SidebarKey, "sidebar-key", "", fmt.Sprintf("normal-mode key that toggles the cogitator plugin (needs --plugin; default %q)", zellijinstall.DefaultSidebarKey))
+		flags.StringVar(&opts.Plugin, "plugin", "", "cogitator zellij plugin wasm to dock as a sidebar in new sessions (sets default_layout; default: no sidebar)")
+		flags.StringVar(&opts.SidebarKey, "sidebar-key", "", fmt.Sprintf("normal-mode key that focuses the cogitator sidebar (needs --plugin; default %q)", zellijinstall.DefaultSidebarKey))
 	}
 	_ = flags.Parse(args[1:])
 
