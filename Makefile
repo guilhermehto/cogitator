@@ -2,7 +2,7 @@ BIN := cogitator
 SCHEMA_PORT := 17777
 SCHEMA_URL := http://127.0.0.1:$(SCHEMA_PORT)/doc
 
-.PHONY: test lint build run vet ci clean release generate capture-schema demo
+.PHONY: test lint build run vet ci clean release generate capture-schema demo plugin plugin-test
 
 test:
 	go test -race -count=1 ./...
@@ -55,6 +55,12 @@ capture-schema:
 		done; \
 		echo "failed to fetch $(SCHEMA_URL)"; \
 		exit 1
+
+plugin:
+	cd zellij-plugin && cargo build --release --target wasm32-wasip1
+
+plugin-test:
+	cd zellij-plugin && cargo test
 
 release:
 	goreleaser release --clean
