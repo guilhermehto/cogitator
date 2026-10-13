@@ -76,6 +76,6 @@ into `main`/`master` and whose worktrees have no uncommitted or untracked change
   importing it) telling coding agents that it is not a repo itself and each subdirectory is a
   separate git worktree.
 
-`ctrl+P` lists workspace sessions in the session switcher too, labelled
+In the Workspaces tab, `ctrl+P` lists workspace sessions in the switcher, labelled
 `<workspace>/<session>`. See [Key bindings](/guide/key-bindings) for the Workspaces-pane keys
 (`N`, `n`, `e`, `D`, `P`).

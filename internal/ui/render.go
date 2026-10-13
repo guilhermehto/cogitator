@@ -856,7 +856,7 @@ func (m model) renderSessionPalette(fieldW, fieldH int) string {
 		query := m.input.Value()
 		for i := start; i < end; i++ {
 			ci := m.sessionPaletteMatches[i]
-			line := padToWidth(m.renderPaletteRow(m.sessionPaletteRows[ci], m.sessionPaletteLabels[ci], query, contentW), contentW)
+			line := padToWidth(m.renderPaletteRow(m.sessionPaletteCandidates[ci].row, m.sessionPaletteLabels[ci], query, contentW), contentW)
 			if i == cursor {
 				line = highlightSelectedRow(line)
 			}
@@ -1017,7 +1017,7 @@ var (
 		{"gg / G", "top / bottom"},
 		{"ctrl+u/d", "prev / next repo"},
 		{"/", "search sessions"},
-		{"ctrl+P", "switch session"},
+		{"ctrl+P", "switch within tab"},
 	}}
 	helpRepos = helpSection{"Repos", [][2]string{
 		{"enter", "jump / resume"},

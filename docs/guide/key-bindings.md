@@ -2,7 +2,7 @@
 
 | Key       | Context                                | Action                                                                                                                                                            |
 | --------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ctrl+P`  | anywhere (outside a prompt)             | open the session switcher: fuzzy-find a repo/branch or workspace session (listed as `<workspace>/<session>`) and jump to it (`cmd+P` is not supported; terminals don't forward it to TUI apps) |
+| `ctrl+P`  | anywhere (outside a prompt)             | open the switcher for the active tab and jump to the chosen item, most recently used first: repo/branch worktrees in Repos, workspace sessions (listed as `<workspace>/<session>`) in Workspaces, agents in Agents. The tab's cursor follows the jump (`cmd+P` is not supported; terminals don't forward it to TUI apps) |
 | `Tab`     | anywhere (outside a prompt)             | cycle Workspaces (shown on launch) → Repos → Agents                                                                                   |
 | `Enter`   | Agents tab                              | jump to the highlighted agent (resuming it if stopped); its Done badge clears                                                                                  |
 | `x`       | Agents tab                              | mark the highlighted agent seen without jumping                                                                                                                |

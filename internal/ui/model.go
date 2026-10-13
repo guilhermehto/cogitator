@@ -625,19 +625,18 @@ type model struct {
 	repoFinderErr      string
 
 	// Session palette state, meaningful while prompt is promptSwitchSession or
-	// promptSearchSession. Candidate rows and targets are captured when the
-	// palette opens; labels provide fuzzy-match text for each candidate.
+	// promptSearchSession. Candidates are captured when the palette opens;
+	// labels provide fuzzy-match text for each candidate. sessionPaletteMatches
 	// indexes those slices, holding the current fuzzy-filtered view ordered
 	// best-first; sessionPaletteCursor indexes sessionPaletteMatches. Zero
 	// values are safe (palette closed).
-	sessionPaletteRows    []settings.Row
-	sessionPaletteTargets []launchTarget
-	sessionPaletteLabels  []string
-	sessionPaletteMatches []int
-	sessionPaletteCursor  int
+	sessionPaletteCandidates []sessionCandidate
+	sessionPaletteLabels     []string
+	sessionPaletteMatches    []int
+	sessionPaletteCursor     int
 
 	// switchOrder records the monotonically increasing sequence in which
-	// targets (worktrees or workspace sessions) were last jumped to or
+	// targets (worktrees, workspace sessions, or agents) were last jumped to or
 	// resumed, keyed by the target's launch directory (launchTarget.dir);
 	// switchSeq is the next sequence to hand out. It seeds the ctrl+P
 	// palette's most-recently-used ordering so pressing ctrl+P then enter
@@ -1781,8 +1780,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 					idx := m.sessionPaletteMatches[clampIndex(m.sessionPaletteCursor, len(m.sessionPaletteMatches))]
-					row := m.sessionPaletteRows[idx]
-					target := m.sessionPaletteTargets[idx]
+					chosen := m.sessionPaletteCandidates[idx]
 					searchOnly := m.prompt == promptSearchSession
 					m.closeSessionPalette()
 					if searchOnly {
@@ -1790,7 +1788,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// the row again because workspaceRows may have refreshed while
 						// the palette was open.
 						for i, r := range m.workspaceRows {
-							if r.Worktree == row.Worktree {
+							if r.Worktree == chosen.row.Worktree {
 								m.sessionCursor = i
 								m.syncSessionScroll()
 								break
@@ -1798,32 +1796,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 						return m, nil
 					}
-					// Apply the same guards as the sessions-pane Enter handler.
-					tmuxAvail := m.tmux != nil && m.tmux.Available()
-					if !tmuxAvail {
-						m.tmuxHint = "tmux not available — start cogitator inside a tmux session to use jump/resume"
-						return m, nil
-					}
-					if row.State == settings.StateMissing {
-						m.tmuxHint = "worktree directory is missing — cannot resume"
-						return m, nil
-					}
-					if row.State == settings.StateCreating {
-						m.tmuxHint = "worktree is still being created…"
-						return m, nil
-					}
-					// Sync the sessions-pane cursor to the chosen row so the
-					// highlight reflects where the jump landed. A workspace
-					// session's target dir has no matching entry in
-					// m.workspaceRows, so this is a harmless no-op for those.
-					for i, r := range m.workspaceRows {
-						if r.Worktree == target.dir {
-							m.sessionCursor = i
-							break
-						}
-					}
-					m.recordSessionSwitch(target.dir)
-					return m, launchCmd(m.tmux, target, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
+					return m.switchToCandidate(chosen)
 				case "up", "ctrl+p":
 					m.sessionPaletteCursor = clampIndex(m.sessionPaletteCursor-1, len(m.sessionPaletteMatches))
 					return m, nil
@@ -1874,14 +1847,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// (b.1) Session switcher — ctrl+P opens the fuzzy "go to session"
-		// palette over every worktree row and workspace session. Global
-		// (works regardless of which pane is focused) and only reachable
-		// here when no prompt is active, since the prompt pre-empt block
-		// above short-circuits first.
+		// palette over the active tab's items: worktree rows (Repos),
+		// workspace sessions (Workspaces), or agents (Agents). Reachable from
+		// every tab, and only when no prompt is active, since the prompt
+		// pre-empt block above short-circuits first.
 		if msg.String() == "ctrl+p" {
+			placeholder, emptyHint := sessionSwitcherCopy(m.view)
 			candidates, startOnPrevious := m.orderedSessionCandidates()
 			if len(candidates) == 0 {
-				m.tmuxHint = "no sessions to switch to"
+				if m.view == viewWorkspaces {
+					m.wsHint = emptyHint
+				} else {
+					m.tmuxHint = emptyHint
+				}
 				return m, nil
 			}
 			// Seed the cursor on the previous session (row 1) so ctrl+P then enter
@@ -1890,7 +1868,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if startOnPrevious {
 				startCursor = 1
 			}
-			m.openSessionPalette(promptSwitchSession, candidates, startCursor, "go to session")
+			m.openSessionPalette(promptSwitchSession, candidates, startCursor, placeholder)
 			return m, m.input.Focus()
 		}
 
@@ -2793,12 +2771,9 @@ func (m *model) closeRepoFinder() {
 // openSessionPalette snapshots candidates and prepares the shared fuzzy palette.
 // startCursor is clamped against the initial unfiltered result list.
 func (m *model) openSessionPalette(mode promptMode, candidates []sessionCandidate, startCursor int, placeholder string) {
-	m.sessionPaletteRows = make([]settings.Row, len(candidates))
-	m.sessionPaletteTargets = make([]launchTarget, len(candidates))
+	m.sessionPaletteCandidates = candidates
 	m.sessionPaletteLabels = make([]string, len(candidates))
 	for i, c := range candidates {
-		m.sessionPaletteRows[i] = c.row
-		m.sessionPaletteTargets[i] = c.target
 		m.sessionPaletteLabels[i] = c.label
 	}
 	m.sessionPaletteMatches = fuzzyMatchIndices("", m.sessionPaletteLabels)
@@ -2815,8 +2790,7 @@ func (m *model) closeSessionPalette() {
 	m.prompt = promptIdle
 	m.input.Blur()
 	m.input.SetValue("")
-	m.sessionPaletteRows = nil
-	m.sessionPaletteTargets = nil
+	m.sessionPaletteCandidates = nil
 	m.sessionPaletteLabels = nil
 	m.sessionPaletteMatches = nil
 	m.sessionPaletteCursor = 0
@@ -2859,20 +2833,35 @@ func sessionPaletteLabel(row settings.Row) string {
 	return label
 }
 
+// switchKind identifies what a ctrl+P candidate jumps to, selecting its enter
+// dispatch in switchToCandidate.
+type switchKind int
+
+const (
+	switchWorktree switchKind = iota
+	switchWsSession
+	switchAgent
+)
+
 // sessionCandidate is one entry the ctrl+P switcher can jump to: row is the
 // render-only settings.Row shim renderPaletteRow (render.go) needs for its
 // status glyph and branch styling; target is the neutral launch identity
-// dispatched on enter; label is the fuzzy-match text.
+// dispatched on enter, and its dir is the switchOrder key; label is the
+// fuzzy-match text. agentID is set only for switchAgent candidates, whose
+// enter goes through focusAgent rather than target.
 type sessionCandidate struct {
-	row    settings.Row
-	target launchTarget
-	label  string
+	kind    switchKind
+	row     settings.Row
+	target  launchTarget
+	label   string
+	agentID string
 }
 
 func worktreeCandidates(rows []settings.Row) []sessionCandidate {
 	out := make([]sessionCandidate, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, sessionCandidate{
+			kind:   switchWorktree,
 			row:    row,
 			target: rowLaunchTarget(row),
 			label:  sessionPaletteLabel(row),
@@ -2881,22 +2870,19 @@ func worktreeCandidates(rows []settings.Row) []sessionCandidate {
 	return out
 }
 
-// sessionSwitchCandidates collects every target the ctrl+P switcher offers:
-// every Sessions-pane worktree row (m.workspaceRows) plus every assembled
-// workspace session across m.wsStatuses. A workspace session still being
-// assembled has Session.Dir == "" (the same pending-create discriminator
-// stripPendingWsSessions documents, workspace_cmd.go) and is excluded,
-// mirroring how a Sessions-pane creating row has no equivalent exclusion
-// needed here (it is still keyed on a real, if not-yet-existing, worktree
-// path).
-func (m model) sessionSwitchCandidates() []sessionCandidate {
-	out := worktreeCandidates(m.workspaceRows)
-	for _, ws := range m.wsStatuses {
+// wsSessionCandidates lists every assembled workspace session, labelled
+// "<workspace>/<session>". A session still being assembled has
+// Session.Dir == "" (the pending-create discriminator stripPendingWsSessions
+// documents, workspace_cmd.go) and is excluded: there is nothing to jump to.
+func wsSessionCandidates(statuses []workspace.WorkspaceStatus) []sessionCandidate {
+	var out []sessionCandidate
+	for _, ws := range statuses {
 		for _, sess := range ws.Sessions {
 			if sess.Session.Dir == "" {
 				continue
 			}
 			out = append(out, sessionCandidate{
+				kind: switchWsSession,
 				row: settings.Row{
 					Worktree:  sess.Session.Dir,
 					Branch:    sess.Session.Branch,
@@ -2914,10 +2900,130 @@ func (m model) sessionSwitchCandidates() []sessionCandidate {
 	return out
 }
 
+// agentCandidates lists every agent in m.agents, keeping their attention-first
+// order for agents never switched to.
+func (m model) agentCandidates() []sessionCandidate {
+	out := make([]sessionCandidate, 0, len(m.agents))
+	for _, a := range m.agents {
+		out = append(out, sessionCandidate{
+			kind:    switchAgent,
+			row:     settings.Row{State: a.State, Attention: a.Attention},
+			target:  launchTarget{dir: m.agentSwitchKey(a)},
+			label:   agentName(a),
+			agentID: a.ID,
+		})
+	}
+	return out
+}
+
+// agentSwitchKey is the switchOrder key focusAgent records for a: the managed
+// launch target's dir (the raw worktree or session dir the other tabs record
+// too), or the canonical agent ID for strays and untracked agents.
+func (m model) agentSwitchKey(a agents.Agent) string {
+	if a.Kind == agents.KindStray {
+		return a.ID
+	}
+	if target, ok := m.managedLaunchTarget(a); ok {
+		return target.dir
+	}
+	return a.ID
+}
+
+// sessionSwitchCandidates collects the targets the ctrl+P switcher offers in
+// the active tab: worktree rows in Repos, workspace sessions in Workspaces,
+// agents in Agents.
+func (m model) sessionSwitchCandidates() []sessionCandidate {
+	switch m.view {
+	case viewAgents:
+		return m.agentCandidates()
+	case viewWorkspaces:
+		return wsSessionCandidates(m.wsStatuses)
+	default:
+		return worktreeCandidates(m.workspaceRows)
+	}
+}
+
+// sessionSwitcherCopy returns the ctrl+P input placeholder and the hint shown
+// when the tab has nothing to switch to.
+func sessionSwitcherCopy(v viewMode) (placeholder, emptyHint string) {
+	switch v {
+	case viewAgents:
+		return "go to agent", "no agents to switch to"
+	case viewWorkspaces:
+		return "go to workspace session", "no workspace sessions to switch to"
+	default:
+		return "go to worktree", "no worktrees to switch to"
+	}
+}
+
+// switchToCandidate dispatches the ctrl+P switcher's enter on chosen.
+func (m model) switchToCandidate(chosen sessionCandidate) (tea.Model, tea.Cmd) {
+	switch chosen.kind {
+	case switchAgent:
+		return m.switchToAgent(chosen.agentID)
+	case switchWsSession:
+		return m.switchToWsSession(chosen)
+	default:
+		return m.switchToWorktree(chosen)
+	}
+}
+
+// switchToWorktree jumps to or resumes a worktree row behind the same guards
+// as the Repos-pane enter, then syncs the Repos cursor to it.
+func (m model) switchToWorktree(chosen sessionCandidate) (tea.Model, tea.Cmd) {
+	tmuxAvail := m.tmux != nil && m.tmux.Available()
+	if !tmuxAvail {
+		m.tmuxHint = "tmux not available — start cogitator inside a tmux session to use jump/resume"
+		return m, nil
+	}
+	if chosen.row.State == settings.StateMissing {
+		m.tmuxHint = "worktree directory is missing — cannot resume"
+		return m, nil
+	}
+	if chosen.row.State == settings.StateCreating {
+		m.tmuxHint = "worktree is still being created…"
+		return m, nil
+	}
+
+	for i, r := range m.workspaceRows {
+		if r.Worktree == chosen.target.dir {
+			m.sessionCursor = i
+			break
+		}
+	}
+	m.recordSessionSwitch(chosen.target.dir)
+	return m, launchCmd(m.tmux, chosen.target, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
+}
+
+// switchToWsSession moves the Workspaces cursor onto the chosen session, then
+// launches it exactly as enter on that row would. The entry is looked up
+// afresh because wsStatuses may have reloaded while the palette was open.
+func (m model) switchToWsSession(chosen sessionCandidate) (tea.Model, tea.Cmd) {
+	if entry, ok := wsSessionEntry(m.wsStatuses, chosen.target.dir); ok {
+		m.wsCursor = entry
+		m.syncWsScroll()
+	}
+	return m.launchWsSession(chosen.target, chosen.row.State)
+}
+
+// switchToAgent focuses the chosen agent exactly as enter in the Agents tab
+// does, and lands the Agents list cursor on it. An agent gone since the
+// palette opened is ignored, as the Agents tab ignores a stale cursor.
+func (m model) switchToAgent(id string) (tea.Model, tea.Cmd) {
+	agent, ok := m.agentByID(id)
+	if !ok {
+		return m, nil
+	}
+
+	m.agentsList.cursorID = agent.ID
+	cmd := m.focusAgent(agent, "")
+	return m, cmd
+}
+
 // orderedSessionCandidates returns sessionSwitchCandidates ordered
 // most-recently switched-to first (per switchOrder, keyed by each
-// candidate's target directory), preserving the existing alphabetical order
-// for candidates never switched to this run. startOnPrevious is true when
+// candidate's target directory), preserving the tab's own order for
+// candidates never switched to this run. startOnPrevious is true when
 // both of the top two candidates have a recorded switch — i.e. a genuine
 // "previous" session exists — so the palette cursor should start on row 1.
 func (m model) orderedSessionCandidates() (candidates []sessionCandidate, startOnPrevious bool) {
@@ -3436,23 +3542,31 @@ func (m model) updateWorkspaceLaunch(msg tea.KeyMsg) (model, tea.Cmd, bool) {
 		return m, nil, false
 	}
 
+	next, cmd := m.launchWsSession(wsSessionLaunchTarget(ws.Workspace.Name, sess), sess.State)
+	return next, cmd, true
+}
+
+// launchWsSession launches (or jumps/resumes) a workspace session target in
+// st, refusing with a wsHint when tmux is unavailable or the session is
+// missing or still being created. Shared by enter on a Workspaces row and the
+// ctrl+P switcher so both apply the same guards.
+func (m model) launchWsSession(target launchTarget, st settings.RowState) (model, tea.Cmd) {
 	tmuxAvail := m.tmux != nil && m.tmux.Available()
 	if !tmuxAvail {
 		m.wsHint = "tmux not available — start cogitator inside a tmux session to use jump/resume"
-		return m, nil, true
+		return m, nil
 	}
-	if sess.State == settings.StateMissing {
+	if st == settings.StateMissing {
 		m.wsHint = "session directory is missing — cannot resume"
-		return m, nil, true
+		return m, nil
 	}
-	if sess.State == settings.StateCreating {
+	if st == settings.StateCreating {
 		m.wsHint = "session is still being created…"
-		return m, nil, true
+		return m, nil
 	}
 
-	target := wsSessionLaunchTarget(ws.Workspace.Name, sess)
 	m.recordSessionSwitch(target.dir)
-	return m, launchCmd(m.tmux, target, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp)), true
+	return m, launchCmd(m.tmux, target, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
 }
 
 // resolvedDefaultHarness returns the configured default harness kind when one
