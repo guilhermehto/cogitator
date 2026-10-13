@@ -48,9 +48,27 @@ func worktreeRow(dir string, rowState settings.RowState, attn state.Attention) s
 	}
 }
 
+// liveViewsForRunningRows backs each running row with a live session view;
+// agents only count as in flight when a live view exists for their dir.
+func liveViewsForRunningRows(rows []settings.Row) []state.SessionView {
+	var views []state.SessionView
+	for _, row := range rows {
+		if row.State != settings.StateRunning {
+			continue
+		}
+		views = append(views, state.SessionView{
+			SessionID: row.SessionID, Directory: row.Worktree, Source: state.SourceLive,
+			Provider: harness.Kind(row.Provider), Attention: row.Attention, LastActivity: row.LastActivity,
+		})
+	}
+
+	return views
+}
+
 func rebuildAgents(t *testing.T, m model, rows []settings.Row) model {
 	t.Helper()
 
+	m.snap.Sessions = append(m.snap.Sessions, liveViewsForRunningRows(rows)...)
 	updated, _ := m.Update(workspaceRowsMsg{rows: rows})
 
 	return updated.(model)
