@@ -103,7 +103,10 @@ there is nothing to do it says so with a tmux message ("cogitator: nothing needs
 
 ## pick: popup list
 
-`prefix` + `a` opens a popup listing every agent.
+`prefix` + `a` opens a popup listing every agent, grouped needs you / done / working / idle /
+stopped with the same status icons as the TUI. On a popup at least 100 columns wide, the right
+half shows a live preview of the highlighted agent's pane: its status, harness, session title and
+the last lines of output, refreshed every second.
 
 | Key               | Action                                                              |
 | ----------------- | ------------------------------------------------------------------- |
@@ -112,9 +115,12 @@ there is nothing to do it says so with a tmux message ("cogitator: nothing needs
 | `/`               | filter                                                              |
 | `Enter`           | jump to the agent (a stopped agent is resumed, like `Enter` in the TUI) |
 | `x`               | mark seen (clears a done badge)                                     |
+| `p`               | toggle the preview                                                  |
 | `Esc` / `q`       | close                                                               |
 
-Agents that stopped are listed for 30 minutes after they stop.
+A done (✓) agent stays done until you have seen it, even after its session goes quiet. Agents
+with nothing waiting stay listed while they have a tmux window; without one they move to
+stopped and are listed for 30 minutes.
 
 ## Going back
 
@@ -140,8 +146,9 @@ Per window:
 
 Global (unset when zero): `@cog_needs`, `@cog_done`, `@cog_working`, counted per agent.
 
-The options refresh about every 2 seconds. A done badge clears once you are looking at the
+The options refresh about every 2 seconds. A done badge stays while you are looking at the
 agent (its window is active in your client, or your session belongs only to that agent) and
-you have typed since it finished.
+clears once you switch away, so the agent drops to idle. If you prompt it instead, it moves to
+working.
 
 See [CLI & logging](/reference/cli#subcommands) for the `pick` and `next` flags.
