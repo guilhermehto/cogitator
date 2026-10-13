@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -462,5 +463,33 @@ func TestListenRPC_SocketPermissionsAndCleanup(t *testing.T) {
 	cleanup()
 	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
 		t.Errorf("socket file should be removed after cleanup, got: %v", err)
+	}
+}
+
+func TestStampPaneID_RoundTripsThroughPayload(t *testing.T) {
+	stamped := hookipc.StampPaneID([]byte(`{"hook_event_name":"Stop","cwd":"/w"}`), "dev:terminal_2")
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(stamped, &fields); err != nil {
+		t.Fatalf("stamped payload is not JSON: %v (%s)", err, stamped)
+	}
+	if got := hookipc.PaneID(fields); got != "dev:terminal_2" {
+		t.Errorf("PaneID = %q, want dev:terminal_2", got)
+	}
+	if string(fields["cwd"]) != `"/w"` {
+		t.Errorf("cwd = %s, want the original field kept", fields["cwd"])
+	}
+}
+
+func TestStampPaneID_LeavesPayloadAloneWithoutPaneOrObject(t *testing.T) {
+	for _, tc := range []struct{ payload, pane string }{
+		{`{"hook_event_name":"Stop"}`, ""},
+		{`not json`, "%3"},
+		{`["array"]`, "%3"},
+		{`null`, "%3"},
+	} {
+		if got := string(hookipc.StampPaneID([]byte(tc.payload), tc.pane)); got != tc.payload {
+			t.Errorf("StampPaneID(%q, %q) = %q, want unchanged", tc.payload, tc.pane, got)
+		}
 	}
 }

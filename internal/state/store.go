@@ -52,6 +52,9 @@ type SessionView struct {
 	// Provider identifies which coding-agent harness produced this session.
 	// Defaults to "opencode" for sessions discovered via the opencode SSE path.
 	Provider harness.Kind
+	// PaneID is the multiplexer pane the harness runs in, as reported by its
+	// hook; empty when unknown.
+	PaneID string
 }
 
 type Snapshot struct {
@@ -1038,6 +1041,7 @@ func (s *Store) snapshot() Snapshot {
 			LastActivity: u.LastActivity,
 			Created:      u.Created,
 			Provider:     u.Provider,
+			PaneID:       u.PaneID,
 		}
 		best[key] = candidate{view: sv, live: src == SourceLive, healthy: true}
 	}

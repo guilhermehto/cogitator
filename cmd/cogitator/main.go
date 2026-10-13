@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -15,6 +17,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/claudecode"
 	"github.com/guilhermehto/cogitator/internal/codex"
 	"github.com/guilhermehto/cogitator/internal/config"
+	"github.com/guilhermehto/cogitator/internal/hookipc"
 	"github.com/guilhermehto/cogitator/internal/logging"
 	"github.com/guilhermehto/cogitator/internal/omp"
 	"github.com/guilhermehto/cogitator/internal/settings"
@@ -30,11 +33,23 @@ var (
 	date    = ""
 )
 
+// hookStdin is the hook payload on stdin, stamped with the multiplexer pane
+// the harness runs in so sibling sessions in one directory stay apart.
+func hookStdin() io.Reader {
+	payload, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, fmt.Errorf("read hook payload: %w", err))
+		os.Exit(1)
+	}
+
+	return bytes.NewReader(hookipc.StampPaneID(payload, ui.NewBackend().SelfPaneID()))
+}
+
 func main() {
 	// Route subcommands before flag.Parse() so bare subcommand names are not
 	// misinterpreted as unknown flags.
 	if len(os.Args) > 1 && os.Args[1] == "codex-hook" {
-		if err := codex.SendHook(context.Background(), os.Stdin); err != nil {
+		if err := codex.SendHook(context.Background(), hookStdin()); err != nil {
 			// A closed cogitator TUI is the expected case, not a failure:
 			// exit 0 silently so Codex never shows a "hook failed" banner.
 			if errors.Is(err, codex.ErrListenerUnavailable) {
@@ -47,7 +62,7 @@ func main() {
 	}
 
 	if len(os.Args) > 1 && os.Args[1] == "claude-hook" {
-		if err := claudecode.SendHook(context.Background(), os.Stdin); err != nil {
+		if err := claudecode.SendHook(context.Background(), hookStdin()); err != nil {
 			// A closed cogitator TUI is the expected case, not a failure:
 			// exit 0 silently so Claude Code never shows a "hook failed" banner.
 			if errors.Is(err, claudecode.ErrListenerUnavailable) {
@@ -77,7 +92,7 @@ func main() {
 			fmt.Println("Restart any running omp sessions for it to take effect.")
 			return
 		}
-		if err := omp.SendHook(context.Background(), os.Stdin); err != nil {
+		if err := omp.SendHook(context.Background(), hookStdin()); err != nil {
 			// A closed cogitator TUI is the expected case, not a failure:
 			// exit 0 silently so omp never shows a "hook failed" banner.
 			if errors.Is(err, omp.ErrListenerUnavailable) {

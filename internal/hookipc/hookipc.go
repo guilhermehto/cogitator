@@ -7,6 +7,7 @@ package hookipc
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -289,6 +290,45 @@ func serveConn(conn net.Conn, handler func(raw []byte), logger *slog.Logger) {
 		return
 	}
 	handler(payload)
+}
+
+// PaneIDField is the payload key StampPaneID adds: the multiplexer pane the
+// hook ran in, which tells sibling sessions in one directory apart.
+const PaneIDField = "cogitator_pane_id"
+
+// StampPaneID returns payload with PaneIDField set to paneID. A payload that
+// is not a JSON object, or an empty paneID, is returned unchanged.
+func StampPaneID(payload []byte, paneID string) []byte {
+	if paneID == "" {
+		return payload
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil || fields == nil {
+		return payload
+	}
+
+	value, err := json.Marshal(paneID)
+	if err != nil {
+		return payload
+	}
+	fields[PaneIDField] = value
+
+	stamped, err := json.Marshal(fields)
+	if err != nil {
+		return payload
+	}
+	return stamped
+}
+
+// PaneID returns the pane StampPaneID recorded in a decoded hook payload, or
+// "" when there is none.
+func PaneID(fields map[string]json.RawMessage) string {
+	var paneID string
+	if err := json.Unmarshal(fields[PaneIDField], &paneID); err != nil {
+		return ""
+	}
+	return paneID
 }
 
 // SendHook reads all bytes from stdin, dials the Unix-domain socket at

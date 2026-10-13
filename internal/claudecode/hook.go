@@ -91,6 +91,9 @@ type HookEvent struct {
 	// ToolName is the name of the tool being invoked, present on PreToolUse and
 	// PostToolUse events (e.g. "AskUserQuestion").
 	ToolName string
+
+	// PaneID is the multiplexer pane the hook ran in, if stamped.
+	PaneID string
 }
 
 // hookEventNames maps both PascalCase and snake_case wire names to a canonical
@@ -191,6 +194,8 @@ func ParseHookEvent(raw []byte) (HookEvent, error) {
 			}
 		}
 	}
+
+	ev.PaneID = hookipc.PaneID(m)
 
 	return ev, nil
 }

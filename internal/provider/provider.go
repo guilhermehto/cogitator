@@ -79,6 +79,10 @@ type SessionUpdate struct {
 	// Providers should use the string constants directly to avoid an import
 	// cycle; the store validates/maps them.
 	Source string
+
+	// PaneID is the multiplexer pane the session's last hook ran in; empty
+	// when no hook has reported one.
+	PaneID string
 }
 
 // Sink is the target a Provider pushes SessionUpdates into. state.Store
