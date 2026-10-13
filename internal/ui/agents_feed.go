@@ -157,6 +157,7 @@ func (m *model) refreshAgents() {
 		WorkspaceRoot: m.workspaceRoot,
 		Now:           time.Now(),
 		RecentWindow:  m.cfg.RecentWindow,
+		Dismissed:     m.dismissedAgents,
 	})
 	m.feed.Set(m.agents)
 }

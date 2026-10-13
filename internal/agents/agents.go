@@ -88,6 +88,9 @@ type Input struct {
 	WorkspaceRoot string
 	Now           time.Time
 	RecentWindow  time.Duration
+	// Dismissed maps agent ID to when the user dismissed it. A dismissed agent
+	// stays hidden until it has a tmux window or activity after that time.
+	Dismissed map[string]time.Time
 }
 
 // Build returns every agent worth surfacing, ordered by urgency.
@@ -254,22 +257,29 @@ func liveSessionDirs(views []state.SessionView) map[string]bool {
 
 // stopUnlessInFlight stops a "running" agent that has neither a live session
 // nor a tmux window: merge reports running for recent-history views too.
-// Agents awaiting the user keep their badge until seen, as the Repos and
-// Workspaces tabs show them.
+// Agents blocked on the user keep their badge until seen, as the Repos and
+// Workspaces tabs show them; a finished agent with nothing left running is
+// over, so it stops and ages out like any other.
 func stopUnlessInFlight(a *Agent, liveDirs map[string]bool) {
-	if a.State != settings.StateRunning || liveDirs[a.ID] || a.WindowID != "" || awaitsUser(a.Attention) {
+	if a.State != settings.StateRunning || liveDirs[a.ID] || a.WindowID != "" || blockedOnUser(a.Attention) {
 		return
 	}
 	a.State = settings.StateStopped
 }
 
-func awaitsUser(attn state.Attention) bool {
+func blockedOnUser(attn state.Attention) bool {
 	switch attn {
-	case state.AttnPermissionPending, state.AttnQuestionPending, state.AttnErrored, state.AttnFinished:
+	case state.AttnPermissionPending, state.AttnQuestionPending, state.AttnErrored:
 		return true
 	}
 
 	return false
+}
+
+func dismissed(a Agent, in Input) bool {
+	at, ok := in.Dismissed[a.ID]
+
+	return ok && a.WindowID == "" && !a.LastActivity.After(at)
 }
 
 func strayAgents(in Input, managedDirs map[string]bool) []Agent {
@@ -320,6 +330,10 @@ func harnessOf(sv state.SessionView) string {
 
 // keep assigns the agent's group and reports whether it should be surfaced.
 func keep(a *Agent, in Input) bool {
+	if dismissed(*a, in) {
+		return false
+	}
+
 	switch a.State {
 	case settings.StateRunning, settings.StateUnknown:
 	case settings.StateStopped:

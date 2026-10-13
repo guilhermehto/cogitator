@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -11,15 +12,16 @@ import (
 
 // agentKilledMsg reports the outcome of closing an agent's tmux window.
 type agentKilledMsg struct {
-	name string
-	err  error
+	agent agents.Agent
+	err   error
 }
 
-// startAgentKill opens the kill confirmation for agent, or explains in the
-// hint line why its window cannot be closed from here.
+// startAgentKill opens the kill confirmation for agent, dismisses it when it
+// has no window left to close, or explains in the hint line why its window
+// cannot be closed from here.
 func (m *model) startAgentKill(agent agents.Agent) {
 	if agent.WindowID == "" {
-		m.tmuxHint = "kill: agent has no tmux window"
+		m.dismissAgent(agent)
 
 		return
 	}
@@ -63,29 +65,44 @@ func (m model) updateKillAgentConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	return m, killAgentWindowCmd(m.tmux, agentName(target), target.WindowID)
+	return m, killAgentWindowCmd(m.tmux, target)
 }
 
-func killAgentWindowCmd(ops tmuxOps, name, windowID string) tea.Cmd {
+func killAgentWindowCmd(ops tmuxOps, agent agents.Agent) tea.Cmd {
 	return func() tea.Msg {
 		if ops == nil || !ops.Available() {
-			return agentKilledMsg{name: name, err: tmuxctl.ErrNotAvailable}
+			return agentKilledMsg{agent: agent, err: tmuxctl.ErrNotAvailable}
 		}
 
-		return agentKilledMsg{name: name, err: ops.KillWindow(tmuxctl.Target(windowID))}
+		return agentKilledMsg{agent: agent, err: ops.KillWindow(tmuxctl.Target(agent.WindowID))}
 	}
 }
 
-// applyAgentKilled reports a failed kill, or refreshes the pane listing so
-// the agent drops its window right away instead of on the next snapshot.
+// applyAgentKilled reports a failed kill, or dismisses the agent and refreshes
+// the pane listing so it leaves the list right away instead of lingering as
+// stopped.
 func (m *model) applyAgentKilled(msg agentKilledMsg) tea.Cmd {
 	if msg.err != nil {
-		m.tmuxHint = fmt.Sprintf("kill %s: %v", msg.name, msg.err)
+		m.tmuxHint = fmt.Sprintf("kill %s: %v", agentName(msg.agent), msg.err)
 
 		return nil
 	}
 
+	m.dismissAgent(msg.agent)
+
 	return m.requestPanes()
+}
+
+// dismissAgent marks agent seen and hides it from the agent list until it
+// gets a tmux window or new activity.
+func (m *model) dismissAgent(agent agents.Agent) {
+	m.markAgentSeen(agent)
+	if m.dismissedAgents == nil {
+		m.dismissedAgents = map[string]time.Time{}
+	}
+
+	m.dismissedAgents[agent.ID] = time.Now()
+	m.refreshAgents()
 }
 
 func (m model) agentKillPromptLine() string {

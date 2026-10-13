@@ -23,7 +23,7 @@ func windowedAgentModel(t *testing.T, tmux *fakeTmuxOps) model {
 	return m
 }
 
-func TestAgentsKillConfirmedClosesAgentWindow(t *testing.T) {
+func TestAgentsKillConfirmedClosesWindowAndDismissesAgent(t *testing.T) {
 	tmux := &fakeTmuxOps{available: true}
 	m := windowedAgentModel(t, tmux)
 
@@ -39,13 +39,20 @@ func TestAgentsKillConfirmedClosesAgentWindow(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("y must dispatch the kill")
 	}
-	m.Update(cmd())
+	updated, _ := m.Update(cmd())
+	m = updated.(model)
 
 	if len(tmux.killWindowCalls) != 1 || tmux.killWindowCalls[0] != tmuxctl.Target("@4") {
 		t.Fatalf("killWindowCalls = %v, want [@4]", tmux.killWindowCalls)
 	}
 	if m.prompt != promptIdle {
 		t.Fatalf("prompt = %v, want idle after confirming", m.prompt)
+	}
+
+	m.panes = nil
+	m.refreshAgents()
+	if len(m.agents) != 0 {
+		t.Fatalf("killed agent still listed once its window is gone: %v", m.agents)
 	}
 }
 
@@ -80,17 +87,22 @@ func TestAgentsKillRefusesCogitatorsOwnWindow(t *testing.T) {
 	}
 }
 
-func TestAgentsKillWithoutWindowExplainsInsteadOfPrompting(t *testing.T) {
-	m := agentsTabModel(t, &fakeTmuxOps{available: true}, &recordingViewMarker{})
+func TestAgentsKillDismissesAgentWithoutWindow(t *testing.T) {
+	marker := &recordingViewMarker{}
+	m := agentsTabModel(t, &fakeTmuxOps{available: true}, marker)
 	m.view = viewAgents
+	sessionID := m.agents[0].SessionID
 
 	m, _ = pressKey(t, m, "K")
 
 	if m.prompt == promptConfirmKillAgent {
 		t.Fatal("an agent without a window has nothing to kill")
 	}
-	if !strings.Contains(m.tmuxHint, "no tmux window") {
-		t.Fatalf("tmuxHint = %q, want an explanation", m.tmuxHint)
+	if len(m.agents) != 0 {
+		t.Fatalf("dismissed agent still listed: %v", m.agents)
+	}
+	if len(marker.viewed) != 1 || marker.viewed[0] != sessionID {
+		t.Fatalf("viewed = %v, want the dismissed session marked seen", marker.viewed)
 	}
 }
 

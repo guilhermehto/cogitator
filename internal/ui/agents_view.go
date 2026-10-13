@@ -123,5 +123,5 @@ func (m model) agentKeyHints() []keyHint {
 		return []keyHint{{"enter", "jump"}, {"esc", "clear"}}
 	}
 
-	return []keyHint{{"enter", "jump"}, {"x", "mark seen"}, {"K", "kill"}, {"/", "filter"}}
+	return []keyHint{{"enter", "jump"}, {"x", "mark seen"}, {"K", "kill/dismiss"}, {"/", "filter"}}
 }

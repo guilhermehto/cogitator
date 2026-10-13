@@ -138,9 +138,11 @@ func TestBuildLivenessOfRecentOnlySessions(t *testing.T) {
 		want  []string
 		group Group
 	}{
-		{"keeps unseen finished row done past the window", Input{Rows: rowAt(state.AttnFinished, 30*time.Hour), Live: recent("/w/a")}, []string{"/w/a"}, GroupDone},
+		{"drops unseen finished row without a window past the window", Input{Rows: rowAt(state.AttnFinished, 30*time.Hour), Live: recent("/w/a")}, nil, 0},
+		{"lists recently finished row without a window as stopped", Input{Rows: rowAt(state.AttnFinished, 10*time.Minute), Live: recent("/w/a")}, []string{"/w/a"}, GroupStopped},
+		{"keeps unseen finished row with a tmux window done past the window", Input{Rows: rowAt(state.AttnFinished, 30*time.Hour), Live: recent("/w/a"), Panes: windowAt("/w/a")}, []string{"/w/a"}, GroupDone},
 		{"keeps pending permission row needing you past the window", Input{Rows: rowAt(state.AttnPermissionPending, 2*time.Hour), Live: recent("/w/a")}, []string{"/w/a"}, GroupNeedsYou},
-		{"keeps unseen finished workspace session done past the window", Input{Workspaces: workspaceAt(state.AttnFinished, 2*time.Hour), Live: recent("/w/a")}, []string{"/w/a"}, GroupDone},
+		{"drops unseen finished workspace session without a window past the window", Input{Workspaces: workspaceAt(state.AttnFinished, 2*time.Hour), Live: recent("/w/a")}, nil, 0},
 		{"lists seen row with a tmux window as idle", Input{Rows: rowAt(state.AttnInactive, 2*time.Hour), Live: recent("/w/a"), Panes: windowAt("/w/a")}, []string{"/w/a"}, GroupIdle},
 		{"lists busy row with a tmux window as working", Input{Rows: rowAt(state.AttnActive, 40*time.Minute), Live: recent("/w/a"), Panes: windowAt("/w/a")}, []string{"/w/a"}, GroupWorking},
 		{"lists seen row without a window as stopped inside the window", Input{Rows: rowAt(state.AttnInactive, 10*time.Minute), Live: recent("/w/a")}, []string{"/w/a"}, GroupStopped},
@@ -158,6 +160,32 @@ func TestBuildLivenessOfRecentOnlySessions(t *testing.T) {
 			}
 			if len(got) == 1 && got[0].Group != tt.group {
 				t.Fatalf("group = %v, want %v", got[0].Group, tt.group)
+			}
+		})
+	}
+}
+
+func TestBuildHidesDismissedAgentUntilItRunsAgain(t *testing.T) {
+	dismissedAt := now.Add(-time.Minute)
+	windowAt := []Pane{{PaneID: "%1", WindowID: "@1", SessionID: "$1", CogDir: "/w/a"}}
+	rowsActiveAgo := func(age time.Duration) []settings.Row {
+		return []settings.Row{row("/w/a", settings.StateStopped, state.AttnFinished, age)}
+	}
+	dismissedA := map[string]time.Time{"/w/a": dismissedAt}
+
+	tests := []struct {
+		name string
+		in   Input
+		want []string
+	}{
+		{"hides dismissed agent", Input{Rows: rowsActiveAgo(5 * time.Minute), Dismissed: dismissedA}, nil},
+		{"shows dismissed agent with new activity", Input{Rows: rowsActiveAgo(30 * time.Second), Dismissed: dismissedA}, []string{"/w/a"}},
+		{"shows dismissed agent that has a tmux window again", Input{Rows: rowsActiveAgo(5 * time.Minute), Panes: windowAt, Dismissed: dismissedA}, []string{"/w/a"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ids(build(tt.in)); !equal(got, tt.want) {
+				t.Fatalf("agents = %v, want %v", got, tt.want)
 			}
 		})
 	}
