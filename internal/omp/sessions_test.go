@@ -62,6 +62,36 @@ func TestReadSessions_HeaderTitlePreferred(t *testing.T) {
 	}
 }
 
+func TestReadSessions_AcceptsLeadingTitleRecord(t *testing.T) {
+	agentDir := t.TempDir()
+	created := time.Date(2026, 10, 13, 9, 32, 0, 0, time.UTC)
+	last := created.Add(5 * time.Minute)
+
+	content := `{"type":"title","v":1,"title":"Find tmux install command","source":"auto","updatedAt":"` + iso(last.Add(time.Hour)) + `","pad":"      "}
+{"type":"session","version":3,"id":"titled1","timestamp":"` + iso(created) + `","cwd":"/tmp/wt"}
+{"type":"message","id":"e1","parentId":null,"timestamp":"` + iso(last) + `","message":{"role":"user","content":"first user prompt"}}
+`
+	writeSessionFile(t, agentDir, "-tmp-wt", "2026-10-13T09-32-00-000Z_titled1.jsonl", content)
+
+	got, err := omp.ReadSessions(agentDir)
+	if err != nil {
+		t.Fatalf("ReadSessions: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1 (title record must not hide the session)", len(got))
+	}
+	s := got[0]
+	if s.ID != "titled1" {
+		t.Errorf("ID = %q, want titled1", s.ID)
+	}
+	if s.Title != "Find tmux install command" {
+		t.Errorf("Title = %q, want the title record", s.Title)
+	}
+	if !s.LastActivity.Equal(last) {
+		t.Errorf("LastActivity = %v, want %v (title updatedAt is not activity)", s.LastActivity, last)
+	}
+}
+
 func TestReadSessions_TitleDerivedFromUserMessage(t *testing.T) {
 	agentDir := t.TempDir()
 	ts := time.Date(2026, 6, 19, 9, 0, 0, 0, time.UTC)
