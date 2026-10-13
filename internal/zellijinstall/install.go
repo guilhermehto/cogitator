@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/guilhermehto/cogitator/internal/installkit"
@@ -24,7 +25,7 @@ import (
 const (
 	DefaultNextKey    = "Space"
 	DefaultPickKey    = "a"
-	DefaultSidebarKey = "s"
+	DefaultSidebarKey = "g"
 
 	beginMarker = "// BEGIN cogitator"
 	endMarker   = "// END cogitator"
@@ -35,6 +36,9 @@ const (
 var (
 	keybindsNode    = regexp.MustCompile(`^(\s*)keybinds\b`)
 	defaultModeNode = regexp.MustCompile(`^\s*default_mode\s+"([^"]*)"`)
+	sectionNode     = regexp.MustCompile(`^\s*([A-Za-z_][\w-]*)((?:\s+"(?:[^"\\]|\\.)*")*)\s*\{`)
+	bindNode        = regexp.MustCompile(`^\s*bind((?:\s+"(?:[^"\\]|\\.)*")+)`)
+	quotedArg       = regexp.MustCompile(`"((?:[^"\\]|\\.)*)"`)
 )
 
 // bindMode is the zellij input mode the binds live in and the mode each
@@ -59,6 +63,13 @@ type bindSpec struct {
 	plugin     string
 	sidebarKey string
 	mode       bindMode
+}
+
+// keyChoice is a key the user left at its default, with the flag that
+// overrides it.
+type keyChoice struct {
+	flag string
+	key  string
 }
 
 // Options are the user-facing flags shared by Install and Uninstall.
@@ -86,6 +97,7 @@ type Installer struct {
 // Install writes (or replaces) the owned keybinds block in the user's
 // config.kdl. zellij hot-reloads the file, so running sessions pick it up.
 func (i Installer) Install(opts Options) error {
+	requested := opts
 	if err := normalizeKeys(&opts); err != nil {
 		return err
 	}
@@ -118,6 +130,10 @@ func (i Installer) Install(opts Options) error {
 	spec := bindSpec{binary: binary, nextKey: opts.NextKey, pickKey: opts.PickKey, plugin: plugin, sidebarKey: opts.SidebarKey}
 	updated, block, err := withOwnedBlock(stripped, &spec)
 	if err != nil {
+		return fmt.Errorf("%s: %w", confPath, err)
+	}
+
+	if err := checkDefaultKeysFree(stripped, spec.mode.name, defaultedKeys(requested, opts)); err != nil {
 		return fmt.Errorf("%s: %w", confPath, err)
 	}
 
@@ -226,6 +242,140 @@ func normalizeKeys(opts *Options) error {
 	}
 
 	return nil
+}
+
+// defaultedKeys lists the keys the user did not pass explicitly; only those
+// are checked against existing binds, since an explicit key is a choice.
+func defaultedKeys(requested, opts Options) []keyChoice {
+	var keys []keyChoice
+	if requested.NextKey == "" {
+		keys = append(keys, keyChoice{flag: "--next-key", key: opts.NextKey})
+	}
+	if requested.PickKey == "" {
+		keys = append(keys, keyChoice{flag: "--pick-key", key: opts.PickKey})
+	}
+	if opts.Plugin != "" && requested.SidebarKey == "" {
+		keys = append(keys, keyChoice{flag: "--sidebar-key", key: opts.SidebarKey})
+	}
+
+	return keys
+}
+
+// checkDefaultKeysFree refuses a defaulted key that the config already binds
+// in mode, so the install never silently shadows (or is shadowed by) a
+// user bind.
+func checkDefaultKeysFree(content, mode string, keys []keyChoice) error {
+	if len(keys) == 0 {
+		return nil
+	}
+
+	bound := boundKeys(content, mode)
+	for _, choice := range keys {
+		if bound[canonicalKey(choice.key)] {
+			return fmt.Errorf("default key %q (%s) is already bound in zellij's %s mode; pass %s with a free key, or %s %q to override that bind", choice.key, choice.flag, mode, choice.flag, choice.flag, choice.key)
+		}
+	}
+
+	return nil
+}
+
+// boundKeys collects the keys the first top-level keybinds node binds in
+// mode, counting shared, shared_among and shared_except sections that
+// include it. zellij ignores later keybinds nodes.
+func boundKeys(content, mode string) map[string]bool {
+	bound := map[string]bool{}
+	lines := strings.SplitAfter(content, "\n")
+
+	open, _, err := keybindsOpeningLine(lines)
+	if err != nil || open < 0 {
+		return bound
+	}
+
+	depth := 0
+	inComment := false
+	applies := false
+	for _, line := range lines[open:] {
+		if !inComment {
+			switch {
+			case depth == 1:
+				applies = sectionApplies(line, mode)
+			case depth == 2 && applies:
+				recordBinds(bound, line)
+			}
+		}
+
+		var delta int
+		delta, inComment = braceDelta(line, inComment)
+		depth += delta
+		if depth <= 0 {
+			break
+		}
+	}
+
+	return bound
+}
+
+func sectionApplies(line, mode string) bool {
+	match := sectionNode.FindStringSubmatch(line)
+	if match == nil {
+		return false
+	}
+
+	listed := false
+	for _, name := range quotedArgs(match[2]) {
+		if strings.EqualFold(name, mode) {
+			listed = true
+		}
+	}
+
+	switch match[1] {
+	case "shared":
+		return true
+	case "shared_among":
+		return listed
+	case "shared_except":
+		return !listed
+	default:
+		return strings.EqualFold(match[1], mode)
+	}
+}
+
+func recordBinds(bound map[string]bool, line string) {
+	match := bindNode.FindStringSubmatch(line)
+	if match == nil {
+		return
+	}
+
+	for _, key := range quotedArgs(match[1]) {
+		bound[canonicalKey(key)] = true
+	}
+}
+
+func quotedArgs(s string) []string {
+	var args []string
+	for _, match := range quotedArg.FindAllStringSubmatch(s, -1) {
+		arg, err := strconv.Unquote(`"` + match[1] + `"`)
+		if err != nil {
+			arg = match[1]
+		}
+		args = append(args, arg)
+	}
+
+	return args
+}
+
+// canonicalKey makes modifier and named-key spellings comparable ("Ctrl a"
+// and "ctrl a", "Esc" and "esc") while keeping single characters
+// case-sensitive, since "H" and "h" are different keys.
+func canonicalKey(key string) string {
+	parts := strings.Fields(key)
+	for idx, part := range parts {
+		if len([]rune(part)) > 1 {
+			parts[idx] = strings.ToLower(part)
+		}
+	}
+
+	return strings.Join(parts, " ")
 }
 
 // resolvePlugin returns the absolute, symlink-resolved wasm path, or "" when

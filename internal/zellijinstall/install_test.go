@@ -454,11 +454,11 @@ func TestInstallBindsPluginToSidebarKey(t *testing.T) {
 	}
 
 	content := readFile(t, env.conf)
-	want := `        bind "s" { LaunchOrFocusPlugin "file:` + wasm + `" { floating true; move_to_focused_tab true; cogitator "/opt/bin/cogitator"; }; SwitchToMode "locked"; }` + "\n    }\n    " + endMarker
+	want := `        bind "g" { LaunchOrFocusPlugin "file:` + wasm + `" { floating true; move_to_focused_tab true; cogitator "/opt/bin/cogitator"; }; SwitchToMode "locked"; }` + "\n    }\n    " + endMarker
 	if !strings.Contains(content, want) {
 		t.Fatalf("missing %q in:\n%s", want, content)
 	}
-	if !strings.Contains(env.out.String(), "sidebar s") {
+	if !strings.Contains(env.out.String(), "sidebar g") {
 		t.Fatalf("summary does not mention the sidebar key: %q", env.out.String())
 	}
 }
@@ -523,7 +523,7 @@ func TestInstallRejectsSidebarKeyCollidingWithNextOrPick(t *testing.T) {
 	}{
 		{"next key", Options{Plugin: wasm, SidebarKey: DefaultNextKey}},
 		{"pick key", Options{Plugin: wasm, SidebarKey: DefaultPickKey}},
-		{"custom pick key", Options{Plugin: wasm, PickKey: "s"}},
+		{"custom pick key", Options{Plugin: wasm, PickKey: DefaultSidebarKey}},
 		{"invalid key", Options{Plugin: wasm, SidebarKey: `s" { Quit; }`}},
 	}
 
@@ -572,6 +572,259 @@ func TestInstallWithPluginTwiceReplacesBlock(t *testing.T) {
 	}
 	if got := readFile(t, env.conf); strings.Contains(got, "LaunchOrFocusPlugin \"file:") {
 		t.Fatalf("install without --plugin kept the plugin bind:\n%s", got)
+	}
+}
+
+// tmuxStyleNormalTable copies the structure of a tmux-style config's prefix
+// table: every key bound in normal directly or through shared sections.
+const tmuxStyleNormalTable = `keybinds clear-defaults=true {
+    locked {
+        bind "Ctrl a" { SwitchToMode "normal"; }
+    }
+    normal {
+        bind "1" { GoToTab 1; SwitchToMode "locked"; }
+        bind "2" { GoToTab 2; SwitchToMode "locked"; }
+        bind "3" { GoToTab 3; SwitchToMode "locked"; }
+        bind "4" { GoToTab 4; SwitchToMode "locked"; }
+        bind "5" { GoToTab 5; SwitchToMode "locked"; }
+        bind "6" { GoToTab 6; SwitchToMode "locked"; }
+        bind "7" { GoToTab 7; SwitchToMode "locked"; }
+        bind "8" { GoToTab 8; SwitchToMode "locked"; }
+        bind "9" { GoToTab 9; SwitchToMode "locked"; }
+        bind "c" { NewTab; SwitchToMode "locked"; }
+        bind "n" { GoToNextTab; SwitchToMode "locked"; }
+        bind "p" { GoToPreviousTab; SwitchToMode "locked"; }
+        bind "l" { ToggleTab; SwitchToMode "locked"; }
+        bind "," { SwitchToMode "renametab"; TabNameInput 0; }
+        bind "&" { CloseTab; SwitchToMode "locked"; }
+        bind "v" { NewPane "right"; SwitchToMode "locked"; }
+        bind "h" { NewPane "down"; SwitchToMode "locked"; }
+        bind "x" { CloseFocus; SwitchToMode "locked"; }
+        bind "z" { ToggleFocusFullscreen; SwitchToMode "locked"; }
+        bind "H" { Resize "Increase left"; SwitchToMode "resize"; }
+        bind "J" { Resize "Increase down"; SwitchToMode "resize"; }
+        bind "K" { Resize "Increase up"; SwitchToMode "resize"; }
+        bind "L" { Resize "Increase right"; SwitchToMode "resize"; }
+        bind "/" { SwitchToMode "scroll"; }
+        bind "[" { SwitchToMode "scroll"; }
+        bind "P" { SwitchToMode "pane"; }
+        bind "d" { Detach; }
+        bind "Q" { Quit; }
+        bind "r" { SwitchSession { name "cogitator"; }; SwitchToMode "locked"; }
+        bind "s" {
+            LaunchOrFocusPlugin "session-manager" {
+                floating true
+                move_to_focused_tab true
+            }
+            SwitchToMode "locked"
+        }
+    }
+    shared_among "normal" "locked" {
+        bind "Ctrl h" {
+            MessagePlugin "https://example.com/vim-zellij-navigator.wasm" {
+                name "move_focus";
+                payload "left";
+            };
+        }
+        bind "Alt f" { ToggleFloatingPanes; }
+    }
+    shared_except "locked" "renametab" "renamepane" {
+        bind "Ctrl a" { Write 1; SwitchToMode "locked"; }
+        bind "Ctrl q" { Quit; }
+    }
+    shared_except "locked" "entersearch" {
+        bind "enter" { SwitchToMode "locked"; }
+    }
+    shared_except "locked" "entersearch" "search" "renametab" "renamepane" "session" {
+        bind "o" { SwitchToMode "session"; }
+    }
+    shared_except "locked" "scroll" "entersearch" "search" "renametab" "renamepane" "move" {
+        bind "m" { SwitchToMode "move"; }
+    }
+    shared_except "locked" "tab" "entersearch" "renametab" "renamepane" {
+        bind "t" { SwitchToMode "tab"; }
+    }
+    shared_among "resize" "search" "move" "prompt" "tmux" {
+        bind "w" { SwitchToMode "scroll"; }
+    }
+    shared_except "locked" "normal" "resize" "pane" "tab" "entersearch" "renametab" "renamepane" {
+        bind "y" { SwitchToMode "resize"; }
+    }
+}
+default_mode "locked"
+`
+
+// stockTmuxTable copies zellij 0.45.1's default tmux-mode binds, including
+// the shared sections that reach tmux mode (zellij setup --dump-config).
+const stockTmuxTable = `keybinds {
+    tmux {
+        bind "[" { SwitchToMode "Scroll"; }
+        bind "Ctrl b" { Write 2; SwitchToMode "Normal"; }
+        bind "\"" { NewPane "Down"; SwitchToMode "Normal"; }
+        bind "%" { NewPane "Right"; SwitchToMode "Normal"; }
+        bind "z" { ToggleFocusFullscreen; SwitchToMode "Normal"; }
+        bind "c" { NewTab; SwitchToMode "Normal"; }
+        bind "," { SwitchToMode "RenameTab"; }
+        bind "p" { GoToPreviousTab; SwitchToMode "Normal"; }
+        bind "n" { GoToNextTab; SwitchToMode "Normal"; }
+        bind "Left" { MoveFocus "Left"; SwitchToMode "Normal"; }
+        bind "Right" { MoveFocus "Right"; SwitchToMode "Normal"; }
+        bind "Down" { MoveFocus "Down"; SwitchToMode "Normal"; }
+        bind "Up" { MoveFocus "Up"; SwitchToMode "Normal"; }
+        bind "h" { MoveFocus "Left"; SwitchToMode "Normal"; }
+        bind "l" { MoveFocus "Right"; SwitchToMode "Normal"; }
+        bind "j" { MoveFocus "Down"; SwitchToMode "Normal"; }
+        bind "k" { MoveFocus "Up"; SwitchToMode "Normal"; }
+        bind "o" { FocusNextPane; }
+        bind "d" { Detach; }
+        bind "Space" { NextSwapLayout; }
+        bind "x" { CloseFocus; SwitchToMode "Normal"; }
+    }
+    shared_except "locked" {
+        bind "Ctrl g" { SwitchToMode "Locked"; }
+        bind "Ctrl q" { Quit; }
+        bind "Alt h" "Alt Left" { MoveFocusOrTab "Left"; }
+    }
+    shared_except "normal" "locked" {
+        bind "Enter" "Esc" { SwitchToMode "Normal"; }
+    }
+    shared_except "tmux" "locked" {
+        bind "Ctrl b" { SwitchToMode "Tmux"; }
+    }
+}
+`
+
+func TestInstallRejectsDefaultSidebarKeyBoundInTargetModeWithoutWriting(t *testing.T) {
+	cases := map[string]string{
+		"mode node":             "keybinds {\n    tmux {\n        bind \"Ctrl b\" { Write 2; }\n        bind \"" + DefaultSidebarKey + "\" { Detach; }\n    }\n}\n",
+		"shared_among section":  "keybinds {\n    shared_among \"pane\" \"tmux\" {\n        bind \"x\" \"" + DefaultSidebarKey + "\" { Detach; }\n    }\n}\n",
+		"shared_except section": "keybinds {\n    shared_except \"locked\" {\n        bind \"" + DefaultSidebarKey + "\" {\n            Detach\n        }\n    }\n}\n",
+	}
+
+	for name, original := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := newTestEnv(t)
+			writeFile(t, env.conf, original, 0o644)
+
+			err := env.installer.Install(Options{Plugin: writePlugin(t)})
+			if err == nil {
+				t.Fatal("expected the clashing default sidebar key to be rejected")
+			}
+			if !strings.Contains(err.Error(), `"`+DefaultSidebarKey+`"`) || !strings.Contains(err.Error(), "--sidebar-key") {
+				t.Fatalf("error does not name the key and flag: %v", err)
+			}
+			if got := readFile(t, env.conf); got != original {
+				t.Fatalf("config written despite the clash:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestInstallRejectsDefaultNextKeyBoundInTargetMode(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, stockTmuxTable, 0o644)
+
+	err := env.installer.Install(Options{DryRun: true})
+	if err == nil || !strings.Contains(err.Error(), `"Space"`) || !strings.Contains(err.Error(), "--next-key") {
+		t.Fatalf("want an error naming Space and --next-key, got %v", err)
+	}
+}
+
+func TestInstallIgnoresBindsOutsideTargetMode(t *testing.T) {
+	cases := map[string]string{
+		"other mode":                "keybinds {\n    pane {\n        bind \"" + DefaultSidebarKey + "\" { Detach; }\n    }\n}\n",
+		"excluded by shared_except": "keybinds {\n    shared_except \"tmux\" {\n        bind \"" + DefaultSidebarKey + "\" { Detach; }\n    }\n}\n",
+		"commented out":             "keybinds {\n    tmux {\n        // bind \"" + DefaultSidebarKey + "\" { Detach; }\n        /* bind \"" + DefaultSidebarKey + "\" { Detach; } */\n    }\n}\n",
+		"second keybinds node":      "keybinds {\n}\nkeybinds {\n    tmux {\n        bind \"" + DefaultSidebarKey + "\" { Detach; }\n    }\n}\n",
+		"inside an action":          "keybinds {\n    tmux {\n        bind \"x\" {\n            bind \"" + DefaultSidebarKey + "\"\n        }\n    }\n}\n",
+	}
+
+	for name, original := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := newTestEnv(t)
+			writeFile(t, env.conf, original, 0o644)
+
+			if err := env.installer.Install(Options{Plugin: writePlugin(t)}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestInstallAcceptsExplicitlyPassedClashingKeys(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, tmuxStyleNormalTable, 0o644)
+	wasm := writePlugin(t)
+
+	if err := env.installer.Install(Options{Plugin: wasm, SidebarKey: "s", PickKey: "c"}); err != nil {
+		t.Fatal(err)
+	}
+
+	content := readFile(t, env.conf)
+	for _, want := range []string{`bind "s" { LaunchOrFocusPlugin "file:` + wasm, `bind "c" { Run "/opt/bin/cogitator" "pick"`} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("missing %q in:\n%s", want, content)
+		}
+	}
+}
+
+func TestInstallReinstallDoesNotTreatOwnBlockAsClash(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, tmuxStyleNormalTable, 0o644)
+	wasm := writePlugin(t)
+
+	for range 2 {
+		if err := env.installer.Install(Options{Plugin: wasm}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestDefaultKeysAreFreeInTmuxStyleNormalTable(t *testing.T) {
+	bound := boundKeys(tmuxStyleNormalTable, prefixMode.name)
+	for _, key := range []string{"s", "Ctrl a", "CTRL q", "Enter", "o", "m", "t", "Alt f", "H"} {
+		if !bound[canonicalKey(key)] {
+			t.Fatalf("fixture key %q not detected as bound in normal", key)
+		}
+	}
+	for _, key := range []string{"w", "y", "S"} {
+		if bound[canonicalKey(key)] {
+			t.Fatalf("key %q is not bound in normal but was detected", key)
+		}
+	}
+
+	for _, key := range []string{DefaultNextKey, DefaultPickKey, DefaultSidebarKey} {
+		if bound[canonicalKey(key)] {
+			t.Fatalf("default key %q clashes with the tmux-style normal table", key)
+		}
+	}
+
+	env := newTestEnv(t)
+	writeFile(t, env.conf, tmuxStyleNormalTable, 0o644)
+	if err := env.installer.Install(Options{Plugin: writePlugin(t)}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDefaultSidebarKeyIsFreeInStockTmuxMode(t *testing.T) {
+	bound := boundKeys(stockTmuxTable, tmuxMode.name)
+	for _, key := range []string{"Space", "\"", "Ctrl g", "Alt Left", "enter", "esc"} {
+		if !bound[canonicalKey(key)] {
+			t.Fatalf("fixture key %q not detected as bound in tmux", key)
+		}
+	}
+	if !bound[canonicalKey("Ctrl b")] {
+		t.Fatal("tmux's own Ctrl b bind not detected")
+	}
+
+	if bound[canonicalKey(DefaultSidebarKey)] {
+		t.Fatalf("default sidebar key %q clashes with stock tmux-mode binds", DefaultSidebarKey)
+	}
+
+	env := newTestEnv(t)
+	writeFile(t, env.conf, stockTmuxTable, 0o644)
+	if err := env.installer.Install(Options{Plugin: writePlugin(t), NextKey: DefaultNextKey}); err != nil {
+		t.Fatal(err)
 	}
 }
 
