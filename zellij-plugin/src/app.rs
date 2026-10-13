@@ -26,6 +26,14 @@ pub enum Effect {
     Dismiss,
 }
 
+/// Where the plugin instance sits: its zellij session and, once known, the
+/// `<session>:<tab_id>` address of its tab, as cogitator writes window_id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Location {
+    pub session: String,
+    pub window: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct App {
     agents: Vec<Agent>,
@@ -34,6 +42,7 @@ pub struct App {
     status: Status,
     notice: Option<String>,
     floating: bool,
+    here: Option<Location>,
     pub(crate) scroll: Cell<usize>,
 }
 
@@ -46,6 +55,7 @@ impl Default for App {
             status: Status::Loading,
             notice: None,
             floating: false,
+            here: None,
             scroll: Cell::new(0),
         }
     }
@@ -102,6 +112,32 @@ impl App {
 
     pub fn set_floating(&mut self, floating: bool) {
         self.floating = floating;
+    }
+
+    /// Reports whether the location changed, so the caller knows to redraw.
+    pub fn set_location(&mut self, here: Location) -> bool {
+        if self.here.as_ref() == Some(&here) {
+            return false;
+        }
+
+        self.here = Some(here);
+        true
+    }
+
+    /// Mirrors cogitator's agents.AgentAt: the agent on this tab, else the
+    /// agent that owns this session.
+    pub fn here_index(&self) -> Option<usize> {
+        let here = self.here.as_ref()?;
+
+        if let Some(window) = &here.window {
+            if let Some(i) = self.agents.iter().position(|a| a.window_id == *window) {
+                return Some(i);
+            }
+        }
+
+        self.agents
+            .iter()
+            .position(|a| a.session_owned && a.mux_session == here.session)
     }
 
     pub fn set_permission_denied(&mut self) {
@@ -401,5 +437,60 @@ pub(crate) mod tests {
         app.set_notice("boom");
         app.handle_key(Key::Char('x'));
         assert_eq!(app.notice(), None);
+    }
+
+    fn located_app() -> App {
+        let mut app = App::new();
+        let json = r#"{"version":1,"agents":[
+            {"id":"/shared-a","group":"idle","mux_session":"main","window_id":"main:1","session_owned":false},
+            {"id":"/shared-b","group":"idle","mux_session":"main","window_id":"main:2","session_owned":false},
+            {"id":"/own","group":"idle","mux_session":"wt","window_id":"wt:0","session_owned":true}
+        ]}"#;
+        app.apply_list_result(Some(0), json.as_bytes(), b"");
+        app
+    }
+
+    fn at(session: &str, window: Option<&str>) -> Location {
+        Location {
+            session: session.into(),
+            window: window.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn nothing_is_here_until_location_is_known() {
+        assert_eq!(located_app().here_index(), None);
+    }
+
+    #[test]
+    fn here_is_the_agent_on_this_tab() {
+        let mut app = located_app();
+        app.set_location(at("main", Some("main:2")));
+        assert_eq!(app.here_index(), Some(1));
+    }
+
+    #[test]
+    fn any_tab_of_an_owned_session_is_at_its_agent() {
+        let mut app = located_app();
+        app.set_location(at("wt", Some("wt:7")));
+        assert_eq!(app.here_index(), Some(2));
+
+        app.set_location(at("wt", None));
+        assert_eq!(app.here_index(), Some(2));
+    }
+
+    #[test]
+    fn agent_free_tab_of_a_shared_session_is_nowhere() {
+        let mut app = located_app();
+        app.set_location(at("main", Some("main:9")));
+        assert_eq!(app.here_index(), None);
+    }
+
+    #[test]
+    fn set_location_reports_only_changes() {
+        let mut app = App::new();
+        assert!(app.set_location(at("s", None)));
+        assert!(!app.set_location(at("s", None)));
+        assert!(app.set_location(at("s", Some("s:1"))));
     }
 }

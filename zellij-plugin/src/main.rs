@@ -2,7 +2,7 @@ mod app;
 mod feed;
 mod render;
 
-use app::{App, Effect, Key};
+use app::{App, Effect, Key, Location};
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use zellij_tile::prelude::*;
@@ -21,6 +21,7 @@ struct State {
     session_name: Option<String>,
     plugin_id: u32,
     own_tab: Option<usize>,
+    tab_ids: BTreeMap<usize, usize>,
     focus_pending: bool,
 }
 
@@ -35,6 +36,7 @@ impl Default for State {
             session_name: None,
             plugin_id: 0,
             own_tab: None,
+            tab_ids: BTreeMap::new(),
             focus_pending: false,
         }
     }
@@ -69,6 +71,7 @@ impl ZellijPlugin for State {
             EventType::Key,
             EventType::ModeUpdate,
             EventType::PaneUpdate,
+            EventType::TabUpdate,
         ]);
     }
 
@@ -94,7 +97,11 @@ impl ZellijPlugin for State {
                 if mode.session_name.is_some() {
                     self.session_name = mode.session_name;
                 }
-                false
+                self.sync_location()
+            }
+            Event::TabUpdate(tabs) => {
+                self.tab_ids = tabs.iter().map(|t| (t.position, t.tab_id)).collect();
+                self.sync_location()
             }
             Event::PaneUpdate(manifest) => {
                 self.start();
@@ -109,7 +116,8 @@ impl ZellijPlugin for State {
                 if self.focus_pending {
                     self.take_focus_if_viewed();
                 }
-                self.app.floating() != was_floating
+                let moved = self.sync_location();
+                self.app.floating() != was_floating || moved
             }
             Event::Key(key) => match map_key(&key) {
                 Some(key) => {
@@ -173,6 +181,20 @@ impl State {
         if viewed == Some(own_tab) {
             focus_plugin_pane(self.plugin_id, false, false);
         }
+    }
+
+    /// PaneUpdate keys tabs by position while cogitator addresses them by
+    /// tab_id, so the instance's own tab is resolved through TabUpdate.
+    fn sync_location(&mut self) -> bool {
+        let Some(session) = self.session_name.clone() else {
+            return false;
+        };
+
+        let window = self
+            .own_tab
+            .and_then(|position| self.tab_ids.get(&position))
+            .map(|tab_id| format!("{session}:{tab_id}"));
+        self.app.set_location(Location { session, window })
     }
 
     fn list(&mut self) {

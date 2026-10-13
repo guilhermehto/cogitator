@@ -10,6 +10,7 @@ const GLYPH_PERMISSION: &str = "\u{f033e}";
 const GLYPH_ERROR: &str = "\u{f0026}";
 const GLYPH_FINISHED: &str = "\u{f012c}";
 const GLYPH_MISSING: &str = "\u{f0e7a}";
+const GLYPH_HERE: &str = "▸";
 
 const HARNESS_WIDTH: usize = 11;
 const DETAIL_MIN_WIDTH: usize = 80;
@@ -71,6 +72,7 @@ const INACTIVE: Style = Style::fg(244);
 const ACTIVE: Style = Style::fg(82);
 const MISSING: Style = Style::fg(196).italic();
 const UNKNOWN: Style = Style::fg(226);
+const HERE: Style = Style::fg(111).bold();
 
 struct Span {
     text: String,
@@ -151,6 +153,7 @@ fn render_list(app: &App, rows: usize, cols: usize, now: i64) -> Vec<String> {
     }
 
     let selected = app.selected_index();
+    let here = app.here_index();
     let mut lines = Vec::new();
     let mut selected_line = 0;
     for group in GROUP_ORDER {
@@ -175,7 +178,11 @@ fn render_list(app: &App, rows: usize, cols: usize, now: i64) -> Vec<String> {
             if is_selected {
                 selected_line = lines.len();
             }
-            lines.push(agent_row(agent, is_selected, cols, now, app.home()));
+            let mark = RowMark {
+                selected: is_selected,
+                here: here == Some(i),
+            };
+            lines.push(agent_row(agent, mark, cols, now, app.home()));
         }
     }
 
@@ -207,14 +214,23 @@ fn group_header(group: Group, count: usize) -> Line {
     vec![span(title, style), span(format!(" · {count}"), DIM)]
 }
 
+struct RowMark {
+    selected: bool,
+    here: bool,
+}
+
 // agent_row lays out status, name and (when wide enough) the muted session
-// title on the left, harness and age on the right, as the TUI does.
-fn agent_row(agent: &Agent, selected: bool, cols: usize, now: i64, home: &str) -> String {
+// title on the left, harness and age on the right, as the TUI does. The
+// agent the user is sitting at gets a marker that survives the selection band.
+fn agent_row(agent: &Agent, mark: RowMark, cols: usize, now: i64, home: &str) -> String {
     let age = parse_rfc3339(&agent.last_activity)
         .map(|ts| relative_time(now - ts))
         .unwrap_or_default();
 
     let mut left = vec![status_cell(agent)];
+    if mark.here {
+        left.push(span(format!("{GLYPH_HERE} "), HERE));
+    }
     left.extend(styled_name(agent, home));
     let mut right = vec![span(age.clone(), DIM)];
 
@@ -233,7 +249,11 @@ fn agent_row(agent: &Agent, selected: bool, cols: usize, now: i64, home: &str) -
     row.push(span("  ", PLAIN));
     row.extend(right);
 
-    let bg = if selected { Some(SELECTED_BG) } else { None };
+    let bg = if mark.selected {
+        Some(SELECTED_BG)
+    } else {
+        None
+    };
     paint(&truncate(row, cols), bg)
 }
 
@@ -636,6 +656,26 @@ mod tests {
         assert!(lines[1].contains("48;5;237"));
         assert_eq!(plain(&lines[1]).chars().count(), 30);
         assert!(!lines[2].contains("48;5;237"));
+    }
+
+    #[test]
+    fn row_the_user_sits_at_is_marked_even_when_selected() {
+        let mut app = app_from(
+            r#"{"version":1,"agents":[{"id":"/a","group":"idle","window_id":"s:1"},{"id":"/b","group":"idle","window_id":"s:2"}]}"#,
+        );
+        app.set_location(crate::app::Location {
+            session: "s".into(),
+            window: Some("s:2".into()),
+        });
+        assert_eq!(
+            plain_lines(&render(&app, 4, 30, NOW))[1..3],
+            ["· /a", "· ▸ /b"]
+        );
+
+        app.handle_key(Key::Down);
+        let row = &render(&app, 4, 30, NOW)[2];
+        assert!(row.contains("48;5;237"), "{row:?}");
+        assert!(plain(row).starts_with("· ▸ /b"), "{row:?}");
     }
 
     #[test]

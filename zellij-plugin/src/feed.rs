@@ -42,6 +42,7 @@ pub struct Agent {
     pub mux_session: String,
     pub window_id: String,
     pub pane_id: String,
+    pub session_owned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -91,7 +92,7 @@ mod tests {
 
     #[test]
     fn parses_full_agent() {
-        let input = r#"{"version":1,"home":"/h","agents":[{"id":"/a/b","kind":"worktree","repo":"r","branch":"br","workspace":"w","session_name":"s","harness":"omp","title":"t","attention":"question","state":"running","group":"needs_you","last_activity":"2026-01-01T00:00:00Z","mux_session":"m","window_id":"1","pane_id":"2","extra":"x"}]}"#;
+        let input = r#"{"version":1,"home":"/h","agents":[{"id":"/a/b","kind":"worktree","repo":"r","branch":"br","workspace":"w","session_name":"s","harness":"omp","title":"t","attention":"question","state":"running","group":"needs_you","last_activity":"2026-01-01T00:00:00Z","mux_session":"m","window_id":"1","pane_id":"2","session_owned":true,"extra":"x"}]}"#;
         let feed = parse(input).unwrap();
         assert_eq!(feed.home, "/h");
         assert_eq!(
@@ -112,6 +113,7 @@ mod tests {
                 mux_session: "m".into(),
                 window_id: "1".into(),
                 pane_id: "2".into(),
+                session_owned: true,
             }]
         );
     }
