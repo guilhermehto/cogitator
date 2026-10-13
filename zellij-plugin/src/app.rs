@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::feed::{self, Agent, Group};
 use std::cell::Cell;
 
@@ -33,6 +31,7 @@ pub struct App {
     agents: Vec<Agent>,
     selected: Option<String>,
     status: Status,
+    notice: Option<String>,
     pub(crate) scroll: Cell<usize>,
 }
 
@@ -42,6 +41,7 @@ impl Default for App {
             agents: Vec::new(),
             selected: None,
             status: Status::Loading,
+            notice: None,
             scroll: Cell::new(0),
         }
     }
@@ -75,8 +75,12 @@ impl App {
         &self.status
     }
 
-    pub fn selected_id(&self) -> Option<&str> {
-        self.selected.as_deref()
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
+    }
+
+    pub fn set_notice(&mut self, msg: impl Into<String>) {
+        self.notice = Some(msg.into());
     }
 
     pub fn selected_index(&self) -> Option<usize> {
@@ -109,18 +113,20 @@ impl App {
             return;
         }
 
-        let msg = if !err.is_empty() {
-            err.to_string()
-        } else {
-            match exit_code {
-                Some(code) => format!("exit {code}"),
-                None => "exit unknown".to_string(),
-            }
-        };
-        self.status = Status::Failed(msg);
+        self.status = Status::Failed(failure_message(exit_code, err));
     }
 
-    pub fn set_agents(&mut self, mut agents: Vec<Agent>) {
+    pub fn apply_focus_result(&mut self, exit_code: Option<i32>, stderr: &[u8]) -> bool {
+        if exit_code == Some(0) {
+            return true;
+        }
+
+        let err = String::from_utf8_lossy(stderr);
+        self.notice = Some(failure_message(exit_code, err.trim()));
+        false
+    }
+
+    fn set_agents(&mut self, mut agents: Vec<Agent>) {
         agents.sort_by_key(|a| group_rank(a.group));
         let prev_index = self.selected_index();
         let still_present = self
@@ -144,6 +150,7 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: Key) -> Option<Effect> {
+        self.notice = None;
         match key {
             Key::Down | Key::Char('j') => {
                 self.move_selection(1);
@@ -175,6 +182,17 @@ impl App {
     }
 }
 
+fn failure_message(exit_code: Option<i32>, err: &str) -> String {
+    if !err.is_empty() {
+        return err.to_string();
+    }
+
+    match exit_code {
+        Some(code) => format!("exit {code}"),
+        None => "exit unknown".to_string(),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -197,18 +215,22 @@ pub(crate) mod tests {
         app.agents().iter().map(|a| a.id.as_str()).collect()
     }
 
+    fn selected(app: &App) -> Option<&str> {
+        app.selected.as_deref()
+    }
+
     #[test]
     fn starts_loading_without_selection() {
         let app = App::new();
         assert_eq!(app.status(), &Status::Loading);
-        assert_eq!(app.selected_id(), None);
+        assert_eq!(selected(&app), None);
     }
 
     #[test]
     fn successful_list_is_ready_and_selects_first() {
         let app = app_with(&[("/a", "needs_you"), ("/b", "idle")]);
         assert_eq!(app.status(), &Status::Ready);
-        assert_eq!(app.selected_id(), Some("/a"));
+        assert_eq!(selected(&app), Some("/a"));
     }
 
     #[test]
@@ -221,13 +243,13 @@ pub(crate) mod tests {
     fn selection_movement_clamps_at_both_ends() {
         let mut app = app_with(&[("/a", "idle"), ("/b", "idle")]);
         assert_eq!(app.handle_key(Key::Up), None);
-        assert_eq!(app.selected_id(), Some("/a"));
+        assert_eq!(selected(&app), Some("/a"));
         app.handle_key(Key::Char('j'));
-        assert_eq!(app.selected_id(), Some("/b"));
+        assert_eq!(selected(&app), Some("/b"));
         app.handle_key(Key::Down);
-        assert_eq!(app.selected_id(), Some("/b"));
+        assert_eq!(selected(&app), Some("/b"));
         app.handle_key(Key::Char('k'));
-        assert_eq!(app.selected_id(), Some("/a"));
+        assert_eq!(selected(&app), Some("/a"));
     }
 
     #[test]
@@ -239,7 +261,7 @@ pub(crate) mod tests {
             feed_json(&[("/b", "needs_you"), ("/a", "idle")]).as_bytes(),
             b"",
         );
-        assert_eq!(app.selected_id(), Some("/b"));
+        assert_eq!(selected(&app), Some("/b"));
         assert_eq!(app.selected_index(), Some(0));
     }
 
@@ -252,7 +274,7 @@ pub(crate) mod tests {
             feed_json(&[("/a", "idle"), ("/c", "idle")]).as_bytes(),
             b"",
         );
-        assert_eq!(app.selected_id(), Some("/c"));
+        assert_eq!(selected(&app), Some("/c"));
     }
 
     #[test]
@@ -261,14 +283,14 @@ pub(crate) mod tests {
         app.handle_key(Key::Down);
         app.handle_key(Key::Down);
         app.apply_list_result(Some(0), feed_json(&[("/a", "idle")]).as_bytes(), b"");
-        assert_eq!(app.selected_id(), Some("/a"));
+        assert_eq!(selected(&app), Some("/a"));
     }
 
     #[test]
     fn empty_list_clears_selection() {
         let mut app = app_with(&[("/a", "idle")]);
         app.apply_list_result(Some(0), feed_json(&[]).as_bytes(), b"");
-        assert_eq!(app.selected_id(), None);
+        assert_eq!(selected(&app), None);
         assert_eq!(app.handle_key(Key::Enter), None);
         assert_eq!(app.handle_key(Key::Down), None);
     }
@@ -330,6 +352,37 @@ pub(crate) mod tests {
         let mut app = app_with(&[("/a", "idle")]);
         app.apply_list_result(Some(1), b"", b"boom");
         assert_eq!(ids(&app), vec!["/a"]);
-        assert_eq!(app.selected_id(), Some("/a"));
+        assert_eq!(selected(&app), Some("/a"));
+    }
+
+    #[test]
+    fn failed_focus_sets_notice_and_keeps_list() {
+        let mut app = app_with(&[("/a", "idle")]);
+        assert!(!app.apply_focus_result(Some(1), b"no such agent\n"));
+        assert_eq!(app.notice(), Some("no such agent"));
+        assert_eq!(app.status(), &Status::Ready);
+        assert_eq!(ids(&app), vec!["/a"]);
+    }
+
+    #[test]
+    fn failed_focus_without_stderr_reports_exit_code() {
+        let mut app = App::new();
+        assert!(!app.apply_focus_result(None, b""));
+        assert_eq!(app.notice(), Some("exit unknown"));
+    }
+
+    #[test]
+    fn successful_focus_leaves_notice_untouched() {
+        let mut app = App::new();
+        assert!(app.apply_focus_result(Some(0), b""));
+        assert_eq!(app.notice(), None);
+    }
+
+    #[test]
+    fn any_key_clears_notice() {
+        let mut app = app_with(&[("/a", "idle")]);
+        app.set_notice("boom");
+        app.handle_key(Key::Char('x'));
+        assert_eq!(app.notice(), None);
     }
 }

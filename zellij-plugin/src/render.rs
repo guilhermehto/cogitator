@@ -1,9 +1,22 @@
-#![allow(dead_code)]
-
 use crate::app::{App, Status, GROUP_ORDER};
 use crate::feed::{Agent, Group};
 
 pub fn render(app: &App, rows: usize, cols: usize, now_unix_secs: i64) -> Vec<String> {
+    if rows == 0 {
+        return Vec::new();
+    }
+
+    let Some(notice) = app.notice() else {
+        return render_body(app, rows, cols, now_unix_secs);
+    };
+
+    let mut lines = render_body(app, rows - 1, cols, now_unix_secs);
+    lines.resize(rows - 1, String::new());
+    lines.push(truncate(notice, cols));
+    lines
+}
+
+fn render_body(app: &App, rows: usize, cols: usize, now_unix_secs: i64) -> Vec<String> {
     if rows == 0 {
         return Vec::new();
     }
@@ -320,6 +333,31 @@ mod tests {
     fn empty_ready_list_says_no_agents() {
         let app = simple_app(&[]);
         assert_eq!(render(&app, 5, 80, NOW), vec!["no agents"]);
+    }
+
+    #[test]
+    fn notice_takes_the_bottom_row_below_the_list() {
+        let mut app = simple_app(&[("/a", "idle"), ("/b", "idle"), ("/c", "idle")]);
+        app.set_notice("focus failed");
+        assert_eq!(
+            render(&app, 4, 80, NOW),
+            vec!["Idle", "> · a", "  · b", "focus failed"]
+        );
+        assert_eq!(
+            render(&app, 5, 80, NOW),
+            vec!["Idle", "> · a", "  · b", "  · c", "focus failed"]
+        );
+        assert_eq!(
+            render(&app, 6, 80, NOW),
+            vec!["Idle", "> · a", "  · b", "  · c", "", "focus failed"]
+        );
+    }
+
+    #[test]
+    fn notice_alone_fits_a_single_row() {
+        let mut app = simple_app(&[("/a", "idle")]);
+        app.set_notice("focus failed");
+        assert_eq!(render(&app, 1, 5, NOW), vec!["focus"]);
     }
 
     #[test]
