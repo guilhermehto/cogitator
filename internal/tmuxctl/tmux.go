@@ -19,7 +19,7 @@
 //
 // Available() returns false when $TMUX is unset (i.e. the process is not
 // running inside a tmux session). All operations that require tmux return
-// ErrNotAvailable in that case so callers can degrade gracefully.
+// mux.ErrNotAvailable in that case so callers can degrade gracefully.
 //
 // No import of bubbletea or internal/ui is permitted in this package.
 package tmuxctl
@@ -32,31 +32,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
-)
-
-// ErrNotAvailable is returned by all operations when $TMUX is unset, meaning
-// cogitator is not running inside a tmux session and cannot control windows.
-var ErrNotAvailable = errors.New("tmuxctl: not inside a tmux session ($TMUX unset)")
-
-// ErrWindowNotFound is returned by FindWindowByDir when no window has a
-// @cog_dir option matching the requested canonical directory.
-var ErrWindowNotFound = errors.New("tmuxctl: window not found for directory")
-
-// Target is a tmux window address in the form "session:index" (e.g. "main:3").
-// It is stable for the lifetime of the window and can be passed to Select,
-// WindowProcessAlive, and RelaunchInWindow.
-type Target string
-
-// LaunchMode selects how a new worktree is opened: as a window in the current
-// tmux session (ModeWindow) or as a brand-new tmux session (ModeSession).
-type LaunchMode int
-
-const (
-	// ModeWindow opens worktrees with `tmux new-window` (the default).
-	ModeWindow LaunchMode = iota
-	// ModeSession opens worktrees with `tmux new-session`.
-	ModeSession
 )
 
 // Runner is the interface through which tmuxctl issues tmux commands.
@@ -100,48 +77,16 @@ func (execRunner) Run(args ...string) (string, error) {
 var DefaultRunner Runner = execRunner{}
 
 // Available reports whether cogitator is running inside a tmux session.
-// It returns false when $TMUX is unset; all operations return ErrNotAvailable
+// It returns false when $TMUX is unset; all operations return mux.ErrNotAvailable
 // in that case.
 func Available() bool {
 	return os.Getenv("TMUX") != ""
 }
 
-// EnsureWindow opens a tmux window for the worktree at dir, or returns the
-// existing window if one is already tagged with @cog_dir == canonical(dir).
-//
-// Parameters:
-//   - dir:  the worktree directory (canonicalized internally via pathnorm.Canonical).
-//   - name: the window name to use when creating a new window (e.g. "repo/branch").
-//   - argv: the command to run in the new window (program + arguments, no shell).
-//
-// Returns the Target ("session:index") of the window, or ErrNotAvailable when
-// not inside tmux.
-//
-// Deduplication is by @cog_dir (canonical path), not by window name. If a
-// window already exists for the directory, its name is NOT updated.
-func EnsureWindow(dir, name string, argv []string) (Target, error) {
-	return EnsureWindowModeWith(DefaultRunner, dir, name, argv, ModeWindow)
-}
-
-// EnsureWindowWith is the injectable variant of EnsureWindow.
-func EnsureWindowWith(r Runner, dir, name string, argv []string) (Target, error) {
-	return EnsureWindowModeWith(r, dir, name, argv, ModeWindow)
-}
-
-// EnsureWindowMode opens a worktree at dir using the given LaunchMode, or
-// returns the existing window/session if one is already tagged with
-// @cog_dir == canonical(dir). See EnsureWindow for the parameter contract.
-//
-// Deduplication is by @cog_dir across all windows in all sessions, so an
-// existing target is reused regardless of which mode created it.
-func EnsureWindowMode(dir, name string, argv []string, mode LaunchMode) (Target, error) {
-	return EnsureWindowModeWith(DefaultRunner, dir, name, argv, mode)
-}
-
 // EnsureWindowModeWith is the injectable variant of EnsureWindowMode.
-func EnsureWindowModeWith(r Runner, dir, name string, argv []string, mode LaunchMode) (Target, error) {
+func EnsureWindowModeWith(r Runner, dir, name string, argv []string, mode mux.LaunchMode) (mux.Target, error) {
 	if !Available() {
-		return "", ErrNotAvailable
+		return "", mux.ErrNotAvailable
 	}
 
 	canonical, err := pathnorm.Canonical(dir)
@@ -155,26 +100,26 @@ func EnsureWindowModeWith(r Runner, dir, name string, argv []string, mode Launch
 		// Window already exists — return it without creating a new one.
 		return existing, nil
 	}
-	if !errors.Is(err, ErrWindowNotFound) {
+	if !errors.Is(err, mux.ErrWindowNotFound) {
 		return "", fmt.Errorf("tmuxctl: find existing window: %w", err)
 	}
 
 	// No existing window — create one in the requested mode.
-	if mode == ModeSession {
+	if mode == mux.ModeSession {
 		return newSessionWith(r, canonical, name, argv)
 	}
 	return newWindowWith(r, canonical, name, argv)
 }
 
 // newWindowWith creates a new tmux window running argv, names it name, and
-// sets @cog_dir to canonical. Returns the Target of the new window.
+// sets @cog_dir to canonical. Returns the mux.Target of the new window.
 //
 // remain-on-exit is set to "on" for the window so that when the harness
 // process exits (e.g. after a crash or explicit quit), the window stays open
 // in the "dead" state rather than being auto-closed by tmux. This is required
 // for WindowProcessAlive to detect the dead state and for RelaunchInWindow to
 // revive the process via respawn-pane.
-func newWindowWith(r Runner, canonical, name string, argv []string) (Target, error) {
+func newWindowWith(r Runner, canonical, name string, argv []string) (mux.Target, error) {
 	if len(argv) == 0 {
 		return "", fmt.Errorf("tmuxctl: argv must not be empty")
 	}
@@ -199,7 +144,7 @@ func newWindowWith(r Runner, canonical, name string, argv []string) (Target, err
 		return "", fmt.Errorf("tmuxctl: new-window: %w", err)
 	}
 
-	target := Target(strings.TrimSpace(out))
+	target := mux.Target(strings.TrimSpace(out))
 	if target == "" {
 		return "", fmt.Errorf("tmuxctl: new-window returned empty target")
 	}
@@ -221,7 +166,7 @@ func newWindowWith(r Runner, canonical, name string, argv []string) (Target, err
 // newSessionWith creates a new detached tmux session whose first window runs an
 // interactive shell in canonical, then launches argv inside that shell. It
 // names the session a sanitized form of name, sets @cog_dir to canonical, and
-// returns the Target ("session:index") of the session's first window.
+// returns the mux.Target ("session:index") of the session's first window.
 //
 // The harness is run via send-keys into the shell rather than as the pane's own
 // command. This is what the user gets from a hand-made session: when the harness
@@ -237,7 +182,7 @@ func newWindowWith(r Runner, canonical, name string, argv []string) (Target, err
 // syntax); both are replaced with "-" via sanitizeSessionName. Dedup keys on
 // @cog_dir, not the name, so a sanitized-name collision only affects the label
 // shown in the session list.
-func newSessionWith(r Runner, canonical, name string, argv []string) (Target, error) {
+func newSessionWith(r Runner, canonical, name string, argv []string) (mux.Target, error) {
 	if len(argv) == 0 {
 		return "", fmt.Errorf("tmuxctl: argv must not be empty")
 	}
@@ -276,7 +221,7 @@ func newSessionWith(r Runner, canonical, name string, argv []string) (Target, er
 		return "", fmt.Errorf("tmuxctl: new-session: %w", err)
 	}
 
-	target := Target(strings.TrimSpace(out))
+	target := mux.Target(strings.TrimSpace(out))
 	if target == "" {
 		return "", fmt.Errorf("tmuxctl: new-session returned empty target")
 	}
@@ -346,7 +291,7 @@ func isDuplicateSessionError(err error, session string) bool {
 	return duplicate == session
 }
 
-func findWindowBySessionWith(r Runner, session string) (Target, error) {
+func findWindowBySessionWith(r Runner, session string) (mux.Target, error) {
 	out, err := r.Run(
 		"list-windows", "-a",
 		"-F", "#{session_name}:#{window_index}",
@@ -360,13 +305,13 @@ func findWindowBySessionWith(r Runner, session string) (Target, error) {
 		if line == "" {
 			continue
 		}
-		target := Target(line)
+		target := mux.Target(line)
 		if sessionOf(target) == session {
 			return target, nil
 		}
 	}
 
-	return "", ErrWindowNotFound
+	return "", mux.ErrWindowNotFound
 }
 
 // sanitizeSessionName replaces tmux-reserved characters ("." and ":") with "-"
@@ -381,7 +326,7 @@ func sanitizeSessionName(name string) string {
 }
 
 // setOptionWith sets a tmux window option on target.
-func setOptionWith(r Runner, target Target, option, value string) error {
+func setOptionWith(r Runner, target mux.Target, option, value string) error {
 	_, err := r.Run("set-option", "-w", "-t", string(target), option, value)
 	if err != nil {
 		return fmt.Errorf("set-option %s %s: %w", option, value, err)
@@ -389,17 +334,10 @@ func setOptionWith(r Runner, target Target, option, value string) error {
 	return nil
 }
 
-// FindWindowByDir returns the Target of the tmux window whose @cog_dir option
-// equals the canonical form of dir. Returns ErrWindowNotFound when no such
-// window exists, or ErrNotAvailable when not inside tmux.
-func FindWindowByDir(dir string) (Target, error) {
-	return FindWindowByDirWith(DefaultRunner, dir)
-}
-
 // FindWindowByDirWith is the injectable variant of FindWindowByDir.
-func FindWindowByDirWith(r Runner, dir string) (Target, error) {
+func FindWindowByDirWith(r Runner, dir string) (mux.Target, error) {
 	if !Available() {
-		return "", ErrNotAvailable
+		return "", mux.ErrNotAvailable
 	}
 
 	canonical, err := pathnorm.Canonical(dir)
@@ -412,7 +350,7 @@ func FindWindowByDirWith(r Runner, dir string) (Target, error) {
 
 // findByCanonicalDir searches all windows for one whose @cog_dir equals
 // canonical. It is called with an already-canonical path.
-func findByCanonicalDir(r Runner, canonical string) (Target, error) {
+func findByCanonicalDir(r Runner, canonical string) (mux.Target, error) {
 	// List all windows across all sessions with their @cog_dir option.
 	// Format: "session_name:window_index @cog_dir_value"
 	out, err := r.Run(
@@ -437,26 +375,17 @@ func findByCanonicalDir(r Runner, canonical string) (Target, error) {
 
 		cogDir = strings.TrimSpace(cogDir)
 		if cogDir == canonical {
-			return Target(target), nil
+			return mux.Target(target), nil
 		}
 	}
 
-	return "", ErrWindowNotFound
-}
-
-// WindowProcessAlive reports whether the process running in the given window's
-// pane is still alive. It uses tmux's #{pane_dead} format variable: "1" means
-// the pane's process has exited (dead), "0" means it is still running.
-//
-// Returns ErrNotAvailable when not inside tmux.
-func WindowProcessAlive(target Target) (bool, error) {
-	return WindowProcessAliveWith(DefaultRunner, target)
+	return "", mux.ErrWindowNotFound
 }
 
 // WindowProcessAliveWith is the injectable variant of WindowProcessAlive.
-func WindowProcessAliveWith(r Runner, target Target) (bool, error) {
+func WindowProcessAliveWith(r Runner, target mux.Target) (bool, error) {
 	if !Available() {
-		return false, ErrNotAvailable
+		return false, mux.ErrNotAvailable
 	}
 
 	out, err := r.Run(
@@ -471,21 +400,10 @@ func WindowProcessAliveWith(r Runner, target Target) (bool, error) {
 	return strings.TrimSpace(out) == "0", nil
 }
 
-// RelaunchInWindow re-runs argv in the given window's pane. It is intended for
-// windows whose process has exited (WindowProcessAlive returned false) but
-// whose window still exists (the pane is in the "dead" state showing the exit
-// code). It uses `tmux respawn-pane -k` to kill the dead pane and start a new
-// process in its place.
-//
-// Returns ErrNotAvailable when not inside tmux.
-func RelaunchInWindow(target Target, argv []string) error {
-	return RelaunchInWindowWith(DefaultRunner, target, argv)
-}
-
 // RelaunchInWindowWith is the injectable variant of RelaunchInWindow.
-func RelaunchInWindowWith(r Runner, target Target, argv []string) error {
+func RelaunchInWindowWith(r Runner, target mux.Target, argv []string) error {
 	if !Available() {
-		return ErrNotAvailable
+		return mux.ErrNotAvailable
 	}
 	if len(argv) == 0 {
 		return fmt.Errorf("tmuxctl: argv must not be empty")
@@ -501,35 +419,10 @@ func RelaunchInWindowWith(r Runner, target Target, argv []string) error {
 	return nil
 }
 
-// Select moves the attached tmux client to the given window. It first selects
-// the window within its session (`select-window`), then switches the client to
-// that session (`switch-client`). The switch-client step is required because
-// the target may live in a different session than the one the client is
-// currently attached to — as it always does in session launch mode, where each
-// worktree opens as its own session. select-window alone only changes the
-// active window inside the target's session and never moves the client there.
-//
-// Returns ErrNotAvailable when not inside tmux.
-func Select(target Target) error {
-	return SelectWith(DefaultRunner, target)
-}
-
-// SelectWith is the injectable variant of Select.
-func SelectWith(r Runner, target Target) error {
-	return SelectForClientWith(r, target, "")
-}
-
-// SelectForClient is Select targeting a specific tmux client (e.g.
-// "/dev/ttys003") instead of whichever client tmux considers current. An empty
-// client behaves exactly like Select.
-func SelectForClient(target Target, client string) error {
-	return SelectForClientWith(DefaultRunner, target, client)
-}
-
 // SelectForClientWith is the injectable variant of SelectForClient.
-func SelectForClientWith(r Runner, target Target, client string) error {
+func SelectForClientWith(r Runner, target mux.Target, client string) error {
 	if !Available() {
-		return ErrNotAvailable
+		return mux.ErrNotAvailable
 	}
 
 	if _, err := r.Run("select-window", "-t", string(target)); err != nil {
@@ -549,34 +442,10 @@ func switchClientArgs(client, target string) []string {
 	return []string{"switch-client", "-c", client, "-t", target}
 }
 
-// SelectSession switches the attached tmux client to the session that owns
-// target, without selecting a specific window. tmux restores the session's
-// last-active window, so jumping back to a worktree opened in session mode
-// lands on whatever window you were last using in that session — not always
-// the worktree's original window.
-//
-// target is a "session:index" address; only the session component is used.
-//
-// Returns ErrNotAvailable when not inside tmux.
-func SelectSession(target Target) error {
-	return SelectSessionWith(DefaultRunner, target)
-}
-
-// SelectSessionWith is the injectable variant of SelectSession.
-func SelectSessionWith(r Runner, target Target) error {
-	return SelectSessionForClientWith(r, target, "")
-}
-
-// SelectSessionForClient is SelectSession targeting a specific tmux client.
-// An empty client behaves exactly like SelectSession.
-func SelectSessionForClient(target Target, client string) error {
-	return SelectSessionForClientWith(DefaultRunner, target, client)
-}
-
 // SelectSessionForClientWith is the injectable variant of SelectSessionForClient.
-func SelectSessionForClientWith(r Runner, target Target, client string) error {
+func SelectSessionForClientWith(r Runner, target mux.Target, client string) error {
 	if !Available() {
-		return ErrNotAvailable
+		return mux.ErrNotAvailable
 	}
 
 	session := sessionOf(target)
@@ -590,7 +459,7 @@ func SelectSessionForClientWith(r Runner, target Target, client string) error {
 // (e.g. "%12"). Pane ids are server-unique, so no session qualifier is needed.
 func SelectPaneForClient(r Runner, paneID, client string) error {
 	if !Available() {
-		return ErrNotAvailable
+		return mux.ErrNotAvailable
 	}
 
 	if _, err := r.Run("select-window", "-t", paneID); err != nil {
@@ -605,9 +474,9 @@ func SelectPaneForClient(r Runner, paneID, client string) error {
 	return nil
 }
 
-// sessionOf returns the session component of a "session:index" Target. If
+// sessionOf returns the session component of a "session:index" mux.Target. If
 // target has no ":" it is returned unchanged (already a bare session name).
-func sessionOf(target Target) string {
+func sessionOf(target mux.Target) string {
 	s := string(target)
 	if i := strings.LastIndex(s, ":"); i >= 0 {
 		return s[:i]
@@ -615,20 +484,10 @@ func sessionOf(target Target) string {
 	return s
 }
 
-// KillWindow closes the tmux window addressed by target (`tmux kill-window`).
-// It is used to clean up a worktree's window after the worktree directory is
-// deleted, so no dead pane pointing at a missing directory is left behind. When
-// target is the last window in its session, tmux closes the session too.
-//
-// Returns ErrNotAvailable when not inside tmux.
-func KillWindow(target Target) error {
-	return KillWindowWith(DefaultRunner, target)
-}
-
 // KillWindowWith is the injectable variant of KillWindow.
-func KillWindowWith(r Runner, target Target) error {
+func KillWindowWith(r Runner, target mux.Target) error {
 	if !Available() {
-		return ErrNotAvailable
+		return mux.ErrNotAvailable
 	}
 	if _, err := r.Run("kill-window", "-t", string(target)); err != nil {
 		return fmt.Errorf("tmuxctl: kill-window %s: %w", target, err)
@@ -636,19 +495,10 @@ func KillWindowWith(r Runner, target Target) error {
 	return nil
 }
 
-// KillSession closes the tmux session that owns target (`tmux kill-session`).
-// It is used to clean up worktrees launched in session mode, where the attached
-// tmux resource is the whole session rather than only the tagged first window.
-//
-// Returns ErrNotAvailable when not inside tmux.
-func KillSession(target Target) error {
-	return KillSessionWith(DefaultRunner, target)
-}
-
 // KillSessionWith is the injectable variant of KillSession.
-func KillSessionWith(r Runner, target Target) error {
+func KillSessionWith(r Runner, target mux.Target) error {
 	if !Available() {
-		return ErrNotAvailable
+		return mux.ErrNotAvailable
 	}
 	session := sessionOf(target)
 	if _, err := r.Run("kill-session", "-t", session); err != nil {
@@ -657,21 +507,10 @@ func KillSessionWith(r Runner, target Target) error {
 	return nil
 }
 
-// ListCogDirs returns the set of canonical worktree directories that currently
-// have a tmux window tagged with @cog_dir. It runs
-// `tmux list-windows -a -F '#{@cog_dir}'` and canonicalizes each non-empty
-// value via pathnorm.Canonical.
-//
-// The returned map is keyed by canonical path; the value is always true.
-// Returns ErrNotAvailable when not inside tmux.
-func ListCogDirs() (map[string]bool, error) {
-	return ListCogDirsWith(DefaultRunner)
-}
-
 // ListCogDirsWith is the injectable variant of ListCogDirs.
 func ListCogDirsWith(r Runner) (map[string]bool, error) {
 	if !Available() {
-		return nil, ErrNotAvailable
+		return nil, mux.ErrNotAvailable
 	}
 
 	out, err := r.Run("list-windows", "-a", "-F", "#{@cog_dir}")
@@ -695,21 +534,6 @@ func ListCogDirsWith(r Runner) (map[string]bool, error) {
 	return result, nil
 }
 
-// Pane is one tmux pane with the window-level @cog_* state of its window.
-// Path is canonical when it could be canonicalised, raw otherwise.
-type Pane struct {
-	PaneID      string
-	WindowID    string
-	SessionID   string
-	SessionName string
-	Path        string
-	Command     string
-	CogDir      string
-	CogStatus   string
-	CogReason   string
-	CogSince    string
-}
-
 // paneFormat is tab-separated because paths may contain spaces.
 var paneFormat = strings.Join([]string{
 	"#{pane_id}", "#{window_id}", "#{session_id}", "#{session_name}",
@@ -718,9 +542,9 @@ var paneFormat = strings.Join([]string{
 }, "\t")
 
 // ListPanes returns every pane on the server in a single list-panes call.
-func ListPanes(r Runner) ([]Pane, error) {
+func ListPanes(r Runner) ([]mux.Pane, error) {
 	if !Available() {
-		return nil, ErrNotAvailable
+		return nil, mux.ErrNotAvailable
 	}
 
 	out, err := r.Run("list-panes", "-a", "-F", paneFormat)
@@ -728,7 +552,7 @@ func ListPanes(r Runner) ([]Pane, error) {
 		return nil, fmt.Errorf("tmuxctl: list-panes: %w", err)
 	}
 
-	var panes []Pane
+	var panes []mux.Pane
 	for _, line := range splitLines(out) {
 		fields := strings.Split(line, "\t")
 		if len(fields) != 10 {
@@ -740,12 +564,12 @@ func ListPanes(r Runner) ([]Pane, error) {
 			path = canonical
 		}
 
-		panes = append(panes, Pane{
+		panes = append(panes, mux.Pane{
 			PaneID:      fields[0],
 			WindowID:    fields[1],
 			SessionID:   fields[2],
 			SessionName: fields[3],
-			Path:        path,
+			Cwd:         path,
 			Command:     fields[5],
 			CogDir:      fields[6],
 			CogStatus:   fields[7],
@@ -756,18 +580,10 @@ func ListPanes(r Runner) ([]Pane, error) {
 	return panes, nil
 }
 
-// ClientFocus is where one attached tmux client is looking.
-type ClientFocus struct {
-	Client           string
-	SessionID        string
-	WindowID         string
-	ActivityUnixSecs int64
-}
-
 // ListClientFocus returns the session and window each attached client is on.
-func ListClientFocus(r Runner) ([]ClientFocus, error) {
+func ListClientFocus(r Runner) ([]mux.ClientFocus, error) {
 	if !Available() {
-		return nil, ErrNotAvailable
+		return nil, mux.ErrNotAvailable
 	}
 
 	out, err := r.Run("list-clients", "-F",
@@ -776,7 +592,7 @@ func ListClientFocus(r Runner) ([]ClientFocus, error) {
 		return nil, fmt.Errorf("tmuxctl: list-clients: %w", err)
 	}
 
-	var clients []ClientFocus
+	var clients []mux.ClientFocus
 	for _, line := range splitLines(out) {
 		fields := strings.Split(line, "\t")
 		if len(fields) != 4 {
@@ -784,7 +600,7 @@ func ListClientFocus(r Runner) ([]ClientFocus, error) {
 		}
 
 		activity, _ := strconv.ParseInt(strings.TrimSpace(fields[3]), 10, 64)
-		clients = append(clients, ClientFocus{
+		clients = append(clients, mux.ClientFocus{
 			Client:           fields[0],
 			SessionID:        fields[1],
 			WindowID:         fields[2],
@@ -816,7 +632,7 @@ const optionBoundary = "\x1f-cog-end-\x1f"
 // actually holds. Values must be single-line.
 func ReadGlobalOptions(r Runner, names []string) (map[string]string, error) {
 	if !Available() {
-		return nil, ErrNotAvailable
+		return nil, mux.ErrNotAvailable
 	}
 
 	values := make(map[string]string, len(names))
@@ -853,18 +669,7 @@ func ReadGlobalOptions(r Runner, names []string) (map[string]string, error) {
 	return values, nil
 }
 
-// OptionWrite is one set/unset of a @cog_* option. Global writes target the
-// server-wide option; otherwise Target is a window id and the write is
-// window-scoped.
-type OptionWrite struct {
-	Global bool
-	Target string
-	Name   string
-	Value  string
-	Unset  bool
-}
-
-func (w OptionWrite) args() []string {
+func optionArgs(w mux.OptionWrite) []string {
 	args := []string{"set-option"}
 	if w.Global {
 		args = append(args, "-g")
@@ -887,12 +692,12 @@ func (w OptionWrite) args() []string {
 // ApplyOptions applies all writes in one tmux invocation, chaining commands
 // with ";". tmux aborts the rest of a chain when one command fails, so callers
 // must only target windows that exist. No-op on empty input.
-func ApplyOptions(r Runner, writes []OptionWrite) error {
+func ApplyOptions(r Runner, writes []mux.OptionWrite) error {
 	if len(writes) == 0 {
 		return nil
 	}
 	if !Available() {
-		return ErrNotAvailable
+		return mux.ErrNotAvailable
 	}
 
 	var args []string
@@ -900,7 +705,7 @@ func ApplyOptions(r Runner, writes []OptionWrite) error {
 		if i > 0 {
 			args = append(args, ";")
 		}
-		args = append(args, w.args()...)
+		args = append(args, optionArgs(w)...)
 	}
 
 	if _, err := r.Run(args...); err != nil {
@@ -912,7 +717,7 @@ func ApplyOptions(r Runner, writes []OptionWrite) error {
 // DisplayMessage shows text in client's status line.
 func DisplayMessage(r Runner, client, text string) error {
 	if !Available() {
-		return ErrNotAvailable
+		return mux.ErrNotAvailable
 	}
 
 	args := []string{"display-message"}
@@ -931,7 +736,7 @@ func DisplayMessage(r Runner, client, text string) error {
 // wrapped lines joined. target is a pane id or a window id (its active pane).
 func CapturePane(r Runner, target string, lines int) (string, error) {
 	if !Available() {
-		return "", ErrNotAvailable
+		return "", mux.ErrNotAvailable
 	}
 
 	out, err := r.Run("capture-pane", "-p", "-J", "-S", "-"+strconv.Itoa(lines), "-t", target)

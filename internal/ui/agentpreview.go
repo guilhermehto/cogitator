@@ -9,8 +9,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/guilhermehto/cogitator/internal/agents"
+	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 )
 
 const (
@@ -32,11 +32,11 @@ type (
 	}
 )
 
-// agentPreview shows the tail of the cursor agent's tmux pane. Captures are
+// agentPreview shows the tail of the cursor agent's multiplexer pane. Captures are
 // debounced while the cursor moves and repeat while it rests, so the preview
 // reads live without a capture per keystroke.
 type agentPreview struct {
-	runner tmuxctl.Runner
+	backend mux.Backend
 	// want is the agent the cursor settled on; "" while hidden. seq
 	// invalidates debounce and refresh ticks from earlier positions.
 	want     string
@@ -115,11 +115,11 @@ func (p *agentPreview) start(current agents.Agent) tea.Cmd {
 	}
 
 	p.inFlight = true
-	runner := p.runner
+	backend := p.backend
 	id := current.ID
 
 	return func() tea.Msg {
-		text, err := tmuxctl.CapturePane(runner, target, previewCapture)
+		text, err := backend.Capture(target, previewCapture)
 
 		return previewCaptureMsg{agentID: id, text: text, err: err}
 	}
@@ -181,10 +181,10 @@ func previewStatusLine(a agents.Agent, now time.Time) string {
 
 func noPaneText(a agents.Agent) string {
 	if a.Kind == agents.KindStray {
-		return "no tmux pane"
+		return "no multiplexer pane"
 	}
 
-	return "no tmux window — enter resumes it"
+	return "no window — enter resumes it"
 }
 
 // previewReason says why the agent is where it is. It comes from Attention,

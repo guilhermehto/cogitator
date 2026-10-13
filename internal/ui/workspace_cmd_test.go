@@ -461,7 +461,7 @@ func TestWorkspaceCreate_SessionNamePromptEscCancelsFlow(t *testing.T) {
 func TestWorkspaceCreate_HarnessChooserEnterDispatchesAssembleAndShowsSpinnerRow(t *testing.T) {
 	setWsTestXDG(t)
 	store := &fakeStoreOps{loadErr: errors.New("workspace \"payments\" does not exist")}
-	tmuxFake := &fakeTmuxOps{}
+	tmuxFake := &fakeMux{}
 	m := model{
 		width: 120, height: 40, input: newTestInput(),
 		prompt:               promptChooseHarness,
@@ -475,7 +475,7 @@ func TestWorkspaceCreate_HarnessChooserEnterDispatchesAssembleAndShowsSpinnerRow
 		// somewhere to attach.
 		wsStatuses: []workspace.WorkspaceStatus{wsMemberWorkspace("payments", "/repo/a")},
 		store:      store,
-		tmux:       tmuxFake,
+		mux:        tmuxFake,
 	}
 
 	updated, cmd := m.Update(keyMsg("enter"))
@@ -674,13 +674,13 @@ func TestWorkspaceCreate_EndToEnd_OneWorktreePerMemberOnOneBranch(t *testing.T) 
 	}
 
 	storeOps := realStoreOps{store: store}
-	tmuxFake := &fakeTmuxOps{}
+	tmuxFake := &fakeMux{}
 
 	m := model{
 		width: 120, height: 40, view: viewWorkspaces, input: newTestInput(),
 		wsStatuses: []workspace.WorkspaceStatus{wsMemberWorkspace("payments", repoA, repoB)},
 		store:      storeOps,
-		tmux:       tmuxFake,
+		mux:        tmuxFake,
 	}
 
 	// 'n' -> session-name prompt.

@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/guilhermehto/cogitator/internal/mux"
 )
 
 // ---- helpers ----------------------------------------------------------------
@@ -87,14 +89,14 @@ func TestAvailable_FalseWhenTMUXUnset(t *testing.T) {
 	}
 }
 
-// ---- ErrNotAvailable gate ---------------------------------------------------
+// ---- mux.ErrNotAvailable gate ---------------------------------------------------
 
 func TestEnsureWindow_NotAvailable(t *testing.T) {
 	withoutTMUX(t)
 	r := &fakeRunner{}
-	_, err := EnsureWindowWith(r, "/tmp/x", "r/x", []string{"sleep", "60"})
-	if !errors.Is(err, ErrNotAvailable) {
-		t.Errorf("EnsureWindowWith: got %v, want ErrNotAvailable", err)
+	_, err := EnsureWindowModeWith(r, "/tmp/x", "r/x", []string{"sleep", "60"}, mux.ModeWindow)
+	if !errors.Is(err, mux.ErrNotAvailable) {
+		t.Errorf("EnsureWindowWith: got %v, want mux.ErrNotAvailable", err)
 	}
 	if len(r.calls) != 0 {
 		t.Errorf("expected no tmux calls when not available, got %d", len(r.calls))
@@ -105,8 +107,8 @@ func TestFindWindowByDir_NotAvailable(t *testing.T) {
 	withoutTMUX(t)
 	r := &fakeRunner{}
 	_, err := FindWindowByDirWith(r, "/tmp/x")
-	if !errors.Is(err, ErrNotAvailable) {
-		t.Errorf("FindWindowByDirWith: got %v, want ErrNotAvailable", err)
+	if !errors.Is(err, mux.ErrNotAvailable) {
+		t.Errorf("FindWindowByDirWith: got %v, want mux.ErrNotAvailable", err)
 	}
 }
 
@@ -114,8 +116,8 @@ func TestWindowProcessAlive_NotAvailable(t *testing.T) {
 	withoutTMUX(t)
 	r := &fakeRunner{}
 	_, err := WindowProcessAliveWith(r, "main:1")
-	if !errors.Is(err, ErrNotAvailable) {
-		t.Errorf("WindowProcessAliveWith: got %v, want ErrNotAvailable", err)
+	if !errors.Is(err, mux.ErrNotAvailable) {
+		t.Errorf("WindowProcessAliveWith: got %v, want mux.ErrNotAvailable", err)
 	}
 }
 
@@ -123,17 +125,17 @@ func TestRelaunchInWindow_NotAvailable(t *testing.T) {
 	withoutTMUX(t)
 	r := &fakeRunner{}
 	err := RelaunchInWindowWith(r, "main:1", []string{"sleep", "60"})
-	if !errors.Is(err, ErrNotAvailable) {
-		t.Errorf("RelaunchInWindowWith: got %v, want ErrNotAvailable", err)
+	if !errors.Is(err, mux.ErrNotAvailable) {
+		t.Errorf("RelaunchInWindowWith: got %v, want mux.ErrNotAvailable", err)
 	}
 }
 
 func TestSelect_NotAvailable(t *testing.T) {
 	withoutTMUX(t)
 	r := &fakeRunner{}
-	err := SelectWith(r, "main:1")
-	if !errors.Is(err, ErrNotAvailable) {
-		t.Errorf("SelectWith: got %v, want ErrNotAvailable", err)
+	err := SelectForClientWith(r, "main:1", "")
+	if !errors.Is(err, mux.ErrNotAvailable) {
+		t.Errorf("SelectWith: got %v, want mux.ErrNotAvailable", err)
 	}
 }
 
@@ -168,8 +170,8 @@ func TestFindWindowByDir_NotFound(t *testing.T) {
 	r.push(listOut, nil)
 
 	_, err := FindWindowByDirWith(r, "/tmp/wt")
-	if !errors.Is(err, ErrWindowNotFound) {
-		t.Errorf("FindWindowByDirWith: got %v, want ErrWindowNotFound", err)
+	if !errors.Is(err, mux.ErrWindowNotFound) {
+		t.Errorf("FindWindowByDirWith: got %v, want mux.ErrWindowNotFound", err)
 	}
 }
 
@@ -180,8 +182,8 @@ func TestFindWindowByDir_EmptyOutput(t *testing.T) {
 	r.push("", nil)
 
 	_, err := FindWindowByDirWith(r, "/tmp/wt")
-	if !errors.Is(err, ErrWindowNotFound) {
-		t.Errorf("FindWindowByDirWith empty output: got %v, want ErrWindowNotFound", err)
+	if !errors.Is(err, mux.ErrWindowNotFound) {
+		t.Errorf("FindWindowByDirWith empty output: got %v, want mux.ErrWindowNotFound", err)
 	}
 }
 
@@ -217,7 +219,7 @@ func TestEnsureWindow_CreatesNewWindow(t *testing.T) {
 	// set-option @cog_dir: no output needed.
 	r.push("", nil)
 
-	target, err := EnsureWindowWith(r, "/private/tmp/newwt", "repo/branch", []string{"sleep", "60"})
+	target, err := EnsureWindowModeWith(r, "/private/tmp/newwt", "repo/branch", []string{"sleep", "60"}, mux.ModeWindow)
 	if err != nil {
 		t.Fatalf("EnsureWindowWith: unexpected error: %v", err)
 	}
@@ -261,7 +263,7 @@ func TestEnsureWindow_DeduplicatesByDir(t *testing.T) {
 	r := &fakeRunner{}
 	r.push(listOut, nil)
 
-	target, err := EnsureWindowWith(r, "/private/tmp/existingwt", "repo/branch", []string{"sleep", "60"})
+	target, err := EnsureWindowModeWith(r, "/private/tmp/existingwt", "repo/branch", []string{"sleep", "60"}, mux.ModeWindow)
 	if err != nil {
 		t.Fatalf("EnsureWindowWith: unexpected error: %v", err)
 	}
@@ -282,7 +284,7 @@ func TestEnsureWindow_EmptyArgvError(t *testing.T) {
 	// FindWindowByDir: no existing window.
 	r.push("", nil)
 
-	_, err := EnsureWindowWith(r, "/private/tmp/wt", "repo/branch", nil)
+	_, err := EnsureWindowModeWith(r, "/private/tmp/wt", "repo/branch", nil, mux.ModeWindow)
 	if err == nil {
 		t.Error("expected error for empty argv, got nil")
 	}
@@ -303,7 +305,7 @@ func TestEnsureWindowMode_CreatesNewSession(t *testing.T) {
 	// send-keys harness command.
 	r.push("", nil)
 
-	target, err := EnsureWindowModeWith(r, "/private/tmp/newwt", "repo/branch", []string{"sleep", "60"}, ModeSession)
+	target, err := EnsureWindowModeWith(r, "/private/tmp/newwt", "repo/branch", []string{"sleep", "60"}, mux.ModeSession)
 	if err != nil {
 		t.Fatalf("EnsureWindowModeWith: unexpected error: %v", err)
 	}
@@ -340,7 +342,7 @@ func TestEnsureWindowMode_DuplicateSessionReusesExistingSession(t *testing.T) {
 	// Fallback resolves the existing session to one of its windows.
 	r.push("main:0\nrepo/branch:2\nrepo/branch:3\n", nil)
 
-	target, err := EnsureWindowModeWith(r, "/private/tmp/newwt", "repo/branch", []string{"sleep", "60"}, ModeSession)
+	target, err := EnsureWindowModeWith(r, "/private/tmp/newwt", "repo/branch", []string{"sleep", "60"}, mux.ModeSession)
 	if err != nil {
 		t.Fatalf("EnsureWindowModeWith: unexpected error: %v", err)
 	}
@@ -365,7 +367,7 @@ func TestEnsureWindowMode_SessionSanitizesName(t *testing.T) {
 	r.push("", nil)                     // @cog_dir
 	r.push("", nil)                     // send-keys harness command
 
-	_, err := EnsureWindowModeWith(r, "/private/tmp/wt", "my.repo:1.2/feat", []string{"sleep", "60"}, ModeSession)
+	_, err := EnsureWindowModeWith(r, "/private/tmp/wt", "my.repo:1.2/feat", []string{"sleep", "60"}, mux.ModeSession)
 	if err != nil {
 		t.Fatalf("EnsureWindowModeWith: unexpected error: %v", err)
 	}
@@ -392,7 +394,7 @@ func TestEnsureWindowMode_SessionEmptyArgvError(t *testing.T) {
 	r := &fakeRunner{}
 	r.push("", nil) // dedup: no window
 
-	_, err := EnsureWindowModeWith(r, "/private/tmp/wt", "repo/branch", nil, ModeSession)
+	_, err := EnsureWindowModeWith(r, "/private/tmp/wt", "repo/branch", nil, mux.ModeSession)
 	if err == nil {
 		t.Error("expected error for empty argv, got nil")
 	}
@@ -430,7 +432,7 @@ func TestEnsureWindowMode_SessionQuotesHarnessCommand(t *testing.T) {
 	r.push("", nil)              // @cog_dir
 	r.push("", nil)              // send-keys
 
-	_, err := EnsureWindowModeWith(r, "/private/tmp/my wt", "repo/feat", []string{"opencode", "--mdns", "/private/tmp/my wt"}, ModeSession)
+	_, err := EnsureWindowModeWith(r, "/private/tmp/my wt", "repo/feat", []string{"opencode", "--mdns", "/private/tmp/my wt"}, mux.ModeSession)
 	if err != nil {
 		t.Fatalf("EnsureWindowModeWith: unexpected error: %v", err)
 	}
@@ -507,7 +509,7 @@ func TestSelect_BuildsCorrectArgv(t *testing.T) {
 	r.push("", nil) // select-window
 	r.push("", nil) // switch-client
 
-	err := SelectWith(r, "main:5")
+	err := SelectForClientWith(r, "main:5", "")
 	if err != nil {
 		t.Fatalf("SelectWith: unexpected error: %v", err)
 	}
@@ -524,13 +526,13 @@ func TestSelectSession_SwitchesToSessionOnly(t *testing.T) {
 	r := &fakeRunner{}
 	r.push("", nil) // switch-client
 
-	err := SelectSessionWith(r, "repo-a:2")
+	err := SelectSessionForClientWith(r, "repo-a:2", "")
 	if err != nil {
 		t.Fatalf("SelectSessionWith: unexpected error: %v", err)
 	}
 
 	// Only switch-client, targeting the bare session name so tmux restores
-	// the session's last-active window (not the index in the Target).
+	// the session's last-active window (not the index in the mux.Target).
 	if len(r.calls) != 1 {
 		t.Fatalf("expected 1 call (switch-client), got %d: %v", len(r.calls), r.calls)
 	}
@@ -540,13 +542,13 @@ func TestSelectSession_SwitchesToSessionOnly(t *testing.T) {
 func TestSelectSession_NotAvailable(t *testing.T) {
 	withoutTMUX(t)
 	r := &fakeRunner{}
-	if err := SelectSessionWith(r, "repo-a:0"); !errors.Is(err, ErrNotAvailable) {
-		t.Errorf("SelectSessionWith: got %v, want ErrNotAvailable", err)
+	if err := SelectSessionForClientWith(r, "repo-a:0", ""); !errors.Is(err, mux.ErrNotAvailable) {
+		t.Errorf("SelectSessionWith: got %v, want mux.ErrNotAvailable", err)
 	}
 }
 
 func TestSessionOf(t *testing.T) {
-	cases := map[Target]string{
+	cases := map[mux.Target]string{
 		"repo-a:2":     "repo-a",
 		"my/repo:0":    "my/repo",
 		"weird:1:2":    "weird:1",
@@ -566,7 +568,7 @@ func TestSelect_SwitchClientErrorPropagates(t *testing.T) {
 	r.push("", nil)                              // select-window succeeds
 	r.push("", errors.New("can't find session")) // switch-client fails
 
-	err := SelectWith(r, "main:5")
+	err := SelectForClientWith(r, "main:5", "")
 	if err == nil {
 		t.Fatal("expected error when switch-client fails, got nil")
 	}
@@ -610,7 +612,7 @@ func TestSelect_RunnerError(t *testing.T) {
 	r := &fakeRunner{}
 	r.push("", errors.New("no such window"))
 
-	err := SelectWith(r, "main:99")
+	err := SelectForClientWith(r, "main:99", "")
 	if err == nil {
 		t.Error("expected error when runner fails, got nil")
 	}
@@ -621,8 +623,8 @@ func TestSelect_RunnerError(t *testing.T) {
 func TestKillWindow_NotAvailable(t *testing.T) {
 	withoutTMUX(t)
 	r := &fakeRunner{}
-	if err := KillWindowWith(r, "main:1"); !errors.Is(err, ErrNotAvailable) {
-		t.Errorf("KillWindowWith: got %v, want ErrNotAvailable", err)
+	if err := KillWindowWith(r, "main:1"); !errors.Is(err, mux.ErrNotAvailable) {
+		t.Errorf("KillWindowWith: got %v, want mux.ErrNotAvailable", err)
 	}
 	if len(r.calls) != 0 {
 		t.Errorf("expected no tmux calls when not available, got %d", len(r.calls))
@@ -657,8 +659,8 @@ func TestKillWindow_RunnerError(t *testing.T) {
 func TestKillSession_NotAvailable(t *testing.T) {
 	withoutTMUX(t)
 	r := &fakeRunner{}
-	if err := KillSessionWith(r, "repo-a:0"); !errors.Is(err, ErrNotAvailable) {
-		t.Errorf("KillSessionWith: got %v, want ErrNotAvailable", err)
+	if err := KillSessionWith(r, "repo-a:0"); !errors.Is(err, mux.ErrNotAvailable) {
+		t.Errorf("KillSessionWith: got %v, want mux.ErrNotAvailable", err)
 	}
 	if len(r.calls) != 0 {
 		t.Errorf("expected no tmux calls when not available, got %d", len(r.calls))
@@ -694,8 +696,8 @@ func TestListCogDirs_NotAvailable(t *testing.T) {
 	withoutTMUX(t)
 	r := &fakeRunner{}
 	_, err := ListCogDirsWith(r)
-	if !errors.Is(err, ErrNotAvailable) {
-		t.Errorf("ListCogDirsWith: got %v, want ErrNotAvailable", err)
+	if !errors.Is(err, mux.ErrNotAvailable) {
+		t.Errorf("ListCogDirsWith: got %v, want mux.ErrNotAvailable", err)
 	}
 	if len(r.calls) != 0 {
 		t.Errorf("expected no tmux calls when not available, got %d", len(r.calls))
@@ -813,7 +815,7 @@ func TestApplyOptions_ChainsWritesIntoOneCall(t *testing.T) {
 	withTMUX(t)
 	f := &fakeRunner{}
 
-	err := ApplyOptions(f, []OptionWrite{
+	err := ApplyOptions(f, []mux.OptionWrite{
 		{Target: "@3", Name: "@cog_status", Value: "busy"},
 		{Target: "@4", Name: "@cog_reason", Unset: true},
 		{Global: true, Name: "@cog_count", Value: "2"},
@@ -854,9 +856,9 @@ func TestListPanes_ParsesPathsWithSpacesAndEmptyOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := Pane{
+	want := mux.Pane{
 		PaneID: "%1", WindowID: "@2", SessionID: "$3", SessionName: "main",
-		Path: "/no/such dir/with space", Command: "opencode",
+		Cwd: "/no/such dir/with space", Command: "opencode",
 		CogDir: "/repo", CogStatus: "busy", CogReason: "needs input", CogSince: "1700000000",
 	}
 	if len(panes) != 2 || panes[0] != want {
@@ -877,7 +879,7 @@ func TestListClientFocus_ParsesClients(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := ClientFocus{Client: "/dev/ttys003", SessionID: "$1", WindowID: "@2", ActivityUnixSecs: 1700000005}
+	want := mux.ClientFocus{Client: "/dev/ttys003", SessionID: "$1", WindowID: "@2", ActivityUnixSecs: 1700000005}
 	if len(clients) != 1 || clients[0] != want {
 		t.Fatalf("got %+v", clients)
 	}
@@ -913,16 +915,16 @@ func TestNewFunctions_NotAvailableOutsideTmux(t *testing.T) {
 	withoutTMUX(t)
 	f := &fakeRunner{}
 
-	if _, err := ListPanes(f); !errors.Is(err, ErrNotAvailable) {
+	if _, err := ListPanes(f); !errors.Is(err, mux.ErrNotAvailable) {
 		t.Errorf("ListPanes: %v", err)
 	}
-	if _, err := ListClientFocus(f); !errors.Is(err, ErrNotAvailable) {
+	if _, err := ListClientFocus(f); !errors.Is(err, mux.ErrNotAvailable) {
 		t.Errorf("ListClientFocus: %v", err)
 	}
-	if err := SelectForClientWith(f, "a:1", "c"); !errors.Is(err, ErrNotAvailable) {
+	if err := SelectForClientWith(f, "a:1", "c"); !errors.Is(err, mux.ErrNotAvailable) {
 		t.Errorf("SelectForClient: %v", err)
 	}
-	if err := DisplayMessage(f, "c", "x"); !errors.Is(err, ErrNotAvailable) {
+	if err := DisplayMessage(f, "c", "x"); !errors.Is(err, mux.ErrNotAvailable) {
 		t.Errorf("DisplayMessage: %v", err)
 	}
 	if len(f.calls) != 0 {
@@ -948,7 +950,7 @@ func TestCapturePane_RequestsTailOfTarget(t *testing.T) {
 func TestCapturePane_NotAvailableOutsideTmux(t *testing.T) {
 	withoutTMUX(t)
 
-	if _, err := CapturePane(&fakeRunner{}, "%7", 30); !errors.Is(err, ErrNotAvailable) {
-		t.Errorf("err = %v, want ErrNotAvailable", err)
+	if _, err := CapturePane(&fakeRunner{}, "%7", 30); !errors.Is(err, mux.ErrNotAvailable) {
+		t.Errorf("err = %v, want mux.ErrNotAvailable", err)
 	}
 }

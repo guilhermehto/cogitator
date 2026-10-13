@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
@@ -57,34 +58,20 @@ type Agent struct {
 	LastActivity time.Time
 	Group        Group
 
-	WindowID      string
-	PaneID        string
-	TmuxSessionID string
+	WindowID     string
+	PaneID       string
+	MuxSessionID string
 	// SessionOwned is true when the agent's tmux session holds no other
 	// @cog_dir window, so a client sitting in that session counts as being at
 	// this agent even when its active window is a sibling.
 	SessionOwned bool
 }
 
-// Pane is one tmux pane with the window options cogitator tags windows with.
-type Pane struct {
-	PaneID      string
-	WindowID    string
-	SessionID   string
-	SessionName string
-	Cwd         string
-	Command     string
-	CogDir      string
-	CogStatus   string
-	CogReason   string
-	CogSince    string
-}
-
 type Input struct {
 	Rows          []settings.Row
 	Workspaces    []workspace.WorkspaceStatus
 	Live          []state.SessionView
-	Panes         []Pane
+	Panes         []mux.Pane
 	WorkspaceRoot string
 	Now           time.Time
 	RecentWindow  time.Duration
@@ -122,7 +109,7 @@ func AgentAt(list []Agent, windowID, sessionID string) (string, bool) {
 		return "", false
 	}
 	for _, a := range list {
-		if a.SessionOwned && a.TmuxSessionID == sessionID {
+		if a.SessionOwned && a.MuxSessionID == sessionID {
 			return a.ID, true
 		}
 	}
@@ -383,16 +370,16 @@ func sortAgents(list []Agent) {
 }
 
 type paneIndex struct {
-	byCogDir map[string][]Pane
-	byCwd    map[string][]Pane
+	byCogDir map[string][]mux.Pane
+	byCwd    map[string][]mux.Pane
 	// taggedWindows maps tmux session id to the set of its @cog_dir windows.
 	taggedWindows map[string]map[string]bool
 }
 
-func indexPanes(panes []Pane) paneIndex {
+func indexPanes(panes []mux.Pane) paneIndex {
 	ix := paneIndex{
-		byCogDir:      map[string][]Pane{},
-		byCwd:         map[string][]Pane{},
+		byCogDir:      map[string][]mux.Pane{},
+		byCwd:         map[string][]mux.Pane{},
 		taggedWindows: map[string]map[string]bool{},
 	}
 	for _, p := range panes {
@@ -413,19 +400,19 @@ func indexPanes(panes []Pane) paneIndex {
 }
 
 // attach joins the best of candidates onto a and reports whether one existed.
-func (ix paneIndex) attach(a *Agent, candidates []Pane) bool {
+func (ix paneIndex) attach(a *Agent, candidates []mux.Pane) bool {
 	p, ok := pickPane(candidates, a.Harness)
 	if !ok {
 		return false
 	}
 	a.WindowID = p.WindowID
 	a.PaneID = p.PaneID
-	a.TmuxSessionID = p.SessionID
+	a.MuxSessionID = p.SessionID
 	a.SessionOwned = ix.ownsSession(p)
 	return true
 }
 
-func (ix paneIndex) ownsSession(p Pane) bool {
+func (ix paneIndex) ownsSession(p mux.Pane) bool {
 	for windowID := range ix.taggedWindows[p.SessionID] {
 		if windowID != p.WindowID {
 			return false
@@ -435,8 +422,8 @@ func (ix paneIndex) ownsSession(p Pane) bool {
 }
 
 // pickPane prefers a pane running the harness, then the lowest pane id.
-func pickPane(candidates []Pane, harnessName string) (Pane, bool) {
-	var best Pane
+func pickPane(candidates []mux.Pane, harnessName string) (mux.Pane, bool) {
+	var best mux.Pane
 	found := false
 	for _, p := range candidates {
 		if !found || betterPane(p, best, harnessName) {
@@ -446,7 +433,7 @@ func pickPane(candidates []Pane, harnessName string) (Pane, bool) {
 	return best, found
 }
 
-func betterPane(p, best Pane, harnessName string) bool {
+func betterPane(p, best mux.Pane, harnessName string) bool {
 	pRuns, bestRuns := runsHarness(p, harnessName), runsHarness(best, harnessName)
 	if pRuns != bestRuns {
 		return pRuns
@@ -454,7 +441,7 @@ func betterPane(p, best Pane, harnessName string) bool {
 	return paneNumber(p.PaneID) < paneNumber(best.PaneID)
 }
 
-func runsHarness(p Pane, harnessName string) bool {
+func runsHarness(p mux.Pane, harnessName string) bool {
 	if harnessName == "" {
 		return false
 	}

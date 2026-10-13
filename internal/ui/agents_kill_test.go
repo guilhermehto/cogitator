@@ -5,26 +5,25 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/guilhermehto/cogitator/internal/agents"
-	"github.com/guilhermehto/cogitator/internal/tmuxctl"
+	"github.com/guilhermehto/cogitator/internal/mux"
 )
 
 // windowedAgentModel is the Agents tab with its single agent running in tmux
 // window @4.
-func windowedAgentModel(t *testing.T, tmux *fakeTmuxOps) model {
+func windowedAgentModel(t *testing.T, tmux *fakeMux) model {
 	t.Helper()
 
 	m := agentsTabModel(t, tmux, &recordingViewMarker{})
 	m.view = viewAgents
 	dir := m.agents[0].ID
-	m.panes = []agents.Pane{{PaneID: "%3", WindowID: "@4", SessionID: "$1", Cwd: dir, CogDir: dir, Command: "omp"}}
+	m.panes = []mux.Pane{{PaneID: "%3", WindowID: "@4", SessionID: "$1", Cwd: dir, CogDir: dir, Command: "omp"}}
 	m.refreshAgents()
 
 	return m
 }
 
 func TestAgentsKillConfirmedClosesWindowAndDismissesAgent(t *testing.T) {
-	tmux := &fakeTmuxOps{available: true}
+	tmux := &fakeMux{available: true}
 	m := windowedAgentModel(t, tmux)
 
 	m, cmd := pressKey(t, m, "K")
@@ -42,7 +41,7 @@ func TestAgentsKillConfirmedClosesWindowAndDismissesAgent(t *testing.T) {
 	updated, _ := m.Update(cmd())
 	m = updated.(model)
 
-	if len(tmux.killWindowCalls) != 1 || tmux.killWindowCalls[0] != tmuxctl.Target("@4") {
+	if len(tmux.killWindowCalls) != 1 || tmux.killWindowCalls[0] != mux.Target("@4") {
 		t.Fatalf("killWindowCalls = %v, want [@4]", tmux.killWindowCalls)
 	}
 	if m.prompt != promptIdle {
@@ -57,7 +56,7 @@ func TestAgentsKillConfirmedClosesWindowAndDismissesAgent(t *testing.T) {
 }
 
 func TestAgentsKillCancelledByAnyOtherKey(t *testing.T) {
-	tmux := &fakeTmuxOps{available: true}
+	tmux := &fakeMux{available: true}
 	m := windowedAgentModel(t, tmux)
 
 	m, _ = pressKey(t, m, "K")
@@ -72,8 +71,8 @@ func TestAgentsKillCancelledByAnyOtherKey(t *testing.T) {
 }
 
 func TestAgentsKillRefusesCogitatorsOwnWindow(t *testing.T) {
-	m := windowedAgentModel(t, &fakeTmuxOps{available: true})
-	m.panes = append(m.panes, agents.Pane{PaneID: "%9", WindowID: "@4", SessionID: "$1", Command: "cogitator"})
+	m := windowedAgentModel(t, &fakeMux{available: true})
+	m.panes = append(m.panes, mux.Pane{PaneID: "%9", WindowID: "@4", SessionID: "$1", Command: "cogitator"})
 	m.selfPaneID = "%9"
 	m.refreshAgents()
 
@@ -89,7 +88,7 @@ func TestAgentsKillRefusesCogitatorsOwnWindow(t *testing.T) {
 
 func TestAgentsKillDismissesAgentWithoutWindow(t *testing.T) {
 	marker := &recordingViewMarker{}
-	m := agentsTabModel(t, &fakeTmuxOps{available: true}, marker)
+	m := agentsTabModel(t, &fakeMux{available: true}, marker)
 	m.view = viewAgents
 	sessionID := m.agents[0].SessionID
 
@@ -107,7 +106,7 @@ func TestAgentsKillDismissesAgentWithoutWindow(t *testing.T) {
 }
 
 func TestAgentsKillFailureShowsHint(t *testing.T) {
-	tmux := &fakeTmuxOps{available: true, killWindowErr: errors.New("can't find window: @4")}
+	tmux := &fakeMux{available: true, killWindowErr: errors.New("can't find window: @4")}
 	m := windowedAgentModel(t, tmux)
 
 	m, _ = pressKey(t, m, "K")

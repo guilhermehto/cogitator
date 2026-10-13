@@ -9,7 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/guilhermehto/cogitator/internal/agents"
-	"github.com/guilhermehto/cogitator/internal/tmuxctl"
+	"github.com/guilhermehto/cogitator/internal/mux"
 )
 
 const shutdownClearTimeout = 2 * time.Second
@@ -21,8 +21,8 @@ type focusTickMsg struct{}
 // focusPollMsg carries one tmux read: panes, client focus and the global
 // @cog_* counters. ok is false when any of the reads failed.
 type focusPollMsg struct {
-	panes   []agents.Pane
-	clients []tmuxctl.ClientFocus
+	panes   []mux.Pane
+	clients []mux.ClientFocus
 	globals map[string]string
 	ok      bool
 }
@@ -39,49 +39,58 @@ func focusTickCmd(every time.Duration) tea.Cmd {
 	return tea.Tick(every, func(time.Time) tea.Msg { return focusTickMsg{} })
 }
 
-func pollTmuxCmd(r tmuxctl.Runner) tea.Cmd {
+// badgeBackend is a backend that can also publish @cog_* badges.
+type badgeBackend interface {
+	mux.Backend
+	mux.Badger
+}
+
+func pollBadgesCmd(b badgeBackend) tea.Cmd {
 	return func() tea.Msg {
-		panes, err := tmuxctl.ListPanes(r)
+		panes, err := b.ListPanes()
 		if err != nil {
 			return focusPollMsg{}
 		}
 
-		clients, err := tmuxctl.ListClientFocus(r)
+		clients, err := b.ListClientFocus()
 		if err != nil {
 			return focusPollMsg{}
 		}
 
-		globals, err := tmuxctl.ReadGlobalOptions(r, globalBadgeOptions)
+		globals, err := b.ReadGlobalOptions(globalBadgeOptions)
 		if err != nil {
 			return focusPollMsg{}
 		}
 
-		return focusPollMsg{panes: toAgentPanes(panes), clients: clients, globals: globals, ok: true}
+		return focusPollMsg{panes: panes, clients: clients, globals: globals, ok: true}
 	}
 }
 
-func applyBadgesCmd(r tmuxctl.Runner, writes []tmuxctl.OptionWrite) tea.Cmd {
+func applyBadgesCmd(b mux.Badger, writes []mux.OptionWrite) tea.Cmd {
 	return func() tea.Msg {
-		return badgeWriteMsg{err: tmuxctl.ApplyOptions(r, writes)}
+		return badgeWriteMsg{err: b.ApplyOptions(writes)}
 	}
 }
 
-// attachBadges enables the focus poll that publishes @cog_* options and
-// clears Done agents the user visited and left, and the Agents tab preview.
-func (m *model) attachBadges(r tmuxctl.Runner) {
-	m.badgeRunner = r
-	m.agentPreview.runner = r
+// attachBadges enables the Agents tab preview and, when the backend publishes
+// badges, the focus poll that publishes @cog_* options and clears Done agents
+// the user visited and left.
+func (m *model) attachBadges(b mux.Backend) {
+	m.agentPreview.backend = b
+	if badges, ok := b.(badgeBackend); ok {
+		m.badges = badges
+	}
 }
 
 func (m *model) handleFocusTick() tea.Cmd {
 	next := focusTickCmd(m.cfg.FocusPollEvery)
-	if m.badgeRunner == nil || m.focusPolling {
+	if m.badges == nil || m.focusPolling {
 		return next
 	}
 
 	m.focusPolling = true
 
-	return tea.Batch(next, pollTmuxCmd(m.badgeRunner), m.syncAgentPreview())
+	return tea.Batch(next, pollBadgesCmd(m.badges), m.syncAgentPreview())
 }
 
 func (m *model) applyFocusPoll(msg focusPollMsg) tea.Cmd {
@@ -104,23 +113,23 @@ func (m *model) applyFocusPoll(msg focusPollMsg) tea.Cmd {
 		return nil
 	}
 
-	return applyBadgesCmd(m.badgeRunner, writes)
+	return applyBadgesCmd(m.badges, writes)
 }
 
 // clearBadges removes every @cog_* option cogitator owns, giving up after
 // timeout so a wedged tmux server cannot hold up shutdown.
-func clearBadges(r tmuxctl.Runner, timeout time.Duration) {
+func clearBadges(b badgeBackend, timeout time.Duration) {
 	done := make(chan struct{})
 
 	go func() {
 		defer close(done)
 
-		var panes []agents.Pane
-		if listed, err := tmuxctl.ListPanes(r); err == nil {
-			panes = toAgentPanes(listed)
+		var panes []mux.Pane
+		if listed, err := b.ListPanes(); err == nil {
+			panes = listed
 		}
 
-		_ = tmuxctl.ApplyOptions(r, agents.ClearAll(panes, nil))
+		_ = b.ApplyOptions(agents.ClearAll(panes, nil))
 	}()
 
 	select {
@@ -152,7 +161,7 @@ func quitOnHangup(p *tea.Program) (stop func()) {
 }
 
 func (m model) initialFocusTick() tea.Cmd {
-	if m.badgeRunner == nil {
+	if m.badges == nil {
 		return nil
 	}
 

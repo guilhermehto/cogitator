@@ -112,9 +112,9 @@ func badgeTestModel(t *testing.T, attn state.Attention, server *fakeTmuxServer) 
 	t.Setenv("TMUX", "/tmp/tmux-test,1,0")
 
 	marker := &recordingViewMarker{}
-	m := feedTestModel(&fakeTmuxOps{available: true}, nil)
+	m := feedTestModel(&fakeMux{available: true}, nil)
 	m.viewMarker = marker
-	m.attachBadges(server)
+	m.attachBadges(tmuxctl.Backend{Runner: server})
 
 	return rebuildAgents(t, m, []settings.Row{worktreeRow(server.dir, settings.StateRunning, attn)}), marker
 }
@@ -263,7 +263,7 @@ func TestClearBadgesRemovesWindowAndGlobalOptions(t *testing.T) {
 	server.globals["@cog_done"] = "1"
 	server.globals["@cog_needs"] = "2"
 
-	clearBadges(server, time.Second)
+	clearBadges(tmuxctl.Backend{Runner: server}, time.Second)
 
 	if len(server.window) != 0 || len(server.globals) != 0 {
 		t.Fatalf("leftover options: window=%v globals=%v", server.window, server.globals)
@@ -281,7 +281,7 @@ func TestClearBadgesGivesUpWhenTmuxHangs(t *testing.T) {
 	})
 
 	start := time.Now()
-	clearBadges(hung, 20*time.Millisecond)
+	clearBadges(tmuxctl.Backend{Runner: hung}, 20*time.Millisecond)
 
 	if time.Since(start) > time.Second {
 		t.Fatal("clearBadges did not honour its timeout")

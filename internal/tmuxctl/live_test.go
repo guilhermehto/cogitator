@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/guilhermehto/cogitator/internal/mux"
 )
 
 // TestLiveLoop exercises the full EnsureWindow → FindWindowByDir → kill →
@@ -25,8 +27,9 @@ func TestLiveLoop(t *testing.T) {
 
 	dir := "/tmp/cogitator-live-test"
 
+	b := Backend{}
 	t.Log("=== EnsureWindow ===")
-	target, err := EnsureWindow(dir, "r/x", []string{"sleep", "60"})
+	target, err := b.EnsureWindow(dir, "r/x", []string{"sleep", "60"}, mux.ModeWindow)
 	if err != nil {
 		t.Fatalf("EnsureWindow: %v", err)
 	}
@@ -38,7 +41,7 @@ func TestLiveLoop(t *testing.T) {
 	})
 
 	t.Log("=== FindWindowByDir ===")
-	found, err := FindWindowByDir(dir)
+	found, err := b.FindWindowByDir(dir)
 	if err != nil {
 		t.Fatalf("FindWindowByDir: %v", err)
 	}
@@ -48,7 +51,7 @@ func TestLiveLoop(t *testing.T) {
 	}
 
 	t.Log("=== EnsureWindow dedup ===")
-	target2, err := EnsureWindow(dir, "r/x", []string{"sleep", "60"})
+	target2, err := b.EnsureWindow(dir, "r/x", []string{"sleep", "60"}, mux.ModeWindow)
 	if err != nil {
 		t.Fatalf("EnsureWindow dedup: %v", err)
 	}
@@ -58,7 +61,7 @@ func TestLiveLoop(t *testing.T) {
 	t.Logf("Dedup OK: same target %s", target2)
 
 	t.Log("=== WindowProcessAlive (before kill) ===")
-	alive, err := WindowProcessAlive(target)
+	alive, err := b.WindowProcessAlive(target)
 	if err != nil {
 		t.Fatalf("WindowProcessAlive: %v", err)
 	}
@@ -72,7 +75,7 @@ func TestLiveLoop(t *testing.T) {
 	time.Sleep(800 * time.Millisecond)
 
 	t.Log("=== WindowProcessAlive (after kill) ===")
-	alive2, err := WindowProcessAlive(target)
+	alive2, err := b.WindowProcessAlive(target)
 	if err != nil {
 		t.Fatalf("WindowProcessAlive after kill: %v", err)
 	}
@@ -82,13 +85,13 @@ func TestLiveLoop(t *testing.T) {
 	}
 
 	t.Log("=== RelaunchInWindow ===")
-	err = RelaunchInWindow(target, []string{"sleep", "30"})
+	err = b.RelaunchInWindow(target, []string{"sleep", "30"})
 	if err != nil {
 		t.Fatalf("RelaunchInWindow: %v", err)
 	}
 	time.Sleep(400 * time.Millisecond)
 
-	alive3, err := WindowProcessAlive(target)
+	alive3, err := b.WindowProcessAlive(target)
 	if err != nil {
 		t.Fatalf("WindowProcessAlive after relaunch: %v", err)
 	}
@@ -98,7 +101,7 @@ func TestLiveLoop(t *testing.T) {
 	}
 
 	t.Log("=== Select ===")
-	err = Select(target)
+	err = b.Select(target, mux.ModeWindow, "")
 	if err != nil {
 		t.Fatalf("Select: %v", err)
 	}

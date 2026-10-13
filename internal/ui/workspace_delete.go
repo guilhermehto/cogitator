@@ -28,7 +28,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/guilhermehto/cogitator/internal/tmuxctl"
+	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
@@ -112,9 +112,9 @@ func (m model) startWsDelete() (model, tea.Cmd) {
 
 	var actionCmd tea.Cmd
 	if target.session == "" {
-		actionCmd = deleteWorkspaceCmd(m.store, m.tmux, target.workspace, m.launchMode)
+		actionCmd = deleteWorkspaceCmd(m.store, m.mux, target.workspace, m.launchMode)
 	} else {
-		actionCmd = deleteWsSessionCmd(m.store, m.tmux, target.workspace, target.session, m.launchMode)
+		actionCmd = deleteWsSessionCmd(m.store, m.mux, target.workspace, target.session, m.launchMode)
 	}
 	var spinnerC tea.Cmd
 	if !m.spinnerActive {
@@ -248,7 +248,7 @@ func wsMergeStatusCmd(gitOp gitOps, members []wsDeleteMember) tea.Cmd {
 // deleteWsSessionCmd/deleteWorkspaceCmd (a whole session directory) so the
 // "find the target, kill session or window depending on mode" logic lives in
 // one place rather than being duplicated per caller.
-func killTmuxTargetForDir(ops tmuxOps, dir string, mode tmuxctl.LaunchMode) {
+func killTmuxTargetForDir(ops mux.Backend, dir string, mode mux.LaunchMode) {
 	if ops == nil || !ops.Available() {
 		return
 	}
@@ -256,11 +256,7 @@ func killTmuxTargetForDir(ops tmuxOps, dir string, mode tmuxctl.LaunchMode) {
 	if err != nil {
 		return
 	}
-	if mode == tmuxctl.ModeSession {
-		_ = ops.KillSession(target)
-	} else {
-		_ = ops.KillWindow(target)
-	}
+	_ = ops.Kill(target, mode)
 }
 
 // findSessionByName returns the session named name from sessions, and
@@ -295,7 +291,7 @@ type wsSessionDeletedMsg struct {
 // when TeardownSession reported no failures: on a failure, the store keeps
 // the session (whatever state its members are actually in) so the error can
 // name the repo and the user can retry or investigate.
-func deleteWsSessionCmd(store storeOps, ops tmuxOps, workspaceName, sessionName string, mode tmuxctl.LaunchMode) tea.Cmd {
+func deleteWsSessionCmd(store storeOps, ops mux.Backend, workspaceName, sessionName string, mode mux.LaunchMode) tea.Cmd {
 	return workspaceMutationCmd(func() tea.Msg {
 		res := wsSessionDeletedMsg{workspaceName: workspaceName, sessionName: sessionName}
 		if store == nil {
@@ -348,7 +344,7 @@ type wsWorkspaceDeletedMsg struct {
 // succeeded; a single session's failure leaves the whole workspace (and
 // every session in it, torn down or not) in the store, and the returned
 // error names the failing session and repo so the user can retry.
-func deleteWorkspaceCmd(store storeOps, ops tmuxOps, workspaceName string, mode tmuxctl.LaunchMode) tea.Cmd {
+func deleteWorkspaceCmd(store storeOps, ops mux.Backend, workspaceName string, mode mux.LaunchMode) tea.Cmd {
 	return workspaceMutationCmd(func() tea.Msg {
 		res := wsWorkspaceDeletedMsg{workspaceName: workspaceName}
 		if store == nil {

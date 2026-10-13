@@ -10,6 +10,7 @@ import (
 
 	"github.com/guilhermehto/cogitator/internal/agentfeed"
 	"github.com/guilhermehto/cogitator/internal/agents"
+	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 )
 
 type fakeAgentFeed struct {
@@ -174,7 +175,7 @@ func newPreviewPick(t *testing.T, width int) (pickModel, *captureRecorder) {
 	}
 	recorder := &captureRecorder{}
 	m := newTestPick(&fakeAgentFeed{list: list})
-	m.preview.runner = recorder
+	m.preview.backend = tmuxctl.Backend{Runner: recorder}
 
 	model, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: 30})
 	m = model.(pickModel)

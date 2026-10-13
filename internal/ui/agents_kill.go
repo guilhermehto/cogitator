@@ -7,10 +7,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/guilhermehto/cogitator/internal/agents"
-	"github.com/guilhermehto/cogitator/internal/tmuxctl"
+	"github.com/guilhermehto/cogitator/internal/mux"
 )
 
-// agentKilledMsg reports the outcome of closing an agent's tmux window.
+// agentKilledMsg reports the outcome of closing an agent's multiplexer window.
 type agentKilledMsg struct {
 	agent agents.Agent
 	err   error
@@ -28,7 +28,7 @@ func (m *model) startAgentKill(agent agents.Agent) {
 
 	// Closing the window cogitator itself runs in would end this TUI too.
 	if m.selfWindowID() == agent.WindowID {
-		m.tmuxHint = "kill: cogitator runs in this window — close it from tmux"
+		m.tmuxHint = "kill: cogitator runs in this window — close it from your multiplexer"
 
 		return
 	}
@@ -37,8 +37,9 @@ func (m *model) startAgentKill(agent agents.Agent) {
 	m.prompt = promptConfirmKillAgent
 }
 
-// selfWindowID is the tmux window holding cogitator's own pane, or "" when
-// cogitator is not in tmux or its pane is not in the latest listing.
+// selfWindowID is the multiplexer window holding cogitator's own pane, or ""
+// when cogitator is not in a multiplexer or its pane is not in the latest
+// listing.
 func (m model) selfWindowID() string {
 	if m.selfPaneID == "" {
 		return ""
@@ -65,16 +66,16 @@ func (m model) updateKillAgentConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	return m, killAgentWindowCmd(m.tmux, target)
+	return m, killAgentWindowCmd(m.mux, target)
 }
 
-func killAgentWindowCmd(ops tmuxOps, agent agents.Agent) tea.Cmd {
+func killAgentWindowCmd(ops mux.Backend, agent agents.Agent) tea.Cmd {
 	return func() tea.Msg {
 		if ops == nil || !ops.Available() {
-			return agentKilledMsg{agent: agent, err: tmuxctl.ErrNotAvailable}
+			return agentKilledMsg{agent: agent, err: mux.ErrNotAvailable}
 		}
 
-		return agentKilledMsg{agent: agent, err: ops.KillWindow(tmuxctl.Target(agent.WindowID))}
+		return agentKilledMsg{agent: agent, err: ops.Kill(mux.Target(agent.WindowID), mux.ModeWindow)}
 	}
 }
 
@@ -94,7 +95,7 @@ func (m *model) applyAgentKilled(msg agentKilledMsg) tea.Cmd {
 }
 
 // dismissAgent marks agent seen and hides it from the agent list until it
-// gets a tmux window or new activity.
+// gets a multiplexer window or new activity.
 func (m *model) dismissAgent(agent agents.Agent) {
 	m.markAgentSeen(agent)
 	if m.dismissedAgents == nil {
@@ -107,6 +108,6 @@ func (m *model) dismissAgent(agent agents.Agent) {
 
 func (m model) agentKillPromptLine() string {
 	return wtHintStyle.Render(fmt.Sprintf(
-		"kill agent [%s]? closes its tmux window · y to confirm · any other key cancels",
+		"kill agent [%s]? closes its window · y to confirm · any other key cancels",
 		agentName(m.killAgentTarget)))
 }

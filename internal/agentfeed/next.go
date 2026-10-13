@@ -3,16 +3,24 @@ package agentfeed
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
+	"os"
+	"time"
 
 	"github.com/guilhermehto/cogitator/internal/agents"
-	"github.com/guilhermehto/cogitator/internal/tmuxctl"
+	"github.com/guilhermehto/cogitator/internal/mux"
 )
 
 const (
 	messageNothingNeedsYou = "cogitator: nothing needs you"
 	messageNotRunning      = "cogitator isn't running"
 	messageNextFailed      = "cogitator: next failed"
+
+	// printedMessagePause keeps a printed message on screen long enough to
+	// read before next exits and its floating pane closes.
+	printedMessagePause = 1500 * time.Millisecond
 )
 
 type nextFeed interface {
@@ -21,27 +29,47 @@ type nextFeed interface {
 }
 
 type messenger interface {
-	Display(client, text string) error
+	Message(client, text string) error
 }
 
-type tmuxMessenger struct{}
+// notifier shows next's outcome through the multiplexer, or prints it to out
+// and pauses when the multiplexer cannot show messages (zellij).
+type notifier struct {
+	msgs  messenger
+	out   io.Writer
+	pause func()
+}
 
-func (tmuxMessenger) Display(client, text string) error {
-	return tmuxctl.DisplayMessage(tmuxctl.DefaultRunner, client, text)
+func (n notifier) show(client, text string) error {
+	err := n.msgs.Message(client, text)
+	if !errors.Is(err, mux.ErrUnsupported) {
+		return err
+	}
+
+	if _, err := fmt.Fprintln(n.out, text); err != nil {
+		return err
+	}
+	n.pause()
+
+	return nil
 }
 
 // RunNext jumps client to the most urgent agent, or to the next one after the
-// agent the client is looking at. Outcomes the user should see are shown in
-// tmux and return nil: run-shell overlays any output and reports a non-zero
-// exit as a failure.
-func RunNext(ctx context.Context, client, windowID, sessionID string, logger *slog.Logger) error {
+// agent the client is looking at. Outcomes the user should see are shown via
+// backend.Message, or printed to stdout when the backend has no messages, and
+// return nil: run-shell overlays any output and reports a non-zero exit as a
+// failure.
+func RunNext(ctx context.Context, backend mux.Backend, client, windowID, sessionID string, logger *slog.Logger) error {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return runNext(ctx, NewClient(), tmuxMessenger{}, client, windowID, sessionID, logger)
+
+	n := notifier{msgs: backend, out: os.Stdout, pause: func() { time.Sleep(printedMessagePause) }}
+
+	return runNext(ctx, NewClient(), n, client, windowID, sessionID, logger)
 }
 
-func runNext(ctx context.Context, feed nextFeed, msgs messenger, client, windowID, sessionID string, logger *slog.Logger) error {
+func runNext(ctx context.Context, feed nextFeed, n notifier, client, windowID, sessionID string, logger *slog.Logger) error {
 	text, err := jumpToNext(ctx, feed, client, windowID, sessionID)
 	if errors.Is(err, ErrNotRunning) {
 		text = messageNotRunning
@@ -54,7 +82,7 @@ func runNext(ctx context.Context, feed nextFeed, msgs messenger, client, windowI
 		return nil
 	}
 
-	if displayErr := msgs.Display(client, text); displayErr != nil {
+	if displayErr := n.show(client, text); displayErr != nil {
 		logger.Error("agentfeed: display message failed", "err", displayErr)
 	}
 	return nil

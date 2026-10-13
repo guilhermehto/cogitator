@@ -8,6 +8,7 @@ import (
 
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
+	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 )
 
 func pressKey(t *testing.T, m model, key string) (model, tea.Cmd) {
@@ -28,7 +29,7 @@ func pressKey(t *testing.T, m model, key string) (model, tea.Cmd) {
 	return updated.(model), cmd
 }
 
-func agentsTabModel(t *testing.T, tmux *fakeTmuxOps, marker *recordingViewMarker) model {
+func agentsTabModel(t *testing.T, tmux *fakeMux, marker *recordingViewMarker) model {
 	t.Helper()
 
 	rows := []settings.Row{worktreeRow(t.TempDir(), settings.StateRunning, state.AttnFinished)}
@@ -41,7 +42,7 @@ func agentsTabModel(t *testing.T, tmux *fakeTmuxOps, marker *recordingViewMarker
 }
 
 func TestTabCyclesWorkspacesReposAgents(t *testing.T) {
-	m := feedTestModel(&fakeTmuxOps{available: true}, nil)
+	m := feedTestModel(&fakeMux{available: true}, nil)
 	m.view = viewWorkspaces
 
 	var visited []viewMode
@@ -69,7 +70,7 @@ func TestHeaderShowsAllThreeTabs(t *testing.T) {
 }
 
 func TestAgentsViewListsDoneAgentUnderDoneGroup(t *testing.T) {
-	m := agentsTabModel(t, &fakeTmuxOps{available: true}, &recordingViewMarker{})
+	m := agentsTabModel(t, &fakeMux{available: true}, &recordingViewMarker{})
 	m.view = viewAgents
 
 	out := m.View()
@@ -80,7 +81,7 @@ func TestAgentsViewListsDoneAgentUnderDoneGroup(t *testing.T) {
 }
 
 func TestAgentsViewEnterJumpsToAgentAndMarksItViewed(t *testing.T) {
-	tmux := &fakeTmuxOps{available: true, findWindowResult: "s:1", processAlive: true}
+	tmux := &fakeMux{available: true, findWindowResult: "s:1", processAlive: true}
 	marker := &recordingViewMarker{}
 	m := agentsTabModel(t, tmux, marker)
 	m.view = viewAgents
@@ -98,10 +99,10 @@ func TestAgentsViewEnterJumpsToAgentAndMarksItViewed(t *testing.T) {
 }
 
 func TestAgentsViewJumpLeavesAgentDoneWhileFocusPollTracksVisits(t *testing.T) {
-	tmux := &fakeTmuxOps{available: true, findWindowResult: "s:1", processAlive: true}
+	tmux := &fakeMux{available: true, findWindowResult: "s:1", processAlive: true}
 	marker := &recordingViewMarker{}
 	m := agentsTabModel(t, tmux, marker)
-	m.attachBadges(newFakeTmuxServer(t.TempDir()))
+	m.attachBadges(tmuxctl.Backend{Runner: newFakeTmuxServer(t.TempDir())})
 	m.view = viewAgents
 
 	m, cmd := pressKey(t, m, "enter")
@@ -117,7 +118,7 @@ func TestAgentsViewJumpLeavesAgentDoneWhileFocusPollTracksVisits(t *testing.T) {
 
 func TestAgentsViewMarkSeenKeyMarksViewedWithoutJumping(t *testing.T) {
 	marker := &recordingViewMarker{}
-	m := agentsTabModel(t, &fakeTmuxOps{available: true}, marker)
+	m := agentsTabModel(t, &fakeMux{available: true}, marker)
 	m.view = viewAgents
 
 	_, cmd := pressKey(t, m, "x")
@@ -131,7 +132,7 @@ func TestAgentsViewMarkSeenKeyMarksViewedWithoutJumping(t *testing.T) {
 }
 
 func TestAgentsViewFilterKeepsQAndEscFromQuitting(t *testing.T) {
-	m := agentsTabModel(t, &fakeTmuxOps{available: true}, &recordingViewMarker{})
+	m := agentsTabModel(t, &fakeMux{available: true}, &recordingViewMarker{})
 	m.view = viewAgents
 
 	m, _ = pressKey(t, m, "/")
@@ -149,7 +150,7 @@ func TestAgentsViewFilterKeepsQAndEscFromQuitting(t *testing.T) {
 }
 
 func TestAgentsViewQuitsOutsideFilter(t *testing.T) {
-	m := agentsTabModel(t, &fakeTmuxOps{available: true}, &recordingViewMarker{})
+	m := agentsTabModel(t, &fakeMux{available: true}, &recordingViewMarker{})
 	m.view = viewAgents
 
 	_, cmd := pressKey(t, m, "q")

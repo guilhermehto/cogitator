@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
-	"strings"
 
 	"github.com/guilhermehto/cogitator/internal/agentfeed"
 	"github.com/guilhermehto/cogitator/internal/claudecode"
@@ -22,6 +21,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 	"github.com/guilhermehto/cogitator/internal/tmuxinstall"
 	"github.com/guilhermehto/cogitator/internal/ui"
+	"github.com/guilhermehto/cogitator/internal/zellijinstall"
 )
 
 var (
@@ -104,6 +104,11 @@ func main() {
 		return
 	}
 
+	if len(os.Args) > 1 && os.Args[1] == "zellij" {
+		runZellijCommand(os.Args[2:])
+		return
+	}
+
 	bell := flag.Bool("bell", false, "ring terminal bell on transitions into attention states")
 	status := flag.Bool("status", false, "print a one-shot icons-only attention summary and exit")
 	demo := flag.Bool("demo", false, "run the TUI with a curated synthetic snapshot (for screenshots); no mDNS, no shell-outs")
@@ -151,17 +156,18 @@ func main() {
 }
 
 // runPickCommand shows the agent picker. A missing --client is resolved from
-// tmux, so the popup can omit it.
+// the multiplexer, so the popup can omit it.
 func runPickCommand(args []string) {
 	flags := flag.NewFlagSet("pick", flag.ExitOnError)
-	client := flags.String("client", "", "tmux client to jump (default: the invoking client)")
+	client := flags.String("client", "", "tmux client to jump (default: the invoking client; ignored under zellij)")
 	flags.Parse(args)
 
 	logger, closer := setupSubcommandLogger("pick")
 	defer closer()
 
 	if *client == "" {
-		*client = tmuxDisplayValue("#{client_name}")
+		loc, _ := ui.NewBackend().CurrentLocation()
+		*client = loc.Client
 	}
 
 	if err := ui.RunPick(config.Default(), logger, *client); err != nil {
@@ -170,29 +176,28 @@ func runPickCommand(args []string) {
 	}
 }
 
-// runNextCommand jumps to the next agent needing attention. It always exits 0
-// and prints nothing after flag parsing: run-shell would overlay any output.
+// runNextCommand jumps to the next agent needing attention. It always exits 0.
+// Under tmux it prints nothing after flag parsing (run-shell would overlay any
+// output); under zellij it prints its message in its own floating pane.
 func runNextCommand(args []string) {
 	flags := flag.NewFlagSet("next", flag.ExitOnError)
-	client := flags.String("client", "", "tmux client to jump (default: the invoking client)")
-	windowID := flags.String("window", "", "tmux window id the client is looking at (default: current)")
-	sessionID := flags.String("session", "", "tmux session id the client is looking at (default: current)")
+	client := flags.String("client", "", "tmux client to jump (default: the invoking client; ignored under zellij)")
+	windowID := flags.String("window", "", "window (tmux) or tab (zellij) id the client is looking at (default: current)")
+	sessionID := flags.String("session", "", "session id the client is looking at (default: current)")
 	flags.Parse(args)
 
 	logger, closer := setupSubcommandLogger("next")
 	defer closer()
 
-	if *client == "" {
-		*client = tmuxDisplayValue("#{client_name}")
-	}
-	if *windowID == "" {
-		*windowID = tmuxDisplayValue("#{window_id}")
-	}
-	if *sessionID == "" {
-		*sessionID = tmuxDisplayValue("#{session_id}")
+	backend := ui.NewBackend()
+	if *client == "" || *windowID == "" || *sessionID == "" {
+		loc, _ := backend.CurrentLocation()
+		fillEmpty(client, loc.Client)
+		fillEmpty(windowID, loc.WindowID)
+		fillEmpty(sessionID, loc.SessionID)
 	}
 
-	if err := agentfeed.RunNext(context.Background(), *client, *windowID, *sessionID, logger); err != nil {
+	if err := agentfeed.RunNext(context.Background(), backend, *client, *windowID, *sessionID, logger); err != nil {
 		logger.Error("next failed", "err", err)
 	}
 }
@@ -254,6 +259,52 @@ func newTmuxInstaller() (tmuxinstall.Installer, error) {
 	}, nil
 }
 
+// runZellijCommand adds or removes the next/pick keybinds in the user's
+// zellij config. zellij hot-reloads config.kdl, so there is no reload step.
+func runZellijCommand(args []string) {
+	if len(args) == 0 || (args[0] != "install" && args[0] != "uninstall") {
+		fmt.Fprintln(os.Stderr, "usage: cogitator zellij install|uninstall [flags]")
+		os.Exit(2)
+	}
+
+	action := args[0]
+	flags := flag.NewFlagSet("zellij "+action, flag.ExitOnError)
+	opts := zellijinstall.Options{}
+	flags.StringVar(&opts.ConfigPath, "config", "", "zellij config file to edit (default: zellij's lookup order)")
+	flags.BoolVar(&opts.DryRun, "dry-run", false, "print the changes without writing anything")
+	if action == "install" {
+		flags.StringVar(&opts.NextKey, "next-key", zellijinstall.DefaultNextKey, "normal-mode key that jumps to the next agent needing attention")
+		flags.StringVar(&opts.PickKey, "pick-key", zellijinstall.DefaultPickKey, "normal-mode key that opens the agent picker")
+		flags.StringVar(&opts.Binary, "binary", "", "cogitator binary to bind (default: PATH lookup, then this executable)")
+	}
+	_ = flags.Parse(args[1:])
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "resolve home directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	installer := zellijinstall.Installer{
+		Home:       home,
+		ConfigFile: os.Getenv("ZELLIJ_CONFIG_FILE"),
+		ConfigDir:  os.Getenv("ZELLIJ_CONFIG_DIR"),
+		LookPath:   exec.LookPath,
+		Executable: os.Executable,
+		Out:        os.Stdout,
+	}
+
+	if action == "install" {
+		err = installer.Install(opts)
+	} else {
+		err = installer.Uninstall(opts)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
 // setupSubcommandLogger logs to the cogitator log file; a failure to open it
 // must not surface in a popup or run-shell overlay, so it falls back to the
 // default logger.
@@ -268,13 +319,10 @@ func setupSubcommandLogger(name string) (*slog.Logger, func()) {
 	return logger, func() { closer.Close() }
 }
 
-func tmuxDisplayValue(format string) string {
-	out, err := tmuxctl.DefaultRunner.Run("display-message", "-p", format)
-	if err != nil {
-		return ""
+func fillEmpty(dst *string, value string) {
+	if *dst == "" {
+		*dst = value
 	}
-
-	return strings.TrimSpace(out)
 }
 
 func versionLine() string {

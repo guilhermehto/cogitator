@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/workspace"
@@ -116,8 +117,8 @@ func TestBuildLivenessOfRecentOnlySessions(t *testing.T) {
 
 		return views
 	}
-	windowAt := func(dir string) []Pane {
-		return []Pane{{PaneID: "%1", WindowID: "@1", SessionID: "$1", CogDir: dir}}
+	windowAt := func(dir string) []mux.Pane {
+		return []mux.Pane{{PaneID: "%1", WindowID: "@1", SessionID: "$1", CogDir: dir}}
 	}
 	rowAt := func(attn state.Attention, age time.Duration) []settings.Row {
 		return []settings.Row{row("/w/a", settings.StateRunning, attn, age)}
@@ -167,7 +168,7 @@ func TestBuildLivenessOfRecentOnlySessions(t *testing.T) {
 
 func TestBuildHidesDismissedAgentUntilItRunsAgain(t *testing.T) {
 	dismissedAt := now.Add(-time.Minute)
-	windowAt := []Pane{{PaneID: "%1", WindowID: "@1", SessionID: "$1", CogDir: "/w/a"}}
+	windowAt := []mux.Pane{{PaneID: "%1", WindowID: "@1", SessionID: "$1", CogDir: "/w/a"}}
 	rowsActiveAgo := func(age time.Duration) []settings.Row {
 		return []settings.Row{row("/w/a", settings.StateStopped, state.AttnFinished, age)}
 	}
@@ -219,12 +220,12 @@ func TestBuildSkipsPlaceholdersMissingAndPendingSessions(t *testing.T) {
 
 func TestBuildManagedAgentLocatesWindowByCogDir(t *testing.T) {
 	rows := []settings.Row{row("/w/a", settings.StateRunning, state.AttnFinished, time.Minute)}
-	panes := []Pane{
+	panes := []mux.Pane{
 		{PaneID: "%3", WindowID: "@3", SessionID: "$1", Cwd: "/elsewhere", CogDir: "/w/a"},
 	}
 
 	got := build(Input{Rows: rows, Panes: panes, Live: liveViews("/w/a")})
-	if got[0].WindowID != "@3" || got[0].PaneID != "%3" || got[0].TmuxSessionID != "$1" || !got[0].SessionOwned {
+	if got[0].WindowID != "@3" || got[0].PaneID != "%3" || got[0].MuxSessionID != "$1" || !got[0].SessionOwned {
 		t.Fatalf("tmux location not joined: %+v", got[0])
 	}
 }
@@ -236,19 +237,19 @@ func TestBuildStrays(t *testing.T) {
 			Attention: state.AttnPermissionPending, LastActivity: ago(time.Minute),
 		}
 	}
-	pane := Pane{PaneID: "%7", WindowID: "@7", SessionID: "$2", Cwd: "/stray"}
+	pane := mux.Pane{PaneID: "%7", WindowID: "@7", SessionID: "$2", Cwd: "/stray"}
 
 	tests := []struct {
 		name  string
 		live  []state.SessionView
-		panes []Pane
+		panes []mux.Pane
 		root  string
 		want  []string
 	}{
-		{"includes live session matching a pane cwd", []state.SessionView{live("/stray", state.SourceLive)}, []Pane{pane}, "", []string{"/stray"}},
+		{"includes live session matching a pane cwd", []state.SessionView{live("/stray", state.SourceLive)}, []mux.Pane{pane}, "", []string{"/stray"}},
 		{"drops stray without a matching pane", []state.SessionView{live("/stray", state.SourceLive)}, nil, "", nil},
-		{"drops recent-history sessions", []state.SessionView{live("/stray", state.SourceRecent)}, []Pane{pane}, "", nil},
-		{"drops sessions under the workspace root", []state.SessionView{live("/stray", state.SourceLive)}, []Pane{pane}, "/", nil},
+		{"drops recent-history sessions", []state.SessionView{live("/stray", state.SourceRecent)}, []mux.Pane{pane}, "", nil},
+		{"drops sessions under the workspace root", []state.SessionView{live("/stray", state.SourceLive)}, []mux.Pane{pane}, "/", nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -266,7 +267,7 @@ func TestBuildStrays(t *testing.T) {
 func TestBuildStrayExcludesManagedDirs(t *testing.T) {
 	rows := []settings.Row{row("/w/a", settings.StateStopped, "", 90*time.Minute)}
 	live := []state.SessionView{{SessionID: "x", Directory: "/w/a", Source: state.SourceLive, LastActivity: ago(time.Minute)}}
-	panes := []Pane{{PaneID: "%1", WindowID: "@1", SessionID: "$1", Cwd: "/w/a"}}
+	panes := []mux.Pane{{PaneID: "%1", WindowID: "@1", SessionID: "$1", Cwd: "/w/a"}}
 
 	if got := build(Input{Rows: rows, Live: live, Panes: panes}); len(got) != 0 {
 		t.Fatalf("managed dir leaked as stray: %+v", got)
@@ -275,7 +276,7 @@ func TestBuildStrayExcludesManagedDirs(t *testing.T) {
 
 func TestBuildStrayPrefersPaneRunningTheHarness(t *testing.T) {
 	live := []state.SessionView{{SessionID: "x", Directory: "/stray", Source: state.SourceLive, Provider: "opencode", LastActivity: ago(time.Minute)}}
-	panes := []Pane{
+	panes := []mux.Pane{
 		{PaneID: "%1", WindowID: "@1", SessionID: "$1", Cwd: "/stray", Command: "zsh"},
 		{PaneID: "%2", WindowID: "@2", SessionID: "$1", Cwd: "/stray", Command: "opencode"},
 	}
@@ -288,7 +289,7 @@ func TestBuildStrayPrefersPaneRunningTheHarness(t *testing.T) {
 
 func TestBuildStrayFallsBackToLowestPaneID(t *testing.T) {
 	live := []state.SessionView{{SessionID: "x", Directory: "/stray", Source: state.SourceLive, LastActivity: ago(time.Minute)}}
-	panes := []Pane{
+	panes := []mux.Pane{
 		{PaneID: "%10", WindowID: "@10", SessionID: "$1", Cwd: "/stray", Command: "zsh"},
 		{PaneID: "%9", WindowID: "@9", SessionID: "$1", Cwd: "/stray", Command: "vim"},
 	}
@@ -348,10 +349,10 @@ func TestNextReturnsFalseWithoutOtherActionableAgents(t *testing.T) {
 }
 
 func TestAgentAt(t *testing.T) {
-	owned := []Agent{{ID: "A", WindowID: "@1", TmuxSessionID: "$1", SessionOwned: true}}
+	owned := []Agent{{ID: "A", WindowID: "@1", MuxSessionID: "$1", SessionOwned: true}}
 	shared := []Agent{
-		{ID: "A", WindowID: "@1", TmuxSessionID: "$1"},
-		{ID: "B", WindowID: "@2", TmuxSessionID: "$1"},
+		{ID: "A", WindowID: "@1", MuxSessionID: "$1"},
+		{ID: "B", WindowID: "@2", MuxSessionID: "$1"},
 	}
 	tests := []struct {
 		name      string
@@ -381,7 +382,7 @@ func TestBuildSessionOwnedFalseWhenSessionHoldsTwoTaggedWindows(t *testing.T) {
 		row("/w/a", settings.StateRunning, state.AttnFinished, time.Minute),
 		row("/w/b", settings.StateRunning, state.AttnFinished, 2*time.Minute),
 	}
-	panes := []Pane{
+	panes := []mux.Pane{
 		{PaneID: "%1", WindowID: "@1", SessionID: "$1", CogDir: "/w/a"},
 		{PaneID: "%2", WindowID: "@2", SessionID: "$1", CogDir: "/w/b"},
 	}

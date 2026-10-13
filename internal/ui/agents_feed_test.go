@@ -13,9 +13,9 @@ import (
 	"github.com/guilhermehto/cogitator/internal/agents"
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/harness"
+	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 )
 
 type recordingViewMarker struct {
@@ -26,7 +26,7 @@ func (r *recordingViewMarker) MarkViewed(_ harness.Kind, _, sessionID string) {
 	r.viewed = append(r.viewed, sessionID)
 }
 
-func feedTestModel(tmux *fakeTmuxOps, rows []settings.Row) model {
+func feedTestModel(tmux *fakeMux, rows []settings.Row) model {
 	m := makeTestModel(tmux, &fakeGitOps{}, &fakeHarnessOps{}, rows)
 	m.cfg = config.Default()
 	m.feed = &agentfeed.Holder{}
@@ -76,7 +76,7 @@ func rebuildAgents(t *testing.T, m model, rows []settings.Row) model {
 
 func TestFeedGroupsFinishedWorktreeAgentAsDone(t *testing.T) {
 	rows := []settings.Row{worktreeRow(t.TempDir(), settings.StateRunning, state.AttnFinished)}
-	m := rebuildAgents(t, feedTestModel(&fakeTmuxOps{available: true}, nil), rows)
+	m := rebuildAgents(t, feedTestModel(&fakeMux{available: true}, nil), rows)
 
 	if len(m.agents) != 1 || m.agents[0].Group != agents.GroupDone {
 		t.Fatalf("agents = %+v, want one agent in Done", m.agents)
@@ -86,7 +86,7 @@ func TestFeedGroupsFinishedWorktreeAgentAsDone(t *testing.T) {
 func TestFeedFocusSelectsRunningAgentWindowForClientAndClearsBadge(t *testing.T) {
 	dir := t.TempDir()
 	rows := []settings.Row{worktreeRow(dir, settings.StateRunning, state.AttnFinished)}
-	tmux := &fakeTmuxOps{available: true, findWindowResult: "s:1", processAlive: true}
+	tmux := &fakeMux{available: true, findWindowResult: "s:1", processAlive: true}
 	marker := &recordingViewMarker{}
 	m := feedTestModel(tmux, nil)
 	m.viewMarker = marker
@@ -110,10 +110,10 @@ func TestFeedFocusSelectsRunningAgentWindowForClientAndClearsBadge(t *testing.T)
 
 func TestFeedFocusResumesStoppedAgentInSessionModeForClient(t *testing.T) {
 	rows := []settings.Row{worktreeRow(t.TempDir(), settings.StateStopped, state.AttnInactive)}
-	tmux := &fakeTmuxOps{available: true, findWindowResult: "s:1", processAlive: false}
+	tmux := &fakeMux{available: true, findWindowResult: "s:1", processAlive: false}
 	m := feedTestModel(tmux, nil)
 	m = rebuildAgents(t, m, rows)
-	m.launchMode = tmuxctl.ModeSession
+	m.launchMode = mux.ModeSession
 
 	cmd := m.handleFeedAction(agentfeed.Action{Kind: agentfeed.ActionFocus, AgentID: m.agents[0].ID, Client: "/dev/ttys009"})
 	cmd()
@@ -129,12 +129,12 @@ func TestFeedFocusResumesStoppedAgentInSessionModeForClient(t *testing.T) {
 
 func TestFeedFocusSelectsStrayPaneForClient(t *testing.T) {
 	dir := t.TempDir()
-	tmux := &fakeTmuxOps{available: true}
+	tmux := &fakeMux{available: true}
 	m := feedTestModel(tmux, nil)
 	m.snap = state.Snapshot{Sessions: []state.SessionView{{
 		Source: state.SourceLive, Directory: dir, SessionID: "ses_stray", LastActivity: time.Now(),
 	}}}
-	m.panes = []agents.Pane{{PaneID: "%7", WindowID: "@1", SessionID: "$1", Cwd: dir}}
+	m.panes = []mux.Pane{{PaneID: "%7", WindowID: "@1", SessionID: "$1", Cwd: dir}}
 	m.refreshAgents()
 
 	if len(m.agents) != 1 || m.agents[0].Kind != agents.KindStray {
@@ -153,7 +153,7 @@ func TestFeedFocusSelectsStrayPaneForClient(t *testing.T) {
 func TestFeedSeenMarksAgentViewed(t *testing.T) {
 	rows := []settings.Row{worktreeRow(t.TempDir(), settings.StateRunning, state.AttnFinished)}
 	marker := &recordingViewMarker{}
-	m := feedTestModel(&fakeTmuxOps{available: true}, nil)
+	m := feedTestModel(&fakeMux{available: true}, nil)
 	m.viewMarker = marker
 	m = rebuildAgents(t, m, rows)
 
@@ -165,7 +165,7 @@ func TestFeedSeenMarksAgentViewed(t *testing.T) {
 }
 
 func TestFeedJumpFailureIsShownOnRequestingClient(t *testing.T) {
-	tmux := &fakeTmuxOps{available: true}
+	tmux := &fakeMux{available: true}
 	m := feedTestModel(tmux, nil)
 
 	updated, cmd := m.Update(launchResultMsg{dir: "/r/a", client: "/dev/ttys009", err: errors.New("boom")})

@@ -199,7 +199,7 @@ func (m model) renderAllSessions(width int, rows []state.SessionView, recentByIn
 	if len(rows) == 0 && len(recentByInstance) == 0 {
 		b.WriteString("\n  " + wtRepoStyle.Render("No repos tracked yet") + "\n\n")
 		b.WriteString("  " + dimStyle.Render("Press ") + hintKeyStyle.Render("A") + dimStyle.Render(" to pick a git repo — its worktrees appear here, ready to") + "\n")
-		b.WriteString("  " + dimStyle.Render("launch or resume in tmux. Live agent sessions show up here too."))
+		b.WriteString("  " + dimStyle.Render("launch or resume in tmux or zellij. Live agent sessions show up here too."))
 		return b.String()
 	}
 	b.WriteString(columnHeader(width-2) + "\n")

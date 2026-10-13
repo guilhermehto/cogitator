@@ -10,8 +10,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/settings"
-	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
@@ -82,9 +82,9 @@ func TestWorkspaceDeletionWaitsForMutationToPersist(t *testing.T) {
 			if !backfill {
 				<-gated.loaded
 			}
-			deletion := deleteWorkspaceCmd(gated, nil, ws.Name, tmuxctl.ModeWindow)
+			deletion := deleteWorkspaceCmd(gated, nil, ws.Name, mux.ModeWindow)
 			if strings.HasSuffix(scenario, "delete session") {
-				deletion = deleteWsSessionCmd(gated, nil, ws.Name, "feature", tmuxctl.ModeWindow)
+				deletion = deleteWsSessionCmd(gated, nil, ws.Name, "feature", mux.ModeWindow)
 			}
 			deleted := make(chan tea.Msg, 1)
 			go func() { deleted <- deletion() }()

@@ -45,7 +45,7 @@ func pullFinishedFrom(t *testing.T, cmd tea.Cmd) pullFinishedMsg {
 // worktree path carrying its branch through to the result message.
 func TestPullKeyDispatchesPullForHighlightedRow(t *testing.T) {
 	gitFake := &fakeGitOps{pullResult: "Updating abc..def"}
-	m := makeTestModel(&fakeTmuxOps{available: true}, gitFake, &fakeHarnessOps{}, []settings.Row{
+	m := makeTestModel(&fakeMux{available: true}, gitFake, &fakeHarnessOps{}, []settings.Row{
 		makeRow("/r", "/r", "main", "", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 
@@ -72,7 +72,7 @@ func TestPullKeyDispatchesPullForHighlightedRow(t *testing.T) {
 // no Cmd is dispatched, nothing is marked pulling, and a hint explains why.
 func TestPullKeyRejectsDetachedHead(t *testing.T) {
 	gitFake := &fakeGitOps{}
-	m := makeTestModel(&fakeTmuxOps{available: true}, gitFake, &fakeHarnessOps{}, []settings.Row{
+	m := makeTestModel(&fakeMux{available: true}, gitFake, &fakeHarnessOps{}, []settings.Row{
 		makeRow("/r", "/r/wt", "", "", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 
@@ -97,7 +97,7 @@ func TestPullKeyRejectsDetachedHead(t *testing.T) {
 // already pulling is a no-op (no duplicate dispatch).
 func TestPullKeyIgnoresRepeatWhileInFlight(t *testing.T) {
 	gitFake := &fakeGitOps{}
-	m := makeTestModel(&fakeTmuxOps{available: true}, gitFake, &fakeHarnessOps{}, []settings.Row{
+	m := makeTestModel(&fakeMux{available: true}, gitFake, &fakeHarnessOps{}, []settings.Row{
 		makeRow("/r", "/r", "main", "", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 	m.addPulling("/r")
@@ -116,7 +116,7 @@ func TestPullKeyIgnoresRepeatWhileInFlight(t *testing.T) {
 // TestPullFinishedMsgClearsPullingAndReportsSummary verifies a successful pull
 // clears the in-flight indicator and surfaces git's summary in the hint.
 func TestPullFinishedMsgClearsPullingAndReportsSummary(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, &fakeGitOps{}, &fakeHarnessOps{}, nil)
+	m := makeTestModel(&fakeMux{available: true}, &fakeGitOps{}, &fakeHarnessOps{}, nil)
 	m.addPulling("/r")
 
 	updated, _ := m.Update(pullFinishedMsg{path: "/r", branch: "main", summary: "Already up to date."})
@@ -133,7 +133,7 @@ func TestPullFinishedMsgClearsPullingAndReportsSummary(t *testing.T) {
 // TestPullFinishedMsgSurfacesError verifies a failed pull clears the indicator
 // and surfaces the error in the hint.
 func TestPullFinishedMsgSurfacesError(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, &fakeGitOps{}, &fakeHarnessOps{}, nil)
+	m := makeTestModel(&fakeMux{available: true}, &fakeGitOps{}, &fakeHarnessOps{}, nil)
 	m.addPulling("/r")
 
 	updated, _ := m.Update(pullFinishedMsg{path: "/r", branch: "main", err: errors.New("diverged")})
@@ -151,7 +151,7 @@ func TestPullFinishedMsgSurfacesError(t *testing.T) {
 // keeps animating while a pull is in flight even with no pending creates, and
 // stops once the pull clears.
 func TestSpinnerTickContinuesWhilePulling(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, &fakeGitOps{}, &fakeHarnessOps{}, nil)
+	m := makeTestModel(&fakeMux{available: true}, &fakeGitOps{}, &fakeHarnessOps{}, nil)
 	m.addPulling("/r")
 	m.spinnerActive = true
 

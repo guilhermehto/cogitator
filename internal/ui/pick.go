@@ -12,12 +12,11 @@ import (
 	"github.com/guilhermehto/cogitator/internal/agentfeed"
 	"github.com/guilhermehto/cogitator/internal/agents"
 	"github.com/guilhermehto/cogitator/internal/config"
-	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 )
 
 const (
 	pickRefreshEvery = time.Second
-	notRunningText   = "cogitator isn't running — start it in a tmux window"
+	notRunningText   = "cogitator isn't running — start it inside tmux or zellij"
 )
 
 // agentFeed is the slice of agentfeed.Client the picker uses.
@@ -57,7 +56,7 @@ type pickModel struct {
 func newPickModel(feed agentFeed, client string, now func() time.Time) pickModel {
 	return pickModel{
 		feed: feed, client: client, list: newAgentList(), now: now,
-		preview: agentPreview{runner: tmuxctl.DefaultRunner},
+		preview: agentPreview{backend: NewBackend()},
 	}
 }
 
@@ -230,9 +229,10 @@ func (m pickModel) View() string {
 	return headerStyle.Render("Agents") + "\n" + body + "\n\n" + footer
 }
 
-// RunPick shows the agent picker for the tmux client named client. It never
-// takes the single-instance lock, so it cannot evict the running TUI. It
-// uses the alt screen so the popup restores cleanly when it closes.
+// RunPick shows the agent picker for the multiplexer client named client (""
+// lets the multiplexer choose). It never takes the single-instance lock, so it
+// cannot evict the running TUI. It uses the alt screen so the popup restores
+// cleanly when it closes.
 func RunPick(cfg *config.Config, logger *slog.Logger, client string) error {
 	if logger == nil {
 		logger = slog.Default()

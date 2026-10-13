@@ -37,7 +37,7 @@ func (m model) updateAgentsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // syncAgentPreview points the preview at the Agents cursor while the tab is
 // shown wide enough to hold it, and stops it otherwise.
 func (m *model) syncAgentPreview() tea.Cmd {
-	if m.view != viewAgents || m.badgeRunner == nil || m.paneWidth()-2 < agentSplitMinWidth {
+	if m.view != viewAgents || m.agentPreview.backend == nil || m.paneWidth()-2 < agentSplitMinWidth {
 		m.agentPreview.Hide()
 
 		return nil
@@ -92,7 +92,7 @@ func (m model) renderAgentsView(width, height int) string {
 
 	preview := m.agentPreview
 	body := list.View(now, width, bodyHeight)
-	if m.badgeRunner != nil {
+	if m.agentPreview.backend != nil {
 		body = renderAgentSplit(list, preview, now, width, bodyHeight)
 	}
 

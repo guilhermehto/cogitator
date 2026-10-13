@@ -12,8 +12,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/guilhermehto/cogitator/internal/harness"
+	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/settings"
-	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 )
 
 // ---------------------------------------------------------------------------
@@ -62,10 +62,10 @@ func TestNewWorktreeEnter_UnresolvableDefaultOpensChooser(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestLaunchInner_DefaultOverridesRecordedHarness(t *testing.T) {
-	tmux := &fakeTmuxOps{available: true, findWindowErr: errors.New("no window"), ensureWindowResult: "s:1"}
+	tmux := &fakeMux{available: true, findWindowErr: errors.New("no window"), ensureWindowResult: "s:1"}
 	row := settings.Row{Repo: "/r", Worktree: "/r/a", Branch: "feat", Harness: "codex"}
 
-	res := launchInner(tmux, rowLaunchTarget(row), &fakeHarnessOps{}, tmuxctl.ModeSession, "opencode")()
+	res := launchInner(tmux, rowLaunchTarget(row), &fakeHarnessOps{}, mux.ModeSession, "opencode")()
 
 	if res.err != nil {
 		t.Fatalf("unexpected err: %v", res.err)
@@ -79,14 +79,14 @@ func TestLaunchInner_DefaultOverridesRecordedHarness(t *testing.T) {
 }
 
 func TestLaunchInner_NoOverrideWhenDefaultEmptyOrMatches(t *testing.T) {
-	tmux := &fakeTmuxOps{available: true, findWindowErr: errors.New("no window"), ensureWindowResult: "s:1"}
+	tmux := &fakeMux{available: true, findWindowErr: errors.New("no window"), ensureWindowResult: "s:1"}
 	row := settings.Row{Repo: "/r", Worktree: "/r/a", Harness: "codex"}
 	target := rowLaunchTarget(row)
 
-	if res := launchInner(tmux, target, &fakeHarnessOps{}, tmuxctl.ModeSession, "")(); res.harnessKind != "" {
+	if res := launchInner(tmux, target, &fakeHarnessOps{}, mux.ModeSession, "")(); res.harnessKind != "" {
 		t.Errorf("empty default: harnessKind = %q, want empty (no override)", res.harnessKind)
 	}
-	if res := launchInner(tmux, target, &fakeHarnessOps{}, tmuxctl.ModeSession, "codex")(); res.harnessKind != "" {
+	if res := launchInner(tmux, target, &fakeHarnessOps{}, mux.ModeSession, "codex")(); res.harnessKind != "" {
 		t.Errorf("matching default: harnessKind = %q, want empty (no override)", res.harnessKind)
 	}
 }
