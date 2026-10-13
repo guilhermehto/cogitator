@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/guilhermehto/cogitator/internal/agents"
+	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
 )
 
@@ -33,6 +34,7 @@ func TestExportJSON_MapsEveryField(t *testing.T) {
 		Harness:      "omp",
 		Title:        "title",
 		Attention:    state.Attention("permission"),
+		State:        settings.StateRunning,
 		Group:        agents.GroupNeedsYou,
 		LastActivity: time.Date(2026, 1, 2, 3, 4, 5, 0, time.FixedZone("x", 3600)),
 		MuxSessionID: "mux",
@@ -40,7 +42,7 @@ func TestExportJSON_MapsEveryField(t *testing.T) {
 		PaneID:       "%2",
 	}
 
-	raw, err := ExportJSON([]agents.Agent{a})
+	raw, err := ExportJSON([]agents.Agent{a}, "/home/me")
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}
@@ -48,11 +50,11 @@ func TestExportJSON_MapsEveryField(t *testing.T) {
 	got := decodeExport(t, raw)
 	want := ExportAgent{
 		ID: "/repo/wt", Kind: "worktree", Repo: "repo", Branch: "feat", Workspace: "ws",
-		SessionName: "sess", Harness: "omp", Title: "title", Attention: "permission",
+		SessionName: "sess", Harness: "omp", Title: "title", Attention: "permission", State: "running",
 		Group: "needs_you", LastActivity: "2026-01-02T02:04:05Z", MuxSession: "mux",
 		WindowID: "@1", PaneID: "%2",
 	}
-	if got.Version != 1 || len(got.Agents) != 1 || got.Agents[0] != want {
+	if got.Version != 1 || got.Home != "/home/me" || len(got.Agents) != 1 || got.Agents[0] != want {
 		t.Fatalf("export = %+v, want version 1 with %+v", got, want)
 	}
 
@@ -72,7 +74,7 @@ func TestExportJSON_NamesEveryGroup(t *testing.T) {
 		agents.GroupStopped:  "stopped",
 	}
 	for group, name := range cases {
-		raw, err := ExportJSON([]agents.Agent{{ID: "/a", Group: group}})
+		raw, err := ExportJSON([]agents.Agent{{ID: "/a", Group: group}}, "")
 		if err != nil {
 			t.Fatalf("export: %v", err)
 		}
@@ -84,7 +86,7 @@ func TestExportJSON_NamesEveryGroup(t *testing.T) {
 }
 
 func TestExportJSON_LeavesZeroLastActivityEmpty(t *testing.T) {
-	raw, err := ExportJSON([]agents.Agent{{ID: "/a"}})
+	raw, err := ExportJSON([]agents.Agent{{ID: "/a"}}, "")
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}
@@ -96,7 +98,7 @@ func TestExportJSON_LeavesZeroLastActivityEmpty(t *testing.T) {
 
 func TestExportJSON_EmptyListIsEmptyArray(t *testing.T) {
 	for _, list := range [][]agents.Agent{nil, {}} {
-		raw, err := ExportJSON(list)
+		raw, err := ExportJSON(list, "")
 		if err != nil {
 			t.Fatalf("export: %v", err)
 		}
@@ -125,7 +127,7 @@ func TestExportJSON_RoundTripsThroughLiveFeed(t *testing.T) {
 		t.Fatalf("list: %v", err)
 	}
 
-	raw, err := ExportJSON(list)
+	raw, err := ExportJSON(list, "")
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}

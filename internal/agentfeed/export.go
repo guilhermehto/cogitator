@@ -10,8 +10,11 @@ import (
 // ExportVersion is the wire version of the `cogitator agents list` output.
 const ExportVersion = 1
 
+// ExportList carries home so consumers can abbreviate agent paths to "~" the
+// way the TUI does.
 type ExportList struct {
 	Version int           `json:"version"`
+	Home    string        `json:"home,omitempty"`
 	Agents  []ExportAgent `json:"agents"`
 }
 
@@ -25,6 +28,7 @@ type ExportAgent struct {
 	Harness      string `json:"harness"`
 	Title        string `json:"title"`
 	Attention    string `json:"attention"`
+	State        string `json:"state"`
 	Group        string `json:"group"`
 	LastActivity string `json:"last_activity"`
 	MuxSession   string `json:"mux_session"`
@@ -32,8 +36,8 @@ type ExportAgent struct {
 	PaneID       string `json:"pane_id"`
 }
 
-func ExportJSON(list []agents.Agent) ([]byte, error) {
-	out := ExportList{Version: ExportVersion, Agents: make([]ExportAgent, 0, len(list))}
+func ExportJSON(list []agents.Agent, home string) ([]byte, error) {
+	out := ExportList{Version: ExportVersion, Home: home, Agents: make([]ExportAgent, 0, len(list))}
 	for _, a := range list {
 		out.Agents = append(out.Agents, exportAgent(a))
 	}
@@ -57,6 +61,7 @@ func exportAgent(a agents.Agent) ExportAgent {
 		Harness:      a.Harness,
 		Title:        a.Title,
 		Attention:    string(a.Attention),
+		State:        string(a.State),
 		Group:        groupName(a.Group),
 		LastActivity: last,
 		MuxSession:   a.MuxSessionID,

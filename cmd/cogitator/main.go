@@ -345,7 +345,8 @@ func printAgents(ctx context.Context, feed agentfeed.Client) error {
 		return err
 	}
 
-	out, err := agentfeed.ExportJSON(list)
+	home, _ := os.UserHomeDir()
+	out, err := agentfeed.ExportJSON(list, home)
 	if err != nil {
 		return err
 	}
