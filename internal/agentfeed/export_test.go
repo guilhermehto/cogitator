@@ -39,6 +39,7 @@ func TestExportJSON_MapsEveryField(t *testing.T) {
 		State:        settings.StateRunning,
 		Group:        agents.GroupNeedsYou,
 		LastActivity: time.Date(2026, 1, 2, 3, 4, 5, 0, time.FixedZone("x", 3600)),
+		OrderedAt:    time.Date(2026, 1, 2, 1, 0, 0, 0, time.UTC),
 		MuxSessionID: "mux",
 		WindowID:     "@1",
 		PaneID:       "%2",
@@ -54,14 +55,14 @@ func TestExportJSON_MapsEveryField(t *testing.T) {
 	want := ExportAgent{
 		ID: "/repo/wt#ses_1", Dir: "/repo/wt", Kind: "worktree", Repo: "repo", Branch: "feat", Workspace: "ws",
 		SessionName: "sess", Harness: "omp", Title: "title", Tab: "LEX-123", Attention: "permission", State: "running",
-		Group: "needs_you", LastActivity: "2026-01-02T02:04:05Z", MuxSession: "mux",
+		Group: "needs_you", LastActivity: "2026-01-02T02:04:05Z", OrderedAt: "2026-01-02T01:00:00Z", MuxSession: "mux",
 		WindowID: "@1", PaneID: "%2", SessionOwned: true,
 	}
 	if got.Version != 1 || got.Home != "/home/me" || len(got.Agents) != 1 || got.Agents[0] != want {
 		t.Fatalf("export = %+v, want version 1 with %+v", got, want)
 	}
 
-	for _, key := range []string{`"session_name"`, `"last_activity"`, `"mux_session"`, `"window_id"`, `"pane_id"`, `"session_owned"`} {
+	for _, key := range []string{`"session_name"`, `"last_activity"`, `"ordered_at"`, `"mux_session"`, `"window_id"`, `"pane_id"`, `"session_owned"`} {
 		if !strings.Contains(string(raw), key) {
 			t.Errorf("export missing key %s: %s", key, raw)
 		}

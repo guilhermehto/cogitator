@@ -33,9 +33,11 @@ type ExportAgent struct {
 	State        string `json:"state"`
 	Group        string `json:"group"`
 	LastActivity string `json:"last_activity"`
-	MuxSession   string `json:"mux_session"`
-	WindowID     string `json:"window_id"`
-	PaneID       string `json:"pane_id"`
+	// OrderedAt places the agent in oldest-first lists; see agents.Agent.
+	OrderedAt  string `json:"ordered_at"`
+	MuxSession string `json:"mux_session"`
+	WindowID   string `json:"window_id"`
+	PaneID     string `json:"pane_id"`
 	// SessionOwned lets consumers treat a client anywhere in MuxSession as
 	// being at this agent, matching agents.AgentAt.
 	SessionOwned bool `json:"session_owned"`
@@ -51,11 +53,6 @@ func ExportJSON(list []agents.Agent, home string) ([]byte, error) {
 }
 
 func exportAgent(a agents.Agent) ExportAgent {
-	last := ""
-	if !a.LastActivity.IsZero() {
-		last = a.LastActivity.UTC().Format(time.RFC3339)
-	}
-
 	return ExportAgent{
 		ID:           a.ID,
 		Dir:          a.Dir,
@@ -70,12 +67,22 @@ func exportAgent(a agents.Agent) ExportAgent {
 		Attention:    string(a.Attention),
 		State:        string(a.State),
 		Group:        groupName(a.Group),
-		LastActivity: last,
+		LastActivity: rfc3339(a.LastActivity),
+		OrderedAt:    rfc3339(a.OrderedAt),
 		MuxSession:   a.MuxSessionID,
 		WindowID:     a.WindowID,
 		PaneID:       a.PaneID,
 		SessionOwned: a.SessionOwned,
 	}
+}
+
+// rfc3339 formats t for the wire, leaving a zero time empty.
+func rfc3339(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+
+	return t.UTC().Format(time.RFC3339)
 }
 
 func groupName(g agents.Group) string {

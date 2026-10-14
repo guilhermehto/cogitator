@@ -479,9 +479,9 @@ mod tests {
     fn needs_you_section_sits_above_the_rest() {
         let app = app_from(
             r#"{"version":1,"agents":[
-                {"id":"/x/newer","dir":"/x/newer","group":"done","last_activity":"2025-12-31T23:00:00Z"},
-                {"id":"/x/ask","dir":"/x/ask","group":"needs_you","last_activity":"2025-12-31T23:30:00Z"},
-                {"id":"/x/older","dir":"/x/older","group":"idle","last_activity":"2025-12-31T22:00:00Z"}
+                {"id":"/x/newer","dir":"/x/newer","group":"done","ordered_at":"2025-12-31T23:00:00Z"},
+                {"id":"/x/ask","dir":"/x/ask","group":"needs_you","ordered_at":"2025-12-31T23:30:00Z"},
+                {"id":"/x/older","dir":"/x/older","group":"idle","ordered_at":"2025-12-31T22:00:00Z"}
             ]}"#,
         );
         let lines: Vec<String> = plain_lines(&render(&app, 20, 40, NOW))
