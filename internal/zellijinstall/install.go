@@ -12,6 +12,7 @@
 package zellijinstall
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -33,7 +34,9 @@ const (
 	sidebarWidth = 42
 	focusPipe    = "cogitator_focus"
 	layoutName   = "cogitator.kdl"
-	layoutHeader = "// managed by cogitator — regenerate with `cogitator zellij install --plugin`"
+	layoutOwner  = "// managed by cogitator"
+	layoutHeader = layoutOwner + " — regenerate with `cogitator zellij install`"
+	bundledName  = "cogitator-zellij.wasm"
 	beginMarker  = "// BEGIN cogitator"
 	endMarker    = "// END cogitator"
 	beginLine    = beginMarker + " (managed by cogitator — regenerate with `cogitator zellij install`)"
@@ -100,11 +103,14 @@ type keyChoice struct {
 }
 
 // Options are the user-facing flags shared by Install, Check and Uninstall.
-// Force installs even when the user already wired cogitator by hand.
+// Force installs even when the user already wired cogitator by hand. Plugin
+// is a wasm path to dock as-is; without it, Bundled is written to
+// cogitator's data directory and that copy is docked.
 type Options struct {
 	NextKey    string
 	PickKey    string
 	Plugin     string
+	Bundled    *BundledPlugin
 	SidebarKey string
 	ConfigPath string
 	Binary     string
@@ -112,10 +118,20 @@ type Options struct {
 	Force      bool
 }
 
+// BundledPlugin is the plugin wasm embedded in the cogitator binary.
+type BundledPlugin struct {
+	Wasm []byte
+}
+
+func (o Options) hasPlugin() bool {
+	return o.Plugin != "" || o.Bundled != nil
+}
+
 // Installer holds the environment seams so tests never read the real home,
-// PATH, or zellij config.
+// PATH, or zellij config. DataHome is $XDG_DATA_HOME.
 type Installer struct {
 	Home       string
+	DataHome   string
 	ConfigFile string
 	ConfigDir  string
 	LookPath   func(file string) (string, error)
@@ -142,6 +158,7 @@ type target struct {
 	stripped   string
 	hadBlock   bool
 	spec       bindSpec
+	wasm       []byte
 }
 
 func (i Installer) load(opts Options) (target, error) {
@@ -150,9 +167,12 @@ func (i Installer) load(opts Options) (target, error) {
 		return target{}, err
 	}
 
-	plugin, err := resolvePlugin(t.opts.Plugin)
+	plugin, err := i.pluginPath(t.opts)
 	if err != nil {
 		return target{}, err
+	}
+	if t.opts.Plugin == "" && t.opts.Bundled != nil {
+		t.wasm = t.opts.Bundled.Wasm
 	}
 
 	binary, err := installkit.ResolveBinary(t.opts.Binary, i.LookPath, i.Executable)
@@ -235,7 +255,7 @@ func (t target) sidebarStatus() installkit.Status {
 		return installkit.Status{State: installkit.Missing, Path: t.confPath}
 	}
 
-	current := found == layoutBlock(t.spec.layoutPath) && fileHolds(t.spec.layoutPath, sidebarLayout(t.spec))
+	current := found == layoutBlock(t.spec.layoutPath) && fileHolds(t.spec.layoutPath, sidebarLayout(t.spec)) && t.wasmCurrent()
 
 	return managedStatus(t.confPath, current)
 }
@@ -293,13 +313,17 @@ func (i Installer) Install(opts Options) error {
 
 	layout := sidebarLayout(t.spec)
 	if opts.DryRun {
-		i.printDryRun(t.confPath, block, t.spec.layoutPath, layout)
+		i.printDryRun(t, block, layout)
 		return nil
 	}
 
-	if updated == t.existing && fileHolds(t.spec.layoutPath, layout) {
+	if updated == t.existing && fileHolds(t.spec.layoutPath, layout) && t.wasmCurrent() {
 		fmt.Fprintf(i.Out, "cogitator keybinds already set up in %s\n", t.confPath)
 		return nil
+	}
+
+	if err := t.writeWasm(); err != nil {
+		return err
 	}
 
 	if err := writeLayout(t.spec.layoutPath, layout); err != nil {
@@ -314,11 +338,38 @@ func (i Installer) Install(opts Options) error {
 	return nil
 }
 
-func (i Installer) printDryRun(confPath, block, layoutPath, layout string) {
-	fmt.Fprintf(i.Out, "would write to %s:\n%s", confPath, block)
-	if layoutPath != "" {
-		fmt.Fprintf(i.Out, "would write %s:\n%s", layoutPath, layout)
+func (i Installer) printDryRun(t target, block, layout string) {
+	fmt.Fprintf(i.Out, "would write to %s:\n%s", t.confPath, block)
+	if t.wasm != nil {
+		fmt.Fprintf(i.Out, "would write the bundled plugin (%d bytes) to %s\n", len(t.wasm), t.spec.plugin)
 	}
+	if t.spec.layoutPath != "" {
+		fmt.Fprintf(i.Out, "would write %s:\n%s", t.spec.layoutPath, layout)
+	}
+}
+
+// wasmCurrent reports whether the bundled plugin copy already holds this
+// binary's wasm; an explicit --plugin is the user's file and always counts.
+func (t target) wasmCurrent() bool {
+	if t.wasm == nil {
+		return true
+	}
+
+	existing, err := os.ReadFile(t.spec.plugin)
+
+	return err == nil && bytes.Equal(existing, t.wasm)
+}
+
+func (t target) writeWasm() error {
+	if t.wasmCurrent() {
+		return nil
+	}
+
+	if err := installkit.WriteFileAtomic(t.spec.plugin, t.wasm, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", t.spec.plugin, err)
+	}
+
+	return nil
 }
 
 func installSummary(confPath string, hadBlock bool, spec bindSpec) string {
@@ -332,7 +383,7 @@ func installSummary(confPath string, hadBlock bool, spec bindSpec) string {
 		return summary + ")"
 	}
 
-	return summary + fmt.Sprintf(", sidebar %s)\nnew zellij sessions open with the cogitator sidebar (%s); restart existing sessions to get it", spec.sidebarKey, spec.layoutPath)
+	return summary + fmt.Sprintf(", sidebar %s)\nnew zellij sessions open with the cogitator sidebar (%s, plugin %s); restart existing sessions to get it", spec.sidebarKey, spec.layoutPath, spec.plugin)
 }
 
 // Uninstall removes the owned blocks and the sidebar layout, leaving the rest
@@ -391,6 +442,30 @@ func (i Installer) layoutFile(explicitConfig string) string {
 	return filepath.Join(filepath.Dir(i.configPath(explicitConfig)), "layouts", layoutName)
 }
 
+// dataDir is cogitator's XDG data directory, where the bundled plugin copy
+// lives.
+func (i Installer) dataDir() string {
+	if i.DataHome != "" {
+		return filepath.Join(i.DataHome, "cogitator")
+	}
+
+	return filepath.Join(i.Home, ".local", "share", "cogitator")
+}
+
+// pluginPath is the wasm the sidebar docks: the explicit --plugin, else
+// where the bundled copy is (or will be) written, else "" for no sidebar.
+func (i Installer) pluginPath(opts Options) (string, error) {
+	if opts.Plugin != "" || opts.Bundled == nil {
+		return resolvePlugin(opts.Plugin)
+	}
+
+	if len(opts.Bundled.Wasm) == 0 {
+		return "", errors.New("bundled plugin is empty")
+	}
+
+	return filepath.Join(i.dataDir(), bundledName), nil
+}
+
 // sidebarLayout mirrors zellij's default layout (tab bar, one pane, status
 // bar) with the plugin docked on the left. A layout without tabs is also the
 // template for every new tab, so `new-tab` gets the sidebar too. The plugin
@@ -445,7 +520,7 @@ func writeLayout(path, layout string) error {
 func ownsLayout(path string) bool {
 	content, err := os.ReadFile(path)
 
-	return err == nil && strings.HasPrefix(string(content), layoutHeader)
+	return err == nil && strings.HasPrefix(string(content), layoutOwner)
 }
 
 // removeLayout deletes the sidebar layout only when cogitator wrote it, so a
@@ -487,7 +562,7 @@ func normalizeKeys(opts *Options) error {
 	}
 
 	keys := []string{opts.NextKey, opts.PickKey}
-	if opts.Plugin != "" {
+	if opts.hasPlugin() {
 		if opts.SidebarKey == "" {
 			opts.SidebarKey = DefaultSidebarKey
 		}
@@ -500,7 +575,7 @@ func normalizeKeys(opts *Options) error {
 		}
 	}
 
-	if opts.Plugin != "" && (opts.SidebarKey == opts.NextKey || opts.SidebarKey == opts.PickKey) {
+	if opts.hasPlugin() && (opts.SidebarKey == opts.NextKey || opts.SidebarKey == opts.PickKey) {
 		return fmt.Errorf("sidebar key %q collides with the next/pick keys", opts.SidebarKey)
 	}
 
@@ -517,7 +592,7 @@ func defaultedKeys(requested, opts Options) []keyChoice {
 	if requested.PickKey == "" {
 		keys = append(keys, keyChoice{flag: "--pick-key", key: opts.PickKey})
 	}
-	if opts.Plugin != "" && requested.SidebarKey == "" {
+	if opts.hasPlugin() && requested.SidebarKey == "" {
 		keys = append(keys, keyChoice{flag: "--sidebar-key", key: opts.SidebarKey})
 	}
 
@@ -717,7 +792,7 @@ func withOwnedBlock(content string, spec *bindSpec) (string, string, error) {
 	}
 
 	if line := userDefaultLayoutLine(content); line > 0 {
-		return "", "", fmt.Errorf("line %d: default_layout is already set; remove it so cogitator can set its sidebar layout, or install without --plugin", line)
+		return "", "", fmt.Errorf("line %d: default_layout is already set; remove it so cogitator can set its sidebar layout, or install with --no-sidebar", line)
 	}
 
 	layout := layoutBlock(spec.layoutPath)

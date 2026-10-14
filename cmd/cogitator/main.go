@@ -27,6 +27,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/tmuxinstall"
 	"github.com/guilhermehto/cogitator/internal/ui"
 	"github.com/guilhermehto/cogitator/internal/zellijinstall"
+	"github.com/guilhermehto/cogitator/internal/zellijplugin"
 )
 
 var (
@@ -230,8 +231,9 @@ func newTmuxInstaller() (tmuxinstall.Installer, error) {
 	}, nil
 }
 
-// runZellijCommand adds or removes the next/pick keybinds in the user's
-// zellij config. zellij hot-reloads config.kdl, so there is no reload step.
+// runZellijCommand adds or removes the next/pick keybinds and the sidebar in
+// the user's zellij config. zellij hot-reloads config.kdl, so there is no
+// reload step.
 func runZellijCommand(args []string) {
 	if len(args) == 0 || (args[0] != "install" && args[0] != "uninstall") {
 		fmt.Fprintln(os.Stderr, "usage: cogitator zellij install|uninstall [flags]")
@@ -241,17 +243,26 @@ func runZellijCommand(args []string) {
 	action := args[0]
 	flags := flag.NewFlagSet("zellij "+action, flag.ExitOnError)
 	opts := zellijinstall.Options{}
+	noSidebar := false
 	flags.StringVar(&opts.ConfigPath, "config", "", "zellij config file to edit (default: zellij's lookup order)")
 	flags.BoolVar(&opts.DryRun, "dry-run", false, "print the changes without writing anything")
 	if action == "install" {
 		flags.StringVar(&opts.NextKey, "next-key", "", fmt.Sprintf("normal-mode key that jumps to the next agent needing attention (default %q)", zellijinstall.DefaultNextKey))
 		flags.StringVar(&opts.PickKey, "pick-key", "", fmt.Sprintf("normal-mode key that opens the agent picker (default %q)", zellijinstall.DefaultPickKey))
 		flags.StringVar(&opts.Binary, "binary", "", "cogitator binary to bind (default: PATH lookup, then this executable)")
-		flags.StringVar(&opts.Plugin, "plugin", "", "cogitator zellij plugin wasm to dock as a sidebar in new sessions (sets default_layout; default: no sidebar)")
-		flags.StringVar(&opts.SidebarKey, "sidebar-key", "", fmt.Sprintf("normal-mode key that focuses the cogitator sidebar (needs --plugin; default %q)", zellijinstall.DefaultSidebarKey))
+		flags.StringVar(&opts.Plugin, "plugin", "", "cogitator zellij plugin wasm to dock as a sidebar in new sessions (default: the plugin bundled in this binary)")
+		flags.BoolVar(&noSidebar, "no-sidebar", false, "bind next/pick only, without the sidebar plugin or default_layout")
+		flags.StringVar(&opts.SidebarKey, "sidebar-key", "", fmt.Sprintf("normal-mode key that focuses the cogitator sidebar (default %q)", zellijinstall.DefaultSidebarKey))
 		flags.BoolVar(&opts.Force, "force", false, "install even when the config already wires cogitator outside the owned block")
 	}
 	_ = flags.Parse(args[1:])
+
+	if action == "install" {
+		if err := withBundledPlugin(&opts, noSidebar); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -261,6 +272,7 @@ func runZellijCommand(args []string) {
 
 	installer := zellijinstall.Installer{
 		Home:       home,
+		DataHome:   os.Getenv("XDG_DATA_HOME"),
 		ConfigFile: os.Getenv("ZELLIJ_CONFIG_FILE"),
 		ConfigDir:  os.Getenv("ZELLIJ_CONFIG_DIR"),
 		LookPath:   exec.LookPath,
@@ -386,6 +398,27 @@ func resolveHookBinary(flagValue string) string {
 	}
 
 	return bin
+}
+
+var errPluginNotBundled = errors.New("plugin not bundled in this build; build it with make plugin and pass --plugin")
+
+// withBundledPlugin docks the plugin embedded in release builds unless the
+// user passed --plugin or --no-sidebar.
+func withBundledPlugin(opts *zellijinstall.Options, noSidebar bool) error {
+	switch {
+	case noSidebar && opts.Plugin != "":
+		return errors.New("--plugin and --no-sidebar are mutually exclusive")
+	case noSidebar || opts.Plugin != "":
+		return nil
+	}
+
+	wasm, ok := zellijplugin.Bundled()
+	if !ok {
+		return errPluginNotBundled
+	}
+	opts.Bundled = &zellijinstall.BundledPlugin{Wasm: wasm}
+
+	return nil
 }
 
 // runOmpHookInstall writes the omp extension with this binary's absolute path
