@@ -66,27 +66,27 @@ func newAgentList() agentList {
 
 // SetAgents lists agents the way the zellij sidebar does (set_agents in
 // zellij-plugin/src/app.rs): those that need you first, then the rest, each
-// part oldest activity first so whoever has waited longest sits on top, with
-// agents of unknown activity closing their part in cogitator's order.
+// part oldest OrderedAt first so whoever has waited longest sits on top, with
+// agents of unknown order closing their part in cogitator's order.
 func (l *agentList) SetAgents(list []agents.Agent) {
 	l.agents = slices.Clone(list)
 	slices.SortStableFunc(l.agents, func(a, b agents.Agent) int {
 		if c := cmp.Compare(agentListPart(a), agentListPart(b)); c != 0 {
 			return c
 		}
-		return a.LastActivity.Compare(b.LastActivity)
+		return a.OrderedAt.Compare(b.OrderedAt)
 	})
 	l.settleCursor()
 }
 
 // agentListPart ranks needs-you agents first and, within each section,
-// agents with a known last activity before those without.
+// agents with a known OrderedAt before those without.
 func agentListPart(a agents.Agent) int {
 	part := 0
 	if a.Group != agents.GroupNeedsYou {
 		part = 2
 	}
-	if a.LastActivity.IsZero() {
+	if a.OrderedAt.IsZero() {
 		part++
 	}
 	return part

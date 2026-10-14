@@ -18,6 +18,9 @@ pub struct Agent {
     pub state: String,
     pub group: String,
     pub last_activity: String,
+    /// Places the agent in oldest-first lists: last_activity, held while the
+    /// agent works so it keeps its place until it stops.
+    pub ordered_at: String,
     pub mux_session: String,
     pub window_id: String,
     pub pane_id: String,
@@ -27,6 +30,10 @@ pub struct Agent {
 impl Agent {
     pub fn last_activity_secs(&self) -> Option<i64> {
         parse_rfc3339(&self.last_activity)
+    }
+
+    pub fn ordered_at_secs(&self) -> Option<i64> {
+        parse_rfc3339(&self.ordered_at)
     }
 
     /// cogitator owns the attention rules; its group says whether the agent
@@ -153,7 +160,7 @@ mod tests {
 
     #[test]
     fn parses_full_agent() {
-        let input = r#"{"version":1,"home":"/h","agents":[{"id":"/a/b#s1","dir":"/a/b","kind":"worktree","repo":"r","branch":"br","workspace":"w","session_name":"s","harness":"omp","title":"t","tab":"LEX-1","attention":"question","state":"running","group":"needs_you","last_activity":"2026-01-01T00:00:00Z","mux_session":"m","window_id":"1","pane_id":"2","session_owned":true,"extra":"x"}]}"#;
+        let input = r#"{"version":1,"home":"/h","agents":[{"id":"/a/b#s1","dir":"/a/b","kind":"worktree","repo":"r","branch":"br","workspace":"w","session_name":"s","harness":"omp","title":"t","tab":"LEX-1","attention":"question","state":"running","group":"needs_you","last_activity":"2026-01-01T00:00:00Z","ordered_at":"2025-12-31T23:00:00Z","mux_session":"m","window_id":"1","pane_id":"2","session_owned":true,"extra":"x"}]}"#;
         let feed = parse(input).unwrap();
         assert_eq!(feed.home, "/h");
         assert_eq!(
@@ -173,6 +180,7 @@ mod tests {
                 state: "running".into(),
                 group: "needs_you".into(),
                 last_activity: "2026-01-01T00:00:00Z".into(),
+                ordered_at: "2025-12-31T23:00:00Z".into(),
                 mux_session: "m".into(),
                 window_id: "1".into(),
                 pane_id: "2".into(),

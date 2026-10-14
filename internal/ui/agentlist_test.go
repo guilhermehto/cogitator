@@ -15,10 +15,11 @@ import (
 var agentListNow = time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 
 func worktreeAgent(id, repo, branch string, group agents.Group, attn state.Attention, st settings.RowState) agents.Agent {
+	last := agentListNow.Add(-5 * time.Minute)
 	return agents.Agent{
 		ID: id, Dir: id, Kind: agents.KindWorktree, Repo: repo, Branch: branch,
 		Harness: "opencode", Group: group, Attention: attn, State: st,
-		LastActivity: agentListNow.Add(-5 * time.Minute),
+		LastActivity: last, OrderedAt: last,
 	}
 }
 
@@ -48,6 +49,7 @@ func TestAgentListMatchesSidebarSectionsAndOldestFirstOrder(t *testing.T) {
 		if age == 0 {
 			a.LastActivity = time.Time{}
 		}
+		a.OrderedAt = a.LastActivity
 		return a
 	}
 	l := newAgentList()

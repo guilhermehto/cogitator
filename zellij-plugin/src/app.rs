@@ -165,12 +165,13 @@ impl App {
     }
 
     /// Agents that need the user come first, then the rest; each part runs
-    /// oldest activity first, so whoever has waited longest sits on top.
-    /// Agents without a timestamp close their part in cogitator's order.
+    /// oldest ordered_at first, so whoever has waited longest sits on top and
+    /// a working agent keeps its place until it stops. Agents without a
+    /// timestamp close their part in cogitator's order.
     /// The TUI's agentList.SetAgents (internal/ui/agentlist.go) mirrors this.
     fn set_agents(&mut self, mut agents: Vec<Agent>) {
         agents.sort_by_cached_key(|a| {
-            let secs = a.last_activity_secs();
+            let secs = a.ordered_at_secs();
             (!a.needs_you(), secs.is_none(), secs)
         });
         let prev_index = self.selected_index();
@@ -279,13 +280,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn orders_oldest_activity_first_and_unknown_last() {
+    fn orders_oldest_first_and_unknown_last() {
         let json = r#"{"version":1,"agents":[
             {"id":"/unknown-1"},
-            {"id":"/newest","last_activity":"2026-01-01T12:00:00Z"},
-            {"id":"/unknown-2","last_activity":"garbage"},
-            {"id":"/oldest","last_activity":"2026-01-01T13:00:00+02:00"},
-            {"id":"/middle","last_activity":"2026-01-01T11:30:00Z"}
+            {"id":"/newest","ordered_at":"2026-01-01T12:00:00Z"},
+            {"id":"/unknown-2","ordered_at":"garbage"},
+            {"id":"/oldest","ordered_at":"2026-01-01T13:00:00+02:00"},
+            {"id":"/middle","ordered_at":"2026-01-01T11:30:00Z","last_activity":"2026-01-01T13:00:00Z"}
         ]}"#;
         let mut app = App::new();
         app.apply_list_result(Some(0), json.as_bytes(), b"");
@@ -298,9 +299,9 @@ pub(crate) mod tests {
     #[test]
     fn needs_you_agents_lead_oldest_first() {
         let json = r#"{"version":1,"agents":[
-            {"id":"/old-idle","group":"idle","last_activity":"2026-01-01T08:00:00Z"},
-            {"id":"/new-ask","group":"needs_you","last_activity":"2026-01-01T12:00:00Z"},
-            {"id":"/old-ask","group":"needs_you","last_activity":"2026-01-01T09:00:00Z"}
+            {"id":"/old-idle","group":"idle","ordered_at":"2026-01-01T08:00:00Z"},
+            {"id":"/new-ask","group":"needs_you","ordered_at":"2026-01-01T12:00:00Z"},
+            {"id":"/old-ask","group":"needs_you","ordered_at":"2026-01-01T09:00:00Z"}
         ]}"#;
         let mut app = App::new();
         app.apply_list_result(Some(0), json.as_bytes(), b"");
