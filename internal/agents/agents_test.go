@@ -84,6 +84,32 @@ func TestBuildOrdersByUrgencyThenOldestFirst(t *testing.T) {
 	}
 }
 
+func TestBuildHoldsWorkingAgentPlaceUntilItStops(t *testing.T) {
+	live := liveViews("/w/a", "/w/b")
+	first := build(Input{Live: live, Rows: []settings.Row{
+		row("/w/a", settings.StateRunning, state.AttnActive, 10*time.Minute),
+		row("/w/b", settings.StateRunning, state.AttnActive, 5*time.Minute),
+	}})
+
+	busy := build(Input{Live: live, Previous: first, Rows: []settings.Row{
+		row("/w/a", settings.StateRunning, state.AttnActive, 0),
+		row("/w/b", settings.StateRunning, state.AttnActive, 5*time.Minute),
+	}})
+	if got, want := ids(busy), []string{"/w/a", "/w/b"}; !equal(got, want) {
+		t.Fatalf("order after new activity = %v, want %v", got, want)
+	}
+	if !busy[0].OrderedAt.Equal(ago(10 * time.Minute)) {
+		t.Fatalf("working agent OrderedAt = %v, want held %v", busy[0].OrderedAt, ago(10*time.Minute))
+	}
+
+	finished := build(Input{Live: live, Previous: busy, Rows: []settings.Row{
+		row("/w/a", settings.StateRunning, state.AttnFinished, 0),
+	}})
+	if !finished[0].OrderedAt.Equal(now) {
+		t.Fatalf("finished agent OrderedAt = %v, want its last activity %v", finished[0].OrderedAt, now)
+	}
+}
+
 func TestBuildStoppedAgentsFollowRecentWindow(t *testing.T) {
 	tests := []struct {
 		name    string

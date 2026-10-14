@@ -64,7 +64,11 @@ type Agent struct {
 	State        settings.RowState
 	Attention    state.Attention
 	LastActivity time.Time
-	Group        Group
+	// OrderedAt places the agent in oldest-first lists. It is LastActivity,
+	// but a working agent keeps the value it had before it started to work:
+	// its activity moves with every tool call, so it moves only when it stops.
+	OrderedAt time.Time
+	Group     Group
 
 	WindowID     string
 	PaneID       string
@@ -90,6 +94,9 @@ type Input struct {
 	// Dismissed maps agent ID to when the user dismissed it. A dismissed agent
 	// stays hidden until it has a tmux window or activity after that time.
 	Dismissed map[string]time.Time
+	// Previous is the list the last Build returned. Working agents keep their
+	// OrderedAt from it.
+	Previous []Agent
 }
 
 // Build returns every agent worth surfacing, ordered by urgency.
@@ -108,6 +115,7 @@ func Build(in Input) []Agent {
 		}
 	}
 
+	holdWorkingOrder(out, in.Previous)
 	sortAgents(out)
 	return out
 }
@@ -409,11 +417,28 @@ func sortAgents(list []Agent) {
 		if a.Group == GroupNeedsYou && a.Attention.Rank() != b.Attention.Rank() {
 			return a.Attention.Rank() < b.Attention.Rank()
 		}
-		if !a.LastActivity.Equal(b.LastActivity) {
-			return a.LastActivity.Before(b.LastActivity)
+		if !a.OrderedAt.Equal(b.OrderedAt) {
+			return a.OrderedAt.Before(b.OrderedAt)
 		}
 		return a.ID < b.ID
 	})
+}
+
+// holdWorkingOrder sets each agent's OrderedAt. A working agent keeps the
+// OrderedAt it had in previous, so it does not change place while it works.
+func holdWorkingOrder(list, previous []Agent) {
+	held := make(map[string]time.Time, len(previous))
+	for _, a := range previous {
+		held[a.ID] = a.OrderedAt
+	}
+
+	for i := range list {
+		a := &list[i]
+		a.OrderedAt = a.LastActivity
+		if at := held[a.ID]; a.Group == GroupWorking && !at.IsZero() {
+			a.OrderedAt = at
+		}
+	}
 }
 
 type paneIndex struct {
