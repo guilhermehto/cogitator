@@ -370,6 +370,62 @@ func TestBuildGivesUnreportedSiblingsDistinctPanes(t *testing.T) {
 	}
 }
 
+func TestBuildDropsAnUnreportedSiblingWhenNoPaneIsFree(t *testing.T) {
+	live := []state.SessionView{
+		siblingView("reported", 2*time.Hour, state.AttnActive, "dev:terminal_1"),
+		siblingView("unreported", time.Hour, state.AttnActive, ""),
+	}
+
+	got := build(Input{Live: live, Panes: siblingPanes()[:1]})
+	if !equal(ids(got), []string{"/w/a#reported"}) || got[0].WindowID != "dev:0" {
+		t.Fatalf("agents = %+v, want only /w/a#reported on tab dev:0", got)
+	}
+}
+
+// A tmux pane id such as "%4" is never in a zellij listing, and a closed pane
+// drops out of any listing.
+func TestBuildLeavesOutSessionsReportedOnUnlistedPanes(t *testing.T) {
+	inTmux := siblingView("tmux", time.Hour, state.AttnActive, "%4")
+	closed := siblingView("closed", time.Hour, state.AttnActive, "dev:terminal_9")
+	here := siblingView("here", 2*time.Hour, state.AttnActive, "dev:terminal_1")
+	managed := row("/w/a", settings.StateRunning, state.AttnActive, time.Minute)
+	managed.SessionID = "tmux"
+
+	cases := map[string]struct {
+		rows []settings.Row
+		live []state.SessionView
+		want []string
+	}{
+		"stray in another multiplexer":              {nil, []state.SessionView{inTmux}, nil},
+		"managed session in another multiplexer":    {[]settings.Row{managed}, []state.SessionView{inTmux}, nil},
+		"session sharing its dir with a closed one": {nil, []state.SessionView{here, closed}, []string{"/w/a"}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := build(Input{Rows: tc.rows, Live: tc.live, Panes: siblingPanes()})
+			if !equal(ids(got), tc.want) {
+				t.Fatalf("agents = %v, want %v", ids(got), tc.want)
+			}
+			if len(got) == 1 && got[0].WindowID != "dev:0" {
+				t.Fatalf("agent = %+v, want it on its reported tab dev:0", got[0])
+			}
+		})
+	}
+}
+
+func TestBuildDescribesTheManagedSessionRunningHere(t *testing.T) {
+	r := row("/w/a", settings.StateRunning, state.AttnQuestionPending, time.Minute)
+	r.SessionID = "tmux"
+	here := siblingView("here", time.Hour, state.AttnActive, "dev:terminal_1")
+	here.Title = "Fix login"
+	live := []state.SessionView{siblingView("tmux", 2*time.Hour, state.AttnQuestionPending, "%4"), here}
+
+	got := build(Input{Rows: []settings.Row{r}, Live: live, Panes: siblingPanes()})
+	if len(got) != 1 || got[0].SessionID != "here" || got[0].Title != "Fix login" || got[0].Group != GroupWorking || got[0].WindowID != "dev:0" {
+		t.Fatalf("agents = %+v, want the working session on tab dev:0", got)
+	}
+}
+
 func TestBuildKeepsOneAgentPerDirForASingleSession(t *testing.T) {
 	live := []state.SessionView{siblingView("only", time.Hour, state.AttnActive, "dev:terminal_2")}
 

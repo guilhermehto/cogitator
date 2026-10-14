@@ -54,6 +54,10 @@ That is how several sessions in one directory each get their own Agents row on t
 tab. A hook still pointing at an older cogitator binary cannot record its pane, so rebuild
 or reinstall after upgrading.
 
+The Agents list shows only agents in the multiplexer cogitator runs in. A session whose
+recorded pane is in another multiplexer, or has closed, is left out. So is a session with no
+recorded pane yet when every pane in its directory already has an agent.
+
 ## Logging
 
 Logs are written with `log/slog` text formatting.
