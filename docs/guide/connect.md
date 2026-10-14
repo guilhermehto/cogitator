@@ -3,6 +3,10 @@
 cogitator watches four harnesses. Each needs a one-time setup on the machine where the agent
 runs; after that, sessions appear in the dashboard automatically.
 
+`cogitator hooks install` does that setup for Claude Code, Codex, and omp in one step: it
+wires each harness it finds to the same cogitator binary and skips the rest. The sections
+below cover each harness on its own.
+
 Every harness has an **automated** path (paste a prompt into the agent itself and let it do
 the setup) and a **manual** path.
 
@@ -40,39 +44,35 @@ cogitator displays live attention signals for [Claude Code](https://docs.anthrop
 sessions using Claude Code's lifecycle hooks. Monitoring **auto-enables** when
 `~/.claude/projects` exists. No environment variable needed.
 
+Install the hooks with one command:
+
+```sh
+cogitator claude-hook install
+```
+
+This merges the hooks below into `~/.claude/settings.json` (`$CLAUDE_HOME/settings.json`
+when set) with the absolute cogitator binary path in each command, keeping every other key
+and hook. A re-run changes nothing; if the binary moved, it updates the commands in place.
+If a hook already runs cogitator another way, such as a wrapper script, it names that entry
+and leaves the file alone; pass `--force` to replace it. Restart Claude Code afterward.
+
 **Automated.** Paste this to Claude Code:
 
 ```text
 Set up cogitator live-attention monitoring for Claude Code on this machine.
 
-1. Run `which cogitator` to find the absolute path to the cogitator binary. If it is not
-   found, stop and tell me to install cogitator first.
-2. Open ~/.claude/settings.json, creating it if it does not exist. Preserve every existing
-   top-level key.
-3. Merge the hooks below into the `hooks` object. Replace the bare command `cogitator`
-   with the absolute path you found in step 1 (the hook runner may not inherit my
-   interactive PATH):
-
-   {
-     "hooks": {
-       "SessionStart":     [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
-       "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
-       "PreToolUse":       [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
-       "PostToolUse":      [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
-       "Stop":             [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
-       "Notification":     [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ],
-       "SessionEnd":       [ { "hooks": [ { "type": "command", "command": "cogitator claude-hook" } ] } ]
-     }
-   }
-
-4. Save the file and tell me to restart Claude Code so the hooks take effect.
+1. Run `which cogitator` to confirm cogitator is installed. If it is not found, stop and
+   tell me to install cogitator first.
+2. Run `cogitator claude-hook install` — it merges the cogitator hooks into
+   ~/.claude/settings.json with the cogitator binary path baked in.
+3. Tell me to restart Claude Code so the hooks take effect.
 ```
 
 **Manual:**
 
 1. Confirm `~/.claude/projects` exists (it does once you've run Claude Code at least once).
-2. Wire the hooks in `~/.claude/settings.json`. cogitator does **not** write this file, so
-   paste the block yourself:
+2. Merge this block into the `hooks` object of `~/.claude/settings.json`, keeping any
+   existing keys:
 
    ```json
    {
@@ -104,36 +104,36 @@ cogitator displays live attention signals for [Codex](https://openai.com/codex) 
 Codex's lifecycle hooks. Monitoring **auto-enables** when `~/.codex` exists. No environment
 variable needed.
 
+Install the hooks with one command:
+
+```sh
+cogitator codex-hook install
+```
+
+This merges the hooks below into `~/.codex/hooks.json` (`$CODEX_HOME/hooks.json` when set)
+with the absolute cogitator binary path in each command, keeping your other hooks. A re-run
+changes nothing; if the binary moved, it updates the commands in place. If a hook already
+runs cogitator another way (a wrapper script, or inline hooks in `config.toml`), it names
+that entry and leaves it alone; pass `--force` to install anyway. Then start `codex`, run
+`/hooks`, and trust the cogitator hook — Codex skips untrusted hooks silently.
+
 **Automated.** Paste this to Codex:
 
 ```text
 Set up cogitator live-attention monitoring for Codex on this machine.
 
-1. Run `which cogitator` to find the absolute path to the cogitator binary. If it is not
-   found, stop and tell me to install cogitator first.
-2. Open ~/.codex/hooks.json, creating it if it does not exist. Preserve any existing keys.
-3. Merge the hooks below into the `hooks` object. Replace the bare command `cogitator`
-   with the absolute path you found in step 1:
-
-   {
-     "hooks": {
-       "SessionStart":      [ { "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
-       "UserPromptSubmit":  [ { "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
-       "PreToolUse":        [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
-       "PostToolUse":       [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
-       "PermissionRequest": [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
-       "Stop":              [ { "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ]
-     }
-   }
-
-4. Save the file, then remind me to start `codex`, run `/hooks`, and confirm trust for
-   `cogitator codex-hook` — Codex skips untrusted hooks silently.
+1. Run `which cogitator` to confirm cogitator is installed. If it is not found, stop and
+   tell me to install cogitator first.
+2. Run `cogitator codex-hook install` — it merges the cogitator hooks into
+   ~/.codex/hooks.json with the cogitator binary path baked in.
+3. Remind me to start `codex`, run `/hooks`, and confirm trust for the cogitator
+   `codex-hook` command — Codex skips untrusted hooks silently.
 ```
 
 **Manual:**
 
 1. Confirm `~/.codex` exists (it does once Codex is installed).
-2. Wire the hooks in `~/.codex/hooks.json`:
+2. Merge this block into the `hooks` object of `~/.codex/hooks.json`:
 
    ```json
    {

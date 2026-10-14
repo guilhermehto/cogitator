@@ -17,14 +17,18 @@ import (
 	"github.com/guilhermehto/cogitator/internal/claudecode"
 	"github.com/guilhermehto/cogitator/internal/codex"
 	"github.com/guilhermehto/cogitator/internal/config"
+	"github.com/guilhermehto/cogitator/internal/hookinstall"
 	"github.com/guilhermehto/cogitator/internal/hookipc"
+	"github.com/guilhermehto/cogitator/internal/installkit"
 	"github.com/guilhermehto/cogitator/internal/logging"
 	"github.com/guilhermehto/cogitator/internal/omp"
 	"github.com/guilhermehto/cogitator/internal/settings"
+	"github.com/guilhermehto/cogitator/internal/setup"
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 	"github.com/guilhermehto/cogitator/internal/tmuxinstall"
 	"github.com/guilhermehto/cogitator/internal/ui"
 	"github.com/guilhermehto/cogitator/internal/zellijinstall"
+	"github.com/guilhermehto/cogitator/internal/zellijplugin"
 )
 
 var (
@@ -48,84 +52,7 @@ func hookStdin() io.Reader {
 func main() {
 	// Route subcommands before flag.Parse() so bare subcommand names are not
 	// misinterpreted as unknown flags.
-	if len(os.Args) > 1 && os.Args[1] == "codex-hook" {
-		if err := codex.SendHook(context.Background(), hookStdin()); err != nil {
-			// A closed cogitator TUI is the expected case, not a failure:
-			// exit 0 silently so Codex never shows a "hook failed" banner.
-			if errors.Is(err, codex.ErrListenerUnavailable) {
-				return
-			}
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	if len(os.Args) > 1 && os.Args[1] == "claude-hook" {
-		if err := claudecode.SendHook(context.Background(), hookStdin()); err != nil {
-			// A closed cogitator TUI is the expected case, not a failure:
-			// exit 0 silently so Claude Code never shows a "hook failed" banner.
-			if errors.Is(err, claudecode.ErrListenerUnavailable) {
-				return
-			}
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	if len(os.Args) > 1 && os.Args[1] == "omp-hook" {
-		// `omp-hook install` writes the live-attention extension into the omp
-		// extensions directory, baking in this binary's absolute path; the bare
-		// form forwards a hook event from stdin.
-		if len(os.Args) > 2 && os.Args[2] == "install" {
-			exe, err := os.Executable()
-			if err != nil {
-				exe = "" // fall back to "cogitator" on PATH
-			}
-			path, err := omp.InstallExtension("", exe)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
-			}
-			fmt.Printf("Installed omp live-attention extension: %s\n", path)
-			fmt.Println("Restart any running omp sessions for it to take effect.")
-			return
-		}
-		if err := omp.SendHook(context.Background(), hookStdin()); err != nil {
-			// A closed cogitator TUI is the expected case, not a failure:
-			// exit 0 silently so omp never shows a "hook failed" banner.
-			if errors.Is(err, omp.ErrListenerUnavailable) {
-				return
-			}
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	if len(os.Args) > 1 && os.Args[1] == "pick" {
-		runPickCommand(os.Args[2:])
-		return
-	}
-
-	if len(os.Args) > 1 && os.Args[1] == "next" {
-		runNextCommand(os.Args[2:])
-		return
-	}
-
-	if len(os.Args) > 1 && os.Args[1] == "tmux" {
-		runTmuxCommand(os.Args[2:])
-		return
-	}
-
-	if len(os.Args) > 1 && os.Args[1] == "zellij" {
-		runZellijCommand(os.Args[2:])
-		return
-	}
-
-	if len(os.Args) > 1 && os.Args[1] == "agents" {
-		runAgentsCommand(os.Args[2:])
+	if len(os.Args) > 1 && (runHookCommand(os.Args[1], os.Args[2:]) || runSubcommand(os.Args[1], os.Args[2:])) {
 		return
 	}
 
@@ -173,6 +100,29 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// runSubcommand runs the terminal subcommands and reports whether name was
+// one.
+func runSubcommand(name string, args []string) bool {
+	switch name {
+	case "pick":
+		runPickCommand(args)
+	case "next":
+		runNextCommand(args)
+	case "tmux":
+		runTmuxCommand(args)
+	case "zellij":
+		runZellijCommand(args)
+	case "setup":
+		runSetupCommand(args)
+	case "agents":
+		runAgentsCommand(args)
+	default:
+		return false
+	}
+
+	return true
 }
 
 // runPickCommand shows the agent picker. A missing --client is resolved from
@@ -241,6 +191,7 @@ func runTmuxCommand(args []string) {
 		flags.StringVar(&opts.NextKey, "next-key", tmuxinstall.DefaultNextKey, "prefix key that jumps to the next agent needing attention")
 		flags.StringVar(&opts.PickKey, "pick-key", tmuxinstall.DefaultPickKey, "prefix key that opens the agent picker")
 		flags.StringVar(&opts.Binary, "binary", "", "cogitator binary to bind (default: PATH lookup, then this executable)")
+		flags.BoolVar(&opts.Force, "force", false, "install even when cogitator is already bound outside the owned file")
 	}
 	flags.Parse(args[1:])
 
@@ -279,8 +230,9 @@ func newTmuxInstaller() (tmuxinstall.Installer, error) {
 	}, nil
 }
 
-// runZellijCommand adds or removes the next/pick keybinds in the user's
-// zellij config. zellij hot-reloads config.kdl, so there is no reload step.
+// runZellijCommand adds or removes the next/pick keybinds and the sidebar in
+// the user's zellij config. zellij hot-reloads config.kdl, so there is no
+// reload step.
 func runZellijCommand(args []string) {
 	if len(args) == 0 || (args[0] != "install" && args[0] != "uninstall") {
 		fmt.Fprintln(os.Stderr, "usage: cogitator zellij install|uninstall [flags]")
@@ -290,30 +242,31 @@ func runZellijCommand(args []string) {
 	action := args[0]
 	flags := flag.NewFlagSet("zellij "+action, flag.ExitOnError)
 	opts := zellijinstall.Options{}
+	noSidebar := false
 	flags.StringVar(&opts.ConfigPath, "config", "", "zellij config file to edit (default: zellij's lookup order)")
 	flags.BoolVar(&opts.DryRun, "dry-run", false, "print the changes without writing anything")
 	if action == "install" {
 		flags.StringVar(&opts.NextKey, "next-key", "", fmt.Sprintf("normal-mode key that jumps to the next agent needing attention (default %q)", zellijinstall.DefaultNextKey))
 		flags.StringVar(&opts.PickKey, "pick-key", "", fmt.Sprintf("normal-mode key that opens the agent picker (default %q)", zellijinstall.DefaultPickKey))
 		flags.StringVar(&opts.Binary, "binary", "", "cogitator binary to bind (default: PATH lookup, then this executable)")
-		flags.StringVar(&opts.Plugin, "plugin", "", "cogitator zellij plugin wasm to dock as a sidebar in new sessions (sets default_layout; default: no sidebar)")
-		flags.StringVar(&opts.SidebarKey, "sidebar-key", "", fmt.Sprintf("normal-mode key that focuses the cogitator sidebar (needs --plugin; default %q)", zellijinstall.DefaultSidebarKey))
+		flags.StringVar(&opts.Plugin, "plugin", "", "cogitator zellij plugin wasm to dock as a sidebar in new sessions (default: the plugin bundled in this binary)")
+		flags.BoolVar(&noSidebar, "no-sidebar", false, "bind next/pick only, without the sidebar plugin or default_layout")
+		flags.StringVar(&opts.SidebarKey, "sidebar-key", "", fmt.Sprintf("normal-mode key that focuses the cogitator sidebar (default %q)", zellijinstall.DefaultSidebarKey))
+		flags.BoolVar(&opts.Force, "force", false, "install even when the config already wires cogitator outside the owned block")
 	}
 	_ = flags.Parse(args[1:])
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "resolve home directory: %v\n", err)
-		os.Exit(1)
+	if action == "install" {
+		if err := withBundledPlugin(&opts, noSidebar); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	}
 
-	installer := zellijinstall.Installer{
-		Home:       home,
-		ConfigFile: os.Getenv("ZELLIJ_CONFIG_FILE"),
-		ConfigDir:  os.Getenv("ZELLIJ_CONFIG_DIR"),
-		LookPath:   exec.LookPath,
-		Executable: os.Executable,
-		Out:        os.Stdout,
+	installer, err := newZellijInstaller()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 
 	if action == "install" {
@@ -325,6 +278,244 @@ func runZellijCommand(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func newZellijInstaller() (zellijinstall.Installer, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return zellijinstall.Installer{}, fmt.Errorf("resolve home directory: %w", err)
+	}
+
+	return zellijinstall.Installer{
+		Home:       home,
+		DataHome:   os.Getenv("XDG_DATA_HOME"),
+		ConfigFile: os.Getenv("ZELLIJ_CONFIG_FILE"),
+		ConfigDir:  os.Getenv("ZELLIJ_CONFIG_DIR"),
+		LookPath:   exec.LookPath,
+		Executable: os.Executable,
+		Out:        os.Stdout,
+	}, nil
+}
+
+// runSetupCommand wires everything cogitator supports on this machine,
+// leaving wiring the user wrote by hand alone. Under tmux it reloads the
+// running server; elsewhere it never touches one.
+func runSetupCommand(args []string) {
+	flags := flag.NewFlagSet("setup", flag.ExitOnError)
+	binary := flags.String("binary", "", "cogitator binary every component runs (default: PATH lookup, then this executable)")
+	yes := flags.Bool("yes", false, "accept the plan with the default keys, without prompting")
+	dryRun := flags.Bool("dry-run", false, "print the plan without writing anything")
+	check := flags.Bool("check", false, "print the plan and exit non-zero if anything is missing or stale; writes nothing")
+	_ = flags.Parse(args)
+
+	wizard, err := newSetupWizard(resolveHookBinary(*binary))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	if err := wizard.Run(setup.ModeFor(*yes, *dryRun, *check)); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func newSetupWizard(binary string) (setup.Wizard, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return setup.Wizard{}, fmt.Errorf("resolve home directory: %w", err)
+	}
+
+	tmuxInstaller, err := newTmuxInstaller()
+	if err != nil {
+		return setup.Wizard{}, err
+	}
+
+	zellijInstaller, err := newZellijInstaller()
+	if err != nil {
+		return setup.Wizard{}, err
+	}
+
+	var bundled *zellijinstall.BundledPlugin
+	if wasm, ok := zellijplugin.Bundled(); ok {
+		bundled = &zellijinstall.BundledPlugin{Wasm: wasm, Version: version}
+	}
+
+	env := setup.Env{LookPath: exec.LookPath, Output: commandOutput}
+
+	return setup.Wizard{
+		Binary: binary,
+		Home:   home,
+		Groups: []setup.Group{
+			setup.TmuxGroup(env, tmuxInstaller, os.Getenv("TMUX") != ""),
+			setup.ZellijGroup(env, zellijInstaller, bundled),
+			setup.HooksGroup(env, hookinstall.Harnesses(config.Default()), os.Stdout),
+		},
+		In:  os.Stdin,
+		Out: os.Stdout,
+	}, nil
+}
+
+func commandOutput(name string, args ...string) (string, error) {
+	out, err := exec.Command(name, args...).Output()
+
+	return string(out), err
+}
+
+// runHookCommand routes the hook subcommands and reports whether name was
+// one. `<harness>-hook install` wires one harness and `hooks install` every
+// harness found; the bare `<harness>-hook` forwards a hook event from stdin.
+func runHookCommand(name string, args []string) bool {
+	switch name {
+	case "claude-hook":
+		installOrForwardHook(args, runClaudeHookInstall, claudecode.SendHook)
+	case "codex-hook":
+		installOrForwardHook(args, runCodexHookInstall, codex.SendHook)
+	case "omp-hook":
+		installOrForwardHook(args, runOmpHookInstall, omp.SendHook)
+	case "hooks":
+		runHooksCommand(args)
+	default:
+		return false
+	}
+
+	return true
+}
+
+func installOrForwardHook(args []string, install func([]string), send func(context.Context, io.Reader) error) {
+	if len(args) > 0 && args[0] == "install" {
+		install(args[1:])
+		return
+	}
+
+	// A closed cogitator TUI is the expected case, not a failure: exit 0
+	// silently so the harness never shows a "hook failed" banner.
+	if err := send(context.Background(), hookStdin()); err != nil && !errors.Is(err, hookipc.ErrListenerUnavailable) {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+// runClaudeHookInstall merges cogitator's hooks into Claude Code's
+// settings.json with the binary's absolute path in every command.
+func runClaudeHookInstall(args []string) {
+	flags := flag.NewFlagSet("claude-hook install", flag.ExitOnError)
+	binary := flags.String("binary", "", "cogitator binary the hooks run (default: PATH lookup, then this executable)")
+	force := flags.Bool("force", false, "install even when cogitator is already wired into Claude Code by hand")
+	_ = flags.Parse(args)
+
+	found, err := claudecode.InstallHooks(config.Default().ClaudeCodeHome, resolveHookBinary(*binary), *force)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	if found.State == installkit.Current {
+		fmt.Printf("Claude Code hooks already set up: %s\n", found.Path)
+		return
+	}
+	fmt.Printf("Installed Claude Code hooks: %s\n", found.Path)
+	fmt.Println("Restart Claude Code for the hooks to take effect.")
+}
+
+// runCodexHookInstall merges cogitator's hooks into Codex's hooks.json.
+// Codex skips untrusted hooks silently, so it ends with the trust step.
+func runCodexHookInstall(args []string) {
+	flags := flag.NewFlagSet("codex-hook install", flag.ExitOnError)
+	binary := flags.String("binary", "", "cogitator binary the hooks run (default: PATH lookup, then this executable)")
+	force := flags.Bool("force", false, "install even when cogitator is already wired into Codex by hand")
+	_ = flags.Parse(args)
+
+	bin := resolveHookBinary(*binary)
+	found, err := codex.InstallHooks(config.Default().CodexHome, bin, *force)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	if found.State == installkit.Current {
+		fmt.Printf("Codex hooks already set up: %s\n", found.Path)
+		return
+	}
+	fmt.Printf("Installed Codex hooks: %s\n", found.Path)
+	fmt.Printf("Start codex, run /hooks, and trust `%s`.\n", installkit.HookCommand(bin, codex.HookSubcommand))
+}
+
+// runHooksCommand wires every harness found on this machine to one binary.
+func runHooksCommand(args []string) {
+	if len(args) == 0 || args[0] != "install" {
+		fmt.Fprintln(os.Stderr, "usage: cogitator hooks install [--binary PATH] [--force]")
+		os.Exit(2)
+	}
+
+	flags := flag.NewFlagSet("hooks install", flag.ExitOnError)
+	binary := flags.String("binary", "", "cogitator binary every hook runs (default: PATH lookup, then this executable)")
+	force := flags.Bool("force", false, "install even where cogitator is already wired by hand")
+	_ = flags.Parse(args[1:])
+
+	harnesses := hookinstall.Harnesses(config.Default())
+	if err := hookinstall.Install(harnesses, resolveHookBinary(*binary), *force, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+// resolveHookBinary is the absolute cogitator binary hook commands run.
+func resolveHookBinary(flagValue string) string {
+	bin, err := installkit.ResolveBinary(flagValue, exec.LookPath, os.Executable)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	return bin
+}
+
+var errPluginNotBundled = errors.New("plugin not bundled in this build; build it with make plugin and pass --plugin")
+
+// withBundledPlugin docks the plugin embedded in release builds unless the
+// user passed --plugin or --no-sidebar.
+func withBundledPlugin(opts *zellijinstall.Options, noSidebar bool) error {
+	switch {
+	case noSidebar && opts.Plugin != "":
+		return errors.New("--plugin and --no-sidebar are mutually exclusive")
+	case noSidebar || opts.Plugin != "":
+		return nil
+	}
+
+	wasm, ok := zellijplugin.Bundled()
+	if !ok {
+		return errPluginNotBundled
+	}
+	opts.Bundled = &zellijinstall.BundledPlugin{Wasm: wasm, Version: version}
+
+	return nil
+}
+
+// runOmpHookInstall writes the omp extension with this binary's absolute path
+// baked in, so omp does not need cogitator on its PATH.
+func runOmpHookInstall(args []string) {
+	flags := flag.NewFlagSet("omp-hook install", flag.ExitOnError)
+	force := flags.Bool("force", false, "install even when cogitator is already wired into omp by hand")
+	_ = flags.Parse(args)
+
+	exe, err := os.Executable()
+	if err != nil {
+		exe = ""
+	}
+
+	found, err := omp.InstallExtension("", exe, *force)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	if found.State == installkit.Current {
+		fmt.Printf("omp live-attention extension already set up: %s\n", found.Path)
+		return
+	}
+	fmt.Printf("Installed omp live-attention extension: %s\n", found.Path)
+	fmt.Println("Restart any running omp sessions for it to take effect.")
 }
 
 // runAgentsCommand exposes the running TUI's agent feed to callers that cannot

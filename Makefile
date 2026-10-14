@@ -2,7 +2,7 @@ BIN := cogitator
 SCHEMA_PORT := 17777
 SCHEMA_URL := http://127.0.0.1:$(SCHEMA_PORT)/doc
 
-.PHONY: test lint build run vet ci clean release generate capture-schema demo plugin plugin-test
+.PHONY: test lint build run vet ci clean release generate capture-schema demo plugin plugin-bundle plugin-test
 
 test:
 	go test -race -count=1 ./...
@@ -59,6 +59,11 @@ capture-schema:
 plugin:
 	cd zellij-plugin && cargo build --release --target wasm32-wasip1
 
+# plugin-bundle copies the wasm where release builds (-tags bundledplugin)
+# embed it.
+plugin-bundle: plugin
+	cp zellij-plugin/target/wasm32-wasip1/release/cogitator-zellij.wasm internal/zellijplugin/cogitator-zellij.wasm
+
 plugin-test:
 	cd zellij-plugin && cargo test
 
@@ -68,3 +73,4 @@ release:
 clean:
 	rm -f $(BIN) coverage.out
 	rm -rf dist
+	rm -f internal/zellijplugin/cogitator-zellij.wasm

@@ -47,7 +47,25 @@ xattr -d com.apple.quarantine cogitator
 
 :::
 
-## 2. Run cogitator
+## 2. Set up
+
+```sh
+cogitator setup
+```
+
+It finds tmux, zellij, and your coding agents (Claude Code, Codex, omp; opencode needs no
+hook), prints what it found and what it would do, and asks once per multiplexer and once for
+the hooks. Everything points at the same cogitator binary. It never sets anything up twice:
+wiring you wrote by hand is reported with its file and line and left alone, and a re-run on
+a set-up machine prints `everything is already set up` and changes no file. Then follow the
+steps it prints: start a new zellij session for the sidebar, restart Claude Code and omp,
+and trust the hook via `/hooks` in Codex.
+
+`cogitator setup --check` prints the same plan and exits non-zero when something is
+missing or outdated; `--yes` accepts the plan without prompting. See the
+[CLI reference](/reference/cli#setup) for every flag.
+
+## 3. Run cogitator
 
 ```sh
 cogitator
@@ -59,14 +77,20 @@ or from source:
 go run ./cmd/cogitator
 ```
 
-## 3. Connect your coding agent
+Keep it running: the picker, the next-agent key, and the zellij sidebar read agent state
+from it.
 
-Pick the harness you use; setup is a one-time step per machine:
+## Set up one piece at a time
 
+`cogitator setup` runs these installers; each also works on its own:
+
+- `cogitator hooks install`: the hooks of every harness found on this machine.
+- [tmux](/guide/tmux#setup): `cogitator tmux install`.
+- zellij: `cogitator zellij install` (see the [CLI reference](/reference/cli#subcommands)).
 - [opencode](/guide/connect#opencode): launch with `--mdns`; discovered automatically.
-- [Claude Code](/guide/connect#claude-code): wire lifecycle hooks in `~/.claude/settings.json`.
-- [Codex](/guide/connect#codex): wire lifecycle hooks in `~/.codex/hooks.json`.
-- [omp](/guide/connect#omp): a single command, `cogitator omp-hook install`.
+- [Claude Code](/guide/connect#claude-code): `cogitator claude-hook install`.
+- [Codex](/guide/connect#codex): `cogitator codex-hook install`.
+- [omp](/guide/connect#omp): `cogitator omp-hook install`.
 
-Each harness offers an **automated** path (paste a prompt into the agent itself and let it do
-the setup) and a **manual** path (do it yourself, step by step).
+Each harness also offers an **automated** path (paste a prompt into the agent itself and let
+it do the setup) and a **manual** path (do it yourself, step by step).

@@ -2,10 +2,18 @@ version: 2
 
 project_name: cogitator
 
+# The zellij plugin wasm is OS-independent: build it once and embed it in
+# every binary (bundledplugin tag), so users never need a Rust toolchain.
+before:
+  hooks:
+    - make plugin-bundle
+
 builds:
   - id: cogitator
     main: ./cmd/cogitator
     binary: cogitator
+    flags:
+      - -tags=bundledplugin
     env:
       - CGO_ENABLED=0
     goos:
@@ -35,7 +43,7 @@ brews:
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     directory: Formula
     homepage: https://github.com/guilhermehto/cogitator
-    description: Monitor local opencode instances from a single TUI
+    description: Monitor coding agents, spin up git worktrees, and jump between them from tmux or zellij
     license: MIT
     test: |
       system "#{bin}/cogitator", "--status"

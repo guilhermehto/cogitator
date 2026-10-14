@@ -8,3 +8,4 @@ node_modules/
 docs/.vitepress/cache/
 *.mov
 zellij-plugin/target/
+internal/zellijplugin/*.wasm

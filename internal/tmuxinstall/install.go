@@ -28,7 +28,13 @@ const (
 	prefixKeyTable  = "prefix"
 )
 
-var boundKeyLine = regexp.MustCompile(`^bind(?:-key)?\s+(\S+)\s`)
+var (
+	boundKeyLine     = regexp.MustCompile(`^bind(?:-key)?\s+(\S+)\s`)
+	bindCommandLine  = regexp.MustCompile(`^bind(?:-key)?\s`)
+	sourceCommand    = regexp.MustCompile(`^source(?:-file)?\s+(.*)$`)
+	cogitatorCommand = regexp.MustCompile(`cogitator\S*\s+(?:pick|next)\b`)
+	ownedNextBinary  = regexp.MustCompile(`run-shell -b "'([^']*)' next --client`)
+)
 
 // Options are the user-facing flags shared by Install and Uninstall.
 type Options struct {
@@ -38,6 +44,7 @@ type Options struct {
 	Binary     string
 	DryRun     bool
 	NoReload   bool
+	Force      bool
 }
 
 // Installer holds the environment seams so tests never read the real home,
@@ -53,9 +60,67 @@ type Installer struct {
 	Warn          io.Writer
 }
 
+// plan is the resolved environment shared by Check and Install so both see
+// the same binary, config path, and status.
+type plan struct {
+	opts       Options
+	binary     string
+	owned      string
+	confPath   string
+	existing   string
+	mode       fs.FileMode
+	sourceLine string
+	status     installkit.Status
+}
+
+// Check reports how the user's tmux wiring compares with what Install would
+// write now. It never writes anything.
+func (i Installer) Check(opts Options) (installkit.Status, error) {
+	p, err := i.plan(opts)
+	if err != nil {
+		return installkit.Status{}, err
+	}
+
+	return p.status, nil
+}
+
 // Install writes the owned bindings file, links it from the user's tmux.conf,
 // and applies it to the running tmux server.
 func (i Installer) Install(opts Options) error {
+	p, err := i.plan(opts)
+	if err != nil {
+		return err
+	}
+
+	if p.status.State == installkit.Foreign && !opts.Force {
+		return &installkit.ForeignError{Status: p.status}
+	}
+
+	if p.status.State == installkit.Current {
+		fmt.Fprintf(i.Out, "%s already set up (next: prefix+%s, pick: prefix+%s)\n", i.OwnedPath, p.opts.NextKey, p.opts.PickKey)
+		if opts.DryRun || opts.NoReload {
+			return nil
+		}
+		return i.reload(p.opts)
+	}
+
+	if opts.DryRun {
+		i.printDryRun(p)
+		return nil
+	}
+
+	if err := i.write(p); err != nil {
+		return err
+	}
+
+	if opts.NoReload {
+		return nil
+	}
+
+	return i.reload(p.opts)
+}
+
+func (i Installer) plan(opts Options) (plan, error) {
 	if opts.NextKey == "" {
 		opts.NextKey = DefaultNextKey
 	}
@@ -65,59 +130,229 @@ func (i Installer) Install(opts Options) error {
 
 	for _, key := range []string{opts.NextKey, opts.PickKey} {
 		if err := validateKey(key); err != nil {
-			return err
+			return plan{}, err
 		}
 	}
 
 	binary, err := installkit.ResolveBinary(opts.Binary, i.LookPath, i.Executable)
 	if err != nil {
-		return err
+		return plan{}, err
 	}
-
-	owned := ownedFileContent(binary, opts.NextKey, opts.PickKey)
-	sourceLine := sourceFileLine(i.OwnedPath)
 
 	confPath, err := i.resolveUserConfig(opts.ConfigPath)
 	if err != nil {
-		return err
+		return plan{}, err
 	}
 
 	existing, mode, err := installkit.ReadConfig(confPath)
 	if err != nil {
-		return err
+		return plan{}, err
 	}
 
-	updated, linked := withSourceLine(existing, i.OwnedPath, sourceLine)
+	p := plan{
+		opts:       opts,
+		binary:     binary,
+		owned:      ownedFileContent(binary, opts.NextKey, opts.PickKey),
+		confPath:   confPath,
+		existing:   existing,
+		mode:       mode,
+		sourceLine: sourceFileLine(i.OwnedPath),
+	}
 
-	if opts.DryRun {
-		fmt.Fprintf(i.Out, "would write %s:\n%s", i.OwnedPath, owned)
-		if linked {
-			fmt.Fprintf(i.Out, "would append to %s: %s\n", confPath, sourceLine)
-		} else {
-			fmt.Fprintf(i.Out, "%s already sources %s\n", confPath, i.OwnedPath)
+	if foreign, found := i.findForeignBinding(confPath, existing); found {
+		p.status = foreign
+		return p, nil
+	}
+
+	p.status, err = i.managedStatus(p)
+	if err != nil {
+		return plan{}, err
+	}
+
+	return p, nil
+}
+
+func (i Installer) managedStatus(p plan) (installkit.Status, error) {
+	current, err := os.ReadFile(i.OwnedPath)
+	ownedExists := err == nil
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return installkit.Status{}, fmt.Errorf("read %s: %w", i.OwnedPath, err)
+	}
+
+	linked := referencingLines(p.existing, i.OwnedPath) > 0
+	status := installkit.Status{Path: i.OwnedPath}
+
+	switch {
+	case !ownedExists && !linked:
+		status.State = installkit.Missing
+	case !ownedExists:
+		status.State = installkit.Stale
+		status.Detail = p.confPath + " sources it but the file is missing"
+	case !linked:
+		status.State = installkit.Stale
+		status.Detail = p.confPath + " does not source it"
+	case string(current) != p.owned:
+		status.State = installkit.Stale
+		status.Detail = staleDetail(string(current), p.binary)
+	default:
+		status.State = installkit.Current
+	}
+
+	return status, nil
+}
+
+// staleDetail names the binary change when the owned file binds another
+// binary; otherwise the keys or template changed.
+func staleDetail(owned, binary string) string {
+	match := ownedNextBinary.FindStringSubmatch(owned)
+	if match == nil {
+		return "bindings differ from what install would write"
+	}
+
+	old := strings.NewReplacer("##", "#", `\\`, `\`, `\"`, `"`, `\$`, `$`).Replace(match[1])
+	if old == binary {
+		return "bindings differ from what install would write"
+	}
+
+	return old + " -> " + binary
+}
+
+// WithManagedKeys fills opts' empty next/pick keys with the ones the owned
+// file binds, so re-running install keeps keys the user chose earlier.
+func (i Installer) WithManagedKeys(opts Options) Options {
+	content, err := os.ReadFile(i.OwnedPath)
+	if err != nil {
+		return opts
+	}
+
+	for _, line := range strings.Split(string(content), "\n") {
+		match := boundKeyLine.FindStringSubmatch(line)
+		switch {
+		case match == nil:
+		case strings.Contains(line, " next --client") && opts.NextKey == "":
+			opts.NextKey = match[1]
+		case strings.Contains(line, " pick --client") && opts.PickKey == "":
+			opts.PickKey = match[1]
 		}
+	}
+
+	return opts
+}
+
+// findForeignBinding walks the user's tmux.conf and every file it sources
+// (except the owned file) for a hand-written bind that runs cogitator.
+func (i Installer) findForeignBinding(confPath, content string) (installkit.Status, bool) {
+	visited := map[string]bool{filepath.Clean(i.OwnedPath): true}
+
+	return i.scanForForeign(confPath, content, visited)
+}
+
+func (i Installer) scanForForeign(path, content string, visited map[string]bool) (installkit.Status, bool) {
+	visited[filepath.Clean(path)] = true
+
+	for n, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		if bindCommandLine.MatchString(trimmed) && cogitatorCommand.MatchString(trimmed) {
+			return installkit.Status{State: installkit.Foreign, Path: path, Line: n + 1, Detail: trimmed}, true
+		}
+
+		if status, found := i.scanSourced(trimmed, visited); found {
+			return status, true
+		}
+	}
+
+	return installkit.Status{}, false
+}
+
+func (i Installer) scanSourced(line string, visited map[string]bool) (installkit.Status, bool) {
+	if referencesPath(line, i.OwnedPath) {
+		return installkit.Status{}, false
+	}
+
+	for _, sourced := range i.sourcedFiles(line) {
+		if visited[filepath.Clean(sourced)] {
+			continue
+		}
+
+		data, err := os.ReadFile(sourced)
+		if err != nil {
+			visited[filepath.Clean(sourced)] = true
+			continue
+		}
+
+		if status, found := i.scanForForeign(sourced, string(data), visited); found {
+			return status, true
+		}
+	}
+
+	return installkit.Status{}, false
+}
+
+// sourcedFiles expands the paths of a source/source-file line; flags are
+// ignored and relative paths skipped because their base is ambiguous.
+func (i Installer) sourcedFiles(line string) []string {
+	match := sourceCommand.FindStringSubmatch(line)
+	if match == nil {
 		return nil
 	}
 
-	if err := installkit.WriteFileAtomic(i.OwnedPath, []byte(owned), 0o644); err != nil {
+	var files []string
+	for _, arg := range strings.Fields(match[1]) {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+
+		path := strings.Trim(arg, `'"`)
+		if strings.HasPrefix(path, "~/") {
+			path = filepath.Join(i.Home, path[2:])
+		}
+		if !filepath.IsAbs(path) {
+			continue
+		}
+
+		matches, err := filepath.Glob(path)
+		if err != nil {
+			continue
+		}
+		files = append(files, matches...)
+	}
+
+	return files
+}
+
+func (i Installer) printDryRun(p plan) {
+	_, linked := withSourceLine(p.existing, i.OwnedPath, p.sourceLine)
+
+	fmt.Fprintf(i.Out, "would write %s:\n%s", i.OwnedPath, p.owned)
+	if linked {
+		fmt.Fprintf(i.Out, "would append to %s: %s\n", p.confPath, p.sourceLine)
+	} else {
+		fmt.Fprintf(i.Out, "%s already sources %s\n", p.confPath, i.OwnedPath)
+	}
+}
+
+func (i Installer) write(p plan) error {
+	if err := installkit.WriteFileAtomic(i.OwnedPath, []byte(p.owned), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", i.OwnedPath, err)
 	}
-	fmt.Fprintf(i.Out, "wrote %s (next: prefix+%s, pick: prefix+%s)\n", i.OwnedPath, opts.NextKey, opts.PickKey)
+	fmt.Fprintf(i.Out, "wrote %s (next: prefix+%s, pick: prefix+%s)\n", i.OwnedPath, p.opts.NextKey, p.opts.PickKey)
 
-	if linked {
-		if err := installkit.WriteFileAtomic(confPath, []byte(updated), mode); err != nil {
-			return fmt.Errorf("write %s: %w", confPath, err)
-		}
-		fmt.Fprintf(i.Out, "added %q to %s\n", sourceLine, confPath)
-	} else {
-		fmt.Fprintf(i.Out, "%s already sources %s\n", confPath, i.OwnedPath)
-	}
-
-	if opts.NoReload {
+	updated, linked := withSourceLine(p.existing, i.OwnedPath, p.sourceLine)
+	if !linked {
+		fmt.Fprintf(i.Out, "%s already sources %s\n", p.confPath, i.OwnedPath)
 		return nil
 	}
 
-	return i.reload(opts)
+	if err := installkit.WriteFileAtomic(p.confPath, []byte(updated), p.mode); err != nil {
+		return fmt.Errorf("write %s: %w", p.confPath, err)
+	}
+	fmt.Fprintf(i.Out, "added %q to %s\n", p.sourceLine, p.confPath)
+
+	return nil
 }
 
 // Uninstall removes the source-file line and the owned file, and unbinds the

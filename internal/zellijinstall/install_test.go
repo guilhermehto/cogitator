@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/guilhermehto/cogitator/internal/installkit"
 )
 
 const testBinary = "/opt/bin/cogitator"
@@ -142,7 +144,7 @@ func TestInstallTwiceKeepsSingleBlock(t *testing.T) {
 	if got := readFile(t, env.conf); got != first {
 		t.Fatalf("second install changed the file:\n%s", got)
 	}
-	if !strings.Contains(env.out.String(), "already has the cogitator keybinds") {
+	if !strings.Contains(env.out.String(), "already set up") {
 		t.Fatalf("unexpected output: %q", env.out.String())
 	}
 
@@ -833,6 +835,20 @@ func TestInstallRejectsDefaultNextKeyBoundInTargetMode(t *testing.T) {
 	}
 }
 
+func TestInstallRejectsDefaultPickKeyBoundInModeSectionWithProperties(t *testing.T) {
+	env := newTestEnv(t)
+	original := "default_mode \"locked\"\nkeybinds {\n    normal clear-defaults=true {\n        bind \"" + DefaultPickKey + "\" { NewTab; SwitchToMode \"locked\"; }\n    }\n}\n"
+	writeFile(t, env.conf, original, 0o644)
+
+	err := env.installer.Install(Options{})
+	if err == nil || !strings.Contains(err.Error(), `"`+DefaultPickKey+`"`) || !strings.Contains(err.Error(), "--pick-key") {
+		t.Fatalf("want an error naming %q and --pick-key, got %v", DefaultPickKey, err)
+	}
+	if got := readFile(t, env.conf); got != original {
+		t.Fatalf("config written despite the clash:\n%s", got)
+	}
+}
+
 func TestInstallIgnoresBindsOutsideTargetMode(t *testing.T) {
 	cases := map[string]string{
 		"other mode":                "keybinds {\n    pane {\n        bind \"" + DefaultSidebarKey + "\" { Detach; }\n    }\n}\n",
@@ -949,6 +965,638 @@ func TestConfigLookupOrder(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.installer.configPath(tc.explicit); got != tc.want {
 				t.Fatalf("configPath = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// handWiredPick binds cogitator's picker in normal mode outside any
+// cogitator block, as a user would before running the installer.
+const handWiredPick = `keybinds {
+    // bind "x" { Run "cogitator" "next"; }
+    normal {
+        bind "a" { Run "cogitator" "pick" { floating true; }; SwitchToMode "locked"; }
+    }
+}
+default_mode "locked"
+`
+
+const handWiredPickLine = 4
+
+// writeForeignSidebar points the user's own default_layout at a layout file
+// that loads a cogitator wasm, without cogitator's managed header.
+func writeForeignSidebar(t *testing.T, env testEnv) string {
+	t.Helper()
+
+	original := userShapedConfig + "default_layout \"cogitator\"\n"
+	writeFile(t, env.conf, original, 0o644)
+	layout := "layout {\n    pane size=40 {\n        plugin location=\"file:/x/cogitator-zellij.wasm\"\n    }\n    pane\n}\n"
+	writeFile(t, filepath.Join(filepath.Dir(env.conf), "layouts", "cogitator.kdl"), layout, 0o644)
+
+	return original
+}
+
+func TestCheckReportsKeybindsState(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, env testEnv)
+		want  installkit.State
+		line  int
+	}{
+		{"missing without a block", func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+		}, installkit.Missing, 0},
+		{"current after install", func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(Options{}); err != nil {
+				t.Fatal(err)
+			}
+		}, installkit.Current, 0},
+		{"stale after install with other keys", func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(Options{PickKey: "A"}); err != nil {
+				t.Fatal(err)
+			}
+		}, installkit.Stale, 0},
+		{"stale after install with another binary", func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(Options{Binary: "/old/cogitator"}); err != nil {
+				t.Fatal(err)
+			}
+		}, installkit.Stale, 0},
+		{"foreign hand-written bind", func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, handWiredPick, 0o644)
+		}, installkit.Foreign, handWiredPickLine},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			tc.setup(t, env)
+			before := readFile(t, env.conf)
+
+			report, err := env.installer.Check(Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			conf := resolvedPath(t, env.conf)
+			if report.Keybinds.State != tc.want || report.Keybinds.Line != tc.line || report.Keybinds.Path != conf {
+				t.Fatalf("keybinds = %+v, want %v at line %d of %s", report.Keybinds, tc.want, tc.line, conf)
+			}
+			if report.Sidebar.State != installkit.Unavailable {
+				t.Fatalf("sidebar without plugin = %+v, want unavailable", report.Sidebar)
+			}
+			if got := readFile(t, env.conf); got != before {
+				t.Fatalf("check changed the config:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestCheckReportsSidebarState(t *testing.T) {
+	wasm := writePlugin(t)
+	otherWasm := filepath.Join(t.TempDir(), "cogitator-zellij.wasm")
+	writeFile(t, otherWasm, "\x00asm", 0o644)
+
+	cases := []struct {
+		name   string
+		plugin string
+		setup  func(t *testing.T, env testEnv)
+		want   installkit.State
+	}{
+		{"unavailable without plugin", "", func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+		}, installkit.Unavailable},
+		{"missing without a layout block", wasm, func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(Options{}); err != nil {
+				t.Fatal(err)
+			}
+		}, installkit.Missing},
+		{"current after install", wasm, func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(Options{Plugin: wasm}); err != nil {
+				t.Fatal(err)
+			}
+		}, installkit.Current},
+		{"stale with another plugin", wasm, func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(Options{Plugin: otherWasm}); err != nil {
+				t.Fatal(err)
+			}
+		}, installkit.Stale},
+		{"stale with deleted layout", wasm, func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(Options{Plugin: wasm}); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(filepath.Dir(env.conf), "layouts", "cogitator.kdl")); err != nil {
+				t.Fatal(err)
+			}
+		}, installkit.Stale},
+		{"foreign user default_layout", wasm, func(t *testing.T, env testEnv) {
+			writeForeignSidebar(t, env)
+		}, installkit.Foreign},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			tc.setup(t, env)
+
+			report, err := env.installer.Check(Options{Plugin: tc.plugin})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if report.Sidebar.State != tc.want {
+				t.Fatalf("sidebar = %+v, want %v", report.Sidebar, tc.want)
+			}
+		})
+	}
+}
+
+func TestCheckSidebarForeignNamesDefaultLayoutLineAndFile(t *testing.T) {
+	env := newTestEnv(t)
+	writeForeignSidebar(t, env)
+
+	report, err := env.installer.Check(Options{Plugin: writePlugin(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantLine := strings.Count(userShapedConfig, "\n") + 1
+	layoutPath := filepath.Join(filepath.Dir(env.conf), "layouts", "cogitator.kdl")
+	if report.Sidebar.Path != resolvedPath(t, env.conf) || report.Sidebar.Line != wantLine || !strings.Contains(report.Sidebar.Detail, layoutPath) {
+		t.Fatalf("sidebar = %+v, want line %d naming %s", report.Sidebar, wantLine, layoutPath)
+	}
+}
+
+func resolvedPath(t *testing.T, path string) string {
+	t.Helper()
+
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return resolved
+}
+
+func TestCheckIgnoresUserDefaultLayoutWithoutCogitator(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig+"default_layout \"compact\"\n", 0o644)
+	writeFile(t, filepath.Join(filepath.Dir(env.conf), "layouts", "compact.kdl"), "layout {\n    pane\n}\n", 0o644)
+
+	report, err := env.installer.Check(Options{Plugin: writePlugin(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.Sidebar.State != installkit.Missing {
+		t.Fatalf("sidebar = %+v, want missing", report.Sidebar)
+	}
+}
+
+func TestInstallRefusesHandWiredKeybindsWithoutWriting(t *testing.T) {
+	for _, dryRun := range []bool{false, true} {
+		env := newTestEnv(t)
+		writeFile(t, env.conf, handWiredPick, 0o644)
+
+		err := env.installer.Install(Options{DryRun: dryRun})
+		var foreign *installkit.ForeignError
+		if !errors.As(err, &foreign) {
+			t.Fatalf("dry run %v: err = %v, want a ForeignError", dryRun, err)
+		}
+		if foreign.Status.Line != handWiredPickLine || !strings.Contains(err.Error(), `Run "cogitator" "pick"`) {
+			t.Fatalf("error does not name the hand-written bind: %v", err)
+		}
+		if got := readFile(t, env.conf); got != handWiredPick {
+			t.Fatalf("config written despite the refusal:\n%s", got)
+		}
+		if env.out.Len() != 0 {
+			t.Fatalf("dry run %v printed despite the refusal: %q", dryRun, env.out.String())
+		}
+	}
+}
+
+func TestInstallForceProceedsPastHandWiredKeybinds(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, handWiredPick, 0o644)
+
+	if err := env.installer.Install(Options{Force: true, PickKey: "a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	content := readFile(t, env.conf)
+	if !strings.Contains(content, beginMarker) || !strings.Contains(content, `bind "a" { Run "cogitator" "pick"`) {
+		t.Fatalf("forced install did not add its block beside the user's bind:\n%s", content)
+	}
+}
+
+func TestInstallWithPluginRefusesHandWiredSidebarWithoutWriting(t *testing.T) {
+	env := newTestEnv(t)
+	original := writeForeignSidebar(t, env)
+	layoutPath := filepath.Join(filepath.Dir(env.conf), "layouts", "cogitator.kdl")
+	layout := readFile(t, layoutPath)
+
+	err := env.installer.Install(Options{Plugin: writePlugin(t)})
+	var foreign *installkit.ForeignError
+	if !errors.As(err, &foreign) || foreign.Status.Line == 0 {
+		t.Fatalf("err = %v, want a ForeignError at the default_layout line", err)
+	}
+	if got := readFile(t, env.conf); got != original {
+		t.Fatalf("config written despite the refusal:\n%s", got)
+	}
+	if got := readFile(t, layoutPath); got != layout {
+		t.Fatalf("user layout changed:\n%s", got)
+	}
+}
+
+var testWasm = []byte("\x00asm bundled")
+
+const testWasmName = "cogitator-zellij-1.0.0.wasm"
+
+func bundled() *BundledPlugin {
+	return &BundledPlugin{Wasm: testWasm, Version: "1.0.0"}
+}
+
+func dataWasm(env testEnv, name string) string {
+	return filepath.Join(env.home, ".local", "share", "cogitator", name)
+}
+
+func installedWasm(t *testing.T, env testEnv) []string {
+	t.Helper()
+
+	paths, err := filepath.Glob(dataWasm(env, "*.wasm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return paths
+}
+
+func TestInstallWritesBundledPluginToDataDir(t *testing.T) {
+	cases := []struct {
+		name     string
+		dataHome func(env testEnv) string
+		wantDir  func(env testEnv) string
+	}{
+		{"XDG_DATA_HOME", func(env testEnv) string { return filepath.Join(env.home, "xdg") }, func(env testEnv) string { return filepath.Join(env.home, "xdg", "cogitator") }},
+		{"home default", func(testEnv) string { return "" }, func(env testEnv) string { return filepath.Join(env.home, ".local", "share", "cogitator") }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			env.installer.DataHome = tc.dataHome(env)
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+
+			if err := env.installer.Install(Options{Bundled: bundled()}); err != nil {
+				t.Fatal(err)
+			}
+
+			wasm := filepath.Join(tc.wantDir(env), testWasmName)
+			if got := readFile(t, wasm); got != string(testWasm) {
+				t.Fatalf("bundled wasm = %q, want %q", got, testWasm)
+			}
+			layout := readFile(t, filepath.Join(filepath.Dir(env.conf), "layouts", "cogitator.kdl"))
+			if !strings.Contains(layout, `plugin location="file:`+wasm+`"`) {
+				t.Fatalf("layout does not dock the bundled copy %s:\n%s", wasm, layout)
+			}
+		})
+	}
+}
+
+func TestInstallBundledDryRunNamesWasmWithoutWriting(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+	wasm := dataWasm(env, testWasmName)
+
+	if err := env.installer.Install(Options{Bundled: bundled(), DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(wasm); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dry run wrote the wasm: %v", err)
+	}
+	if !strings.Contains(env.out.String(), "to "+wasm+"\n") || !strings.Contains(env.out.String(), `plugin location="file:`+wasm+`"`) {
+		t.Fatalf("dry run does not name the wasm and its layout: %q", env.out.String())
+	}
+}
+
+func TestReinstallBundledPluginIsANoop(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+
+	if err := env.installer.Install(Options{Bundled: bundled()}); err != nil {
+		t.Fatal(err)
+	}
+	env.out.Reset()
+	if err := env.installer.Install(Options{Bundled: bundled()}); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(env.out.String(), "already set up") {
+		t.Fatalf("second install = %q, want already set up", env.out.String())
+	}
+}
+
+func TestExplicitPluginWinsOverBundled(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+	wasm := writePlugin(t)
+
+	if err := env.installer.Install(Options{Plugin: wasm, Bundled: bundled()}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(filepath.Join(env.home, ".local", "share", "cogitator")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("bundled wasm written despite --plugin: %v", err)
+	}
+	if layout := readFile(t, filepath.Join(filepath.Dir(env.conf), "layouts", "cogitator.kdl")); !strings.Contains(layout, "file:"+wasm) {
+		t.Fatalf("layout does not dock the explicit plugin:\n%s", layout)
+	}
+}
+
+func TestCheckReportsBundledSidebarState(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, env testEnv)
+		want  installkit.State
+	}{
+		{"missing before install", func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+		}, installkit.Missing},
+		{"current after install", func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(Options{Bundled: bundled()}); err != nil {
+				t.Fatal(err)
+			}
+		}, installkit.Current},
+		{"stale when the copy holds another build", func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(Options{Bundled: bundled()}); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, dataWasm(env, testWasmName), "\x00asm older", 0o644)
+		}, installkit.Stale},
+		{"stale when the copy was deleted", func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(Options{Bundled: bundled()}); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(dataWasm(env, testWasmName)); err != nil {
+				t.Fatal(err)
+			}
+		}, installkit.Stale},
+		{"stale after an upgrade", func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(Options{Bundled: &BundledPlugin{Wasm: []byte("\x00asm old"), Version: "0.9.0"}}); err != nil {
+				t.Fatal(err)
+			}
+		}, installkit.Stale},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			tc.setup(t, env)
+
+			report, err := env.installer.Check(Options{Bundled: bundled()})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if report.Sidebar.State != tc.want {
+				t.Fatalf("sidebar = %+v, want %v", report.Sidebar, tc.want)
+			}
+		})
+	}
+}
+
+func TestInstallUpgradeLeavesOnlyTheNewWasm(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+	oldWasm := &BundledPlugin{Wasm: []byte("\x00asm old"), Version: "0.9.0"}
+
+	if err := env.installer.Install(Options{Bundled: oldWasm}); err != nil {
+		t.Fatal(err)
+	}
+	env.out.Reset()
+	if err := env.installer.Install(Options{Bundled: bundled()}); err != nil {
+		t.Fatal(err)
+	}
+
+	wasm := dataWasm(env, testWasmName)
+	if got := installedWasm(t, env); len(got) != 1 || got[0] != wasm {
+		t.Fatalf("installed wasm = %v, want only %s", got, wasm)
+	}
+	layout := readFile(t, filepath.Join(filepath.Dir(env.conf), "layouts", "cogitator.kdl"))
+	if !strings.Contains(layout, `plugin location="file:`+wasm+`"`) || !strings.Contains(readFile(t, env.conf), `MessagePlugin "file:`+wasm+`"`) {
+		t.Fatalf("layout or sidebar bind does not reference %s:\n%s", wasm, layout)
+	}
+	if !strings.Contains(env.out.String(), "removed the unused plugin copy "+dataWasm(env, "cogitator-zellij-0.9.0.wasm")) {
+		t.Fatalf("upgrade does not report the removed copy: %q", env.out.String())
+	}
+}
+
+func TestInstallDryRunListsWasmItWouldRemove(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+	if err := env.installer.Install(Options{Bundled: &BundledPlugin{Wasm: []byte("\x00asm old"), Version: "0.9.0"}}); err != nil {
+		t.Fatal(err)
+	}
+	oldWasm := dataWasm(env, "cogitator-zellij-0.9.0.wasm")
+
+	if err := env.installer.Install(Options{Bundled: bundled(), DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(oldWasm); err != nil {
+		t.Fatalf("dry run removed the old copy: %v", err)
+	}
+	if !strings.Contains(env.out.String(), "would remove the unused plugin copy "+oldWasm) {
+		t.Fatalf("dry run does not list the old copy: %q", env.out.String())
+	}
+}
+
+func TestInstallWithExplicitPluginRemovesBundledCopies(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+	if err := env.installer.Install(Options{Bundled: bundled()}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := env.installer.Install(Options{Plugin: writePlugin(t)}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := installedWasm(t, env); len(got) != 0 {
+		t.Fatalf("bundled copies left after switching to --plugin: %v", got)
+	}
+}
+
+func TestInstallKeepsExplicitPluginInsideDataDir(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+	wasm := dataWasm(env, "cogitator-zellij-local.wasm")
+	writeFile(t, wasm, "\x00asm local", 0o644)
+
+	if err := env.installer.Install(Options{Plugin: wasm}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := installedWasm(t, env); len(got) != 1 {
+		t.Fatalf("installed wasm = %v, want the docked --plugin kept", got)
+	}
+}
+
+func TestUninstallRemovesBundledWasm(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+	if err := env.installer.Install(Options{Bundled: bundled()}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := env.installer.Uninstall(Options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := installedWasm(t, env); len(got) != 0 {
+		t.Fatalf("bundled copies left after uninstall: %v", got)
+	}
+}
+
+func TestBundledWasmFileName(t *testing.T) {
+	hashName := BundledPlugin{Wasm: testWasm, Version: "dev"}.fileName()
+
+	cases := []struct {
+		name    string
+		plugin  BundledPlugin
+		want    string
+		notWant string
+	}{
+		{"release version", BundledPlugin{Wasm: testWasm, Version: "0.2.0"}, "cogitator-zellij-0.2.0.wasm", ""},
+		{"snapshot version", BundledPlugin{Wasm: testWasm, Version: "0.2.0-SNAPSHOT-d9cef83"}, "cogitator-zellij-0.2.0-SNAPSHOT-d9cef83.wasm", ""},
+		{"empty version hashes the wasm", BundledPlugin{Wasm: testWasm}, hashName, ""},
+		{"path-like version hashes the wasm", BundledPlugin{Wasm: testWasm, Version: "../x"}, hashName, ""},
+		{"dev builds of other wasm differ", BundledPlugin{Wasm: []byte("\x00asm other"), Version: "dev"}, "", hashName},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.plugin.fileName()
+			if tc.want != "" && got != tc.want {
+				t.Fatalf("fileName = %q, want %q", got, tc.want)
+			}
+			if got == tc.notWant || !strings.HasPrefix(got, "cogitator-zellij-") || !strings.HasSuffix(got, ".wasm") {
+				t.Fatalf("fileName = %q, want a distinct cogitator-zellij-*.wasm", got)
+			}
+		})
+	}
+}
+
+func TestCheckStaleDetailNamesWhatChanged(t *testing.T) {
+	cases := []struct {
+		name      string
+		installed Options
+		tamper    func(t *testing.T, env testEnv)
+		keybinds  func(env testEnv) string
+		sidebar   func(env testEnv) string
+	}{
+		{
+			name:      "another binary shows old -> new binary",
+			installed: Options{Binary: "/old/cogitator", Bundled: bundled()},
+			keybinds:  func(testEnv) string { return "/old/cogitator -> " + testBinary },
+			sidebar:   func(testEnv) string { return "/old/cogitator -> " + testBinary },
+		},
+		{
+			name:      "older bundled plugin shows old -> new plugin path",
+			installed: Options{Bundled: &BundledPlugin{Wasm: []byte("\x00asm old"), Version: "0.9.0"}},
+			keybinds:  func(testEnv) string { return "keybinds differ from what install would write" },
+			sidebar: func(env testEnv) string {
+				return dataWasm(env, "cogitator-zellij-0.9.0.wasm") + " -> " + dataWasm(env, testWasmName)
+			},
+		},
+		{
+			name:      "overwritten plugin copy names the copy",
+			installed: Options{Bundled: bundled()},
+			tamper: func(t *testing.T, env testEnv) {
+				writeFile(t, dataWasm(env, testWasmName), "\x00asm older", 0o644)
+			},
+			sidebar: func(env testEnv) string {
+				return dataWasm(env, testWasmName) + " differs from the plugin in this build"
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(tc.installed); err != nil {
+				t.Fatal(err)
+			}
+			if tc.tamper != nil {
+				tc.tamper(t, env)
+			}
+
+			report, err := env.installer.Check(Options{Bundled: bundled()})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if tc.keybinds != nil && (report.Keybinds.State != installkit.Stale || report.Keybinds.Detail != tc.keybinds(env)) {
+				t.Fatalf("keybinds = %+v, want stale with %q", report.Keybinds, tc.keybinds(env))
+			}
+			if report.Sidebar.State != installkit.Stale || report.Sidebar.Detail != tc.sidebar(env) {
+				t.Fatalf("sidebar = %+v, want stale with %q", report.Sidebar, tc.sidebar(env))
+			}
+		})
+	}
+}
+
+func TestWithManagedKeysKeepsInstalledKeys(t *testing.T) {
+	cases := []struct {
+		name      string
+		installed *Options
+		requested Options
+		want      Options
+	}{
+		{
+			name: "nothing installed leaves keys empty",
+		},
+		{
+			name:      "installed custom keys fill empty ones",
+			installed: &Options{NextKey: "n", PickKey: "Ctrl p", SidebarKey: "s", Bundled: bundled()},
+			want:      Options{NextKey: "n", PickKey: "Ctrl p", SidebarKey: "s"},
+		},
+		{
+			name:      "explicit keys win over installed ones",
+			installed: &Options{NextKey: "n", PickKey: "Ctrl p"},
+			requested: Options{PickKey: "x"},
+			want:      Options{NextKey: "n", PickKey: "x"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if tc.installed != nil {
+				if err := env.installer.Install(*tc.installed); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got, err := env.installer.WithManagedKeys(tc.requested)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.NextKey != tc.want.NextKey || got.PickKey != tc.want.PickKey || got.SidebarKey != tc.want.SidebarKey {
+				t.Fatalf("keys = %q/%q/%q, want %q/%q/%q", got.NextKey, got.PickKey, got.SidebarKey, tc.want.NextKey, tc.want.PickKey, tc.want.SidebarKey)
 			}
 		})
 	}
