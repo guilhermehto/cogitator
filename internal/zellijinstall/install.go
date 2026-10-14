@@ -39,12 +39,18 @@ const (
 	indentUnit   = "    "
 )
 
+const (
+	kdlStringPattern   = `"(?:[^"\\]|\\.)*"`
+	kdlPropertyPattern = `[\w-]+=(?:` + kdlStringPattern + `|[^\s"{;]+)`
+)
+
 var (
 	keybindsNode      = regexp.MustCompile(`^(\s*)keybinds\b`)
 	defaultModeNode   = regexp.MustCompile(`^\s*default_mode\s+"([^"]*)"`)
 	defaultLayoutNode = regexp.MustCompile(`^\s*default_layout\b`)
-	sectionNode       = regexp.MustCompile(`^\s*([A-Za-z_][\w-]*)((?:\s+"(?:[^"\\]|\\.)*")*)\s*\{`)
-	bindNode          = regexp.MustCompile(`^\s*bind((?:\s+"(?:[^"\\]|\\.)*")+)`)
+	sectionNode       = regexp.MustCompile(`^\s*([A-Za-z_][\w-]*)((?:\s+(?:` + kdlPropertyPattern + `|` + kdlStringPattern + `))*)\s*\{`)
+	kdlProperty       = regexp.MustCompile(kdlPropertyPattern)
+	bindNode          = regexp.MustCompile(`^\s*bind((?:\s+` + kdlStringPattern + `)+)`)
 	quotedArg         = regexp.MustCompile(`"((?:[^"\\]|\\.)*)"`)
 )
 
@@ -443,8 +449,9 @@ func sectionApplies(line, mode string) bool {
 		return false
 	}
 
+	positionalArgs := kdlProperty.ReplaceAllString(match[2], "")
 	listed := false
-	for _, name := range quotedArgs(match[2]) {
+	for _, name := range quotedArgs(positionalArgs) {
 		if strings.EqualFold(name, mode) {
 			listed = true
 		}

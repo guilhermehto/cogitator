@@ -833,6 +833,20 @@ func TestInstallRejectsDefaultNextKeyBoundInTargetMode(t *testing.T) {
 	}
 }
 
+func TestInstallRejectsDefaultPickKeyBoundInModeSectionWithProperties(t *testing.T) {
+	env := newTestEnv(t)
+	original := "default_mode \"locked\"\nkeybinds {\n    normal clear-defaults=true {\n        bind \"" + DefaultPickKey + "\" { NewTab; SwitchToMode \"locked\"; }\n    }\n}\n"
+	writeFile(t, env.conf, original, 0o644)
+
+	err := env.installer.Install(Options{})
+	if err == nil || !strings.Contains(err.Error(), `"`+DefaultPickKey+`"`) || !strings.Contains(err.Error(), "--pick-key") {
+		t.Fatalf("want an error naming %q and --pick-key, got %v", DefaultPickKey, err)
+	}
+	if got := readFile(t, env.conf); got != original {
+		t.Fatalf("config written despite the clash:\n%s", got)
+	}
+}
+
 func TestInstallIgnoresBindsOutsideTargetMode(t *testing.T) {
 	cases := map[string]string{
 		"other mode":                "keybinds {\n    pane {\n        bind \"" + DefaultSidebarKey + "\" { Detach; }\n    }\n}\n",
