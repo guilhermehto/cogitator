@@ -107,27 +107,32 @@ func TestPreviewKeepsStylingAndDropsOtherControlSequences(t *testing.T) {
 		{
 			name:     "SGR kept, screen clear and hyperlink dropped, styled blank tail trimmed",
 			captured: "\x1b[31mred\x1b[0m\n\x1b[2Jx\x1b]8;;http://a\x07l\x1b]8;;\x07\n\x1b[44m   \n",
-			want:     []string{"\x1b[31mred" + ansi.ResetStyle, "xl" + ansi.ResetStyle},
+			want:     []string{"\x1b[2;31mred" + ansi.ResetStyle, "\x1b[2mxl" + ansi.ResetStyle},
 		},
 		{
 			name:     "private CSI m, cursor moves and bare control bytes dropped",
 			captured: "\x1b[>4;1ma\x1b[5;1Hb\r\tc\x07\x1b[1md",
-			want:     []string{"abc\x1b[1md" + ansi.ResetStyle},
+			want:     []string{"\x1b[2mabc" + ansi.ResetStyle + "\x1b[1;2md" + ansi.ResetStyle},
 		},
 		{
 			name:     "styling carried across a line break is repeated on the next line",
 			captured: "\x1b[31m-one\n-two\x1b[0m",
-			want:     []string{"\x1b[31m-one" + ansi.ResetStyle, "\x1b[31m-two" + ansi.ResetStyle},
+			want:     []string{"\x1b[2;31m-one" + ansi.ResetStyle, "\x1b[2;31m-two" + ansi.ResetStyle},
 		},
 		{
 			name:     "turning bold off keeps the colour",
 			captured: "\x1b[1;31ma\x1b[22mb",
-			want:     []string{"\x1b[1;31ma" + ansi.ResetStyle + "\x1b[31mb" + ansi.ResetStyle},
+			want:     []string{"\x1b[1;2;31ma" + ansi.ResetStyle + "\x1b[2;31mb" + ansi.ResetStyle},
 		},
 		{
 			name:     "pane background dropped, foreground kept",
 			captured: "\x1b[38;2;136;192;208m\x1b[48;2;46;52;64mtext\x1b[39m\x1b[48;2;46;52;64m pad\x1b[41m!",
-			want:     []string{"\x1b[38;2;136;192;208mtext" + ansi.ResetStyle + " pad!" + ansi.ResetStyle},
+			want:     []string{"\x1b[2;38;2;136;192;208mtext" + ansi.ResetStyle + "\x1b[2m pad!" + ansi.ResetStyle},
+		},
+		{
+			name:     "text stays faint through a reset, captured faint and normal intensity",
+			captured: "a\x1b[0mb\x1b[1;2mc\x1b[22md",
+			want:     []string{"\x1b[2mab" + ansi.ResetStyle + "\x1b[1;2mc" + ansi.ResetStyle + "\x1b[2md" + ansi.ResetStyle},
 		},
 	}
 	for _, tt := range tests {

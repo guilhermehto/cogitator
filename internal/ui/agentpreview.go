@@ -250,7 +250,8 @@ func tailLines(text string, n int) []string {
 // starts with the styling it inherits (tmux does not repeat it after a line
 // break) and stands alone when the preview resets it at the line end.
 // Background colours are dropped: zellij paints the pane background on every
-// cell, which would turn the preview into a solid block.
+// cell, which would turn the preview into a solid block. Every cell is drawn
+// faint so the preview never reads as the live pane.
 func displayText(text string) string {
 	var out strings.Builder
 	parser := ansi.NewParser()
@@ -270,9 +271,11 @@ func displayText(text string) string {
 			out.WriteString(seq)
 			written = cellbuf.Style{}
 		case width > 0:
-			if !pen.Equal(&written) {
-				out.WriteString(styleChange(written, pen))
-				written = pen
+			shown := pen
+			shown.Faint(true)
+			if !shown.Equal(&written) {
+				out.WriteString(styleChange(written, shown))
+				written = shown
 			}
 			out.WriteString(seq)
 		}
