@@ -2,7 +2,7 @@ BIN := cogitator
 SCHEMA_PORT := 17777
 SCHEMA_URL := http://127.0.0.1:$(SCHEMA_PORT)/doc
 
-.PHONY: test lint build run vet ci clean release generate capture-schema demo plugin plugin-bundle plugin-test
+.PHONY: test lint build run vet ci clean release generate capture-schema demo plugin plugin-bundle plugin-test install-dev
 
 test:
 	go test -race -count=1 ./...
@@ -63,6 +63,12 @@ plugin:
 # embed it.
 plugin-bundle: plugin
 	cp zellij-plugin/target/wasm32-wasip1/release/cogitator-zellij.wasm internal/zellijplugin/cogitator-zellij.wasm
+
+# install-dev installs a source build with the plugin embedded, then wires
+# zellij with it.
+install-dev: plugin-bundle
+	go install -tags bundledplugin ./cmd/cogitator
+	$(or $(shell go env GOBIN),$(shell go env GOPATH)/bin)/cogitator zellij install
 
 plugin-test:
 	cd zellij-plugin && cargo test
