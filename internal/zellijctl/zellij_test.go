@@ -859,7 +859,7 @@ func TestCapture_TabSkipsShellSuspendedUnderPane(t *testing.T) {
 	}
 
 	calls := r.callsTo("dump-screen")
-	if len(calls) != 1 || !slices.Equal(calls[0], []string{"action", "dump-screen", "-p", "terminal_2"}) {
+	if len(calls) != 1 || !slices.Equal(calls[0], []string{"action", "dump-screen", "-p", "terminal_2", "--ansi"}) {
 		t.Errorf("dump-screen calls = %v, want the visible terminal_2", calls)
 	}
 }
