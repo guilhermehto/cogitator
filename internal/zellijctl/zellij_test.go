@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -112,6 +113,7 @@ type paneFixture struct {
 	Exited  bool
 	Held    bool
 	Tab     int
+	TabName string
 	Command string
 	Started string
 	Cwd     string
@@ -134,7 +136,7 @@ func panesJSON(t *testing.T, panes ...paneFixture) string {
 			"is_held":          p.Held,
 			"tab_id":           p.Tab,
 			"tab_position":     p.Tab,
-			"tab_name":         "tab",
+			"tab_name":         cmp.Or(p.TabName, fmt.Sprintf("Tab #%d", p.Tab+1)),
 			"terminal_command": nilIfEmpty(p.Started),
 		}
 		if p.Plugin {
@@ -204,8 +206,8 @@ func TestListPanes_TerminalPanesOnlyWithCanonicalCwds(t *testing.T) {
 
 	own := ownSession(t)
 	want := []mux.Pane{
-		{PaneID: own + ":terminal_0", WindowID: own + ":0", SessionID: own, SessionName: own, Cwd: canonical, Command: "/bin/zsh", CogDir: canonical},
-		{PaneID: own + ":terminal_2", WindowID: own + ":1", SessionID: own, SessionName: own, Cwd: canonical, Command: "sh -c echo hi2; sleep 300", CogDir: canonical},
+		{PaneID: own + ":terminal_0", WindowID: own + ":0", SessionID: own, SessionName: own, Cwd: canonical, Command: "/bin/zsh", CogDir: canonical, TabNumber: 1},
+		{PaneID: own + ":terminal_2", WindowID: own + ":1", SessionID: own, SessionName: own, Cwd: canonical, Command: "sh -c echo hi2; sleep 300", CogDir: canonical, TabNumber: 2},
 	}
 	if !reflect.DeepEqual(panes, want) {
 		t.Errorf("ListPanes =\n%+v\nwant\n%+v", panes, want)
@@ -262,8 +264,8 @@ func TestListPanes_MergesLiveSessionsSkippingExitedAndVanished(t *testing.T) {
 	}
 
 	want := []mux.Pane{
-		{PaneID: own + ":terminal_4", WindowID: own + ":0", SessionID: own, SessionName: own, Cwd: canonical, Command: "cogitator", CogDir: canonical},
-		{PaneID: "work:1:terminal_1", WindowID: "work:1:2", SessionID: "work:1", SessionName: "work:1", Cwd: canonical, Command: "claude", CogDir: canonical},
+		{PaneID: own + ":terminal_4", WindowID: own + ":0", SessionID: own, SessionName: own, Cwd: canonical, Command: "cogitator", CogDir: canonical, TabNumber: 1},
+		{PaneID: "work:1:terminal_1", WindowID: "work:1:2", SessionID: "work:1", SessionName: "work:1", Cwd: canonical, Command: "claude", CogDir: canonical, TabNumber: 3},
 	}
 	if !reflect.DeepEqual(panes, want) {
 		t.Errorf("ListPanes =\n%+v\nwant\n%+v", panes, want)
@@ -273,6 +275,29 @@ func TestListPanes_MergesLiveSessionsSkippingExitedAndVanished(t *testing.T) {
 		if session, _ := command(c); session == "old" || session == own {
 			t.Errorf("unexpected list-panes call %v", c)
 		}
+	}
+}
+
+func TestListPanes_KeepsOnlyTabNamesSomeoneChose(t *testing.T) {
+	raw, _ := canonicalTempDir(t)
+	r := &fakeRunner{responses: map[string]string{"list-panes": panesJSON(t,
+		paneFixture{ID: 0, Tab: 0, TabName: "LEX-123", Command: "omp", Cwd: raw},
+		paneFixture{ID: 1, Tab: 1, Command: "omp", Cwd: raw},
+		paneFixture{ID: 2, Tab: 2, TabName: "Tab #9 notes", Command: "omp", Cwd: raw},
+	)}}
+
+	panes, err := newBackend(t, r).ListPanes()
+	if err != nil {
+		t.Fatalf("ListPanes: %v", err)
+	}
+
+	var got []string
+	for _, p := range panes {
+		got = append(got, fmt.Sprintf("%s/%d", p.TabName, p.TabNumber))
+	}
+	want := []string{"LEX-123/1", "/2", "Tab #9 notes/3"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("tab name/number = %v, want %v", got, want)
 	}
 }
 

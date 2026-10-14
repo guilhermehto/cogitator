@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -508,6 +509,8 @@ func (b Backend) ListPanes() ([]mux.Pane, error) {
 			Cwd:         p.cwd,
 			Command:     p.command,
 			CogDir:      p.cwd,
+			TabName:     p.tabName,
+			TabNumber:   p.tabNumber,
 		})
 	}
 	return out, nil
@@ -629,6 +632,8 @@ type paneJSON struct {
 	Exited          bool   `json:"exited"`
 	IsHeld          bool   `json:"is_held"`
 	TabID           int    `json:"tab_id"`
+	TabName         string `json:"tab_name"`
+	TabPosition     int    `json:"tab_position"`
 	PaneCommand     string `json:"pane_command"`
 	TerminalCommand string `json:"terminal_command"`
 	PaneCwd         string `json:"pane_cwd"`
@@ -636,12 +641,14 @@ type paneJSON struct {
 }
 
 type pane struct {
-	session string
-	id      int
-	tab     string
-	cwd     string
-	command string
-	dead    bool
+	session   string
+	id        int
+	tab       string
+	tabName   string
+	tabNumber int
+	cwd       string
+	command   string
+	dead      bool
 }
 
 func (p pane) localID() string { return paneIDPrefix + strconv.Itoa(p.id) }
@@ -723,12 +730,14 @@ func toPanes(session string, raw []paneJSON) []pane {
 		}
 
 		p := pane{
-			session: session,
-			id:      r.ID,
-			tab:     strconv.Itoa(r.TabID),
-			cwd:     canonical(r.PaneCwd),
-			command: paneCommand(r),
-			dead:    r.Exited || r.IsHeld,
+			session:   session,
+			id:        r.ID,
+			tab:       strconv.Itoa(r.TabID),
+			tabName:   chosenTabName(r.TabName),
+			tabNumber: r.TabPosition + 1,
+			cwd:       canonical(r.PaneCwd),
+			command:   paneCommand(r),
+			dead:      r.Exited || r.IsHeld,
 		}
 		if p.cwd != "" {
 			tabDirs.learn(session, p.tab, p.cwd)
@@ -753,6 +762,16 @@ func paneCommand(r paneJSON) string {
 		return r.PaneCommand
 	}
 	return strings.TrimSpace(r.PaneCommand + " " + started)
+}
+
+// defaultTabName matches the "Tab #N" zellij gives a tab nobody named.
+var defaultTabName = regexp.MustCompile(`^Tab #\d+$`)
+
+func chosenTabName(name string) string {
+	if defaultTabName.MatchString(name) {
+		return ""
+	}
+	return name
 }
 
 func (b Backend) tabPanes(t mux.Target) ([]pane, error) {

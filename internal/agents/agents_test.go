@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -375,6 +376,53 @@ func TestBuildKeepsOneAgentPerDirForASingleSession(t *testing.T) {
 	got := build(Input{Live: live, Panes: siblingPanes()})
 	if !equal(ids(got), []string{"/w/a"}) || got[0].Sibling() {
 		t.Fatalf("agents = %+v, want the directory agent /w/a", got)
+	}
+}
+
+func TestBuildLabelsSiblingsByTabNameThenTitleThenTabNumber(t *testing.T) {
+	panes := []mux.Pane{
+		{PaneID: "dev:terminal_1", WindowID: "dev:0", SessionID: "dev", Cwd: "/w/a", Command: "omp", TabName: "LEX-123", TabNumber: 1},
+		{PaneID: "dev:terminal_2", WindowID: "dev:1", SessionID: "dev", Cwd: "/w/a", Command: "omp", TabNumber: 2},
+		{PaneID: "dev:terminal_3", WindowID: "dev:2", SessionID: "dev", Cwd: "/w/a", Command: "omp", TabNumber: 3},
+	}
+	named := siblingView("named", 3*time.Hour, state.AttnActive, "dev:terminal_1")
+	named.Title = "Fix login"
+	titled := siblingView("titled", 2*time.Hour, state.AttnActive, "dev:terminal_2")
+	titled.Title = "Tidy sidebar"
+	fresh := siblingView("fresh", time.Hour, state.AttnActive, "dev:terminal_3")
+
+	got := build(Input{Live: []state.SessionView{named, titled, fresh}, Panes: panes})
+	tabs := map[string]string{}
+	for _, a := range got {
+		tabs[a.ID] = a.Tab
+	}
+	want := map[string]string{"/w/a#named": "LEX-123", "/w/a#titled": "Tidy sidebar", "/w/a#fresh": "tab 3"}
+	if !reflect.DeepEqual(tabs, want) {
+		t.Errorf("tabs = %v, want %v", tabs, want)
+	}
+}
+
+func TestBuildShowsTabNamesOnlyWhenTheyAddSomething(t *testing.T) {
+	cases := map[string]struct {
+		tabName string
+		want    string
+	}{
+		"name the user chose":              {"LEX-9", "LEX-9"},
+		"name cogitator gave the tab":      {"repo/main", ""},
+		"unnamed tab of a lone agent":      {"", ""},
+		"tab named after the worktree dir": {"a", ""},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := row("/w/a", settings.StateRunning, state.AttnActive, time.Minute)
+			r.Branch = "main"
+			panes := []mux.Pane{{PaneID: "%1", WindowID: "@1", SessionID: "$1", Cwd: "/w/a", Command: "opencode", CogDir: "/w/a", TabName: tc.tabName, TabNumber: 2}}
+
+			got := build(Input{Rows: []settings.Row{r}, Panes: panes})
+			if len(got) != 1 || got[0].Tab != tc.want {
+				t.Fatalf("agents = %+v, want tab %q", got, tc.want)
+			}
+		})
 	}
 }
 

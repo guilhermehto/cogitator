@@ -225,7 +225,7 @@ fn agent_row(agent: &Agent, mark: RowMark, cols: usize, now: i64, home: &str) ->
     let mut right = vec![span(age.clone(), DIM)];
 
     if cols >= DETAIL_MIN_WIDTH {
-        if !agent.title.is_empty() {
+        if !agent.title.is_empty() && agent.title != agent.tab {
             left.push(span("  ", PLAIN));
             left.push(span(agent.title.clone(), PATH));
         }
@@ -270,11 +270,12 @@ fn attention_glyph(attention: &str) -> (&'static str, Style) {
 }
 
 // styled_name mutes the repo or workspace so the branch or session reads
-// first; stopped agents are dimmed.
+// first, led by the agent's tab label when it has one; stopped agents are
+// dimmed.
 fn styled_name(agent: &Agent, home: &str) -> Line {
     let lead = if agent.state == "stopped" { DIM } else { PLAIN };
 
-    match agent.kind.as_str() {
+    let name = match agent.kind.as_str() {
         "workspace" => vec![
             span(agent.workspace.clone(), REPO),
             span("/", DIM),
@@ -291,7 +292,14 @@ fn styled_name(agent: &Agent, home: &str) -> Line {
             span("·", DIM),
             span(agent.branch.clone(), lead),
         ],
+    };
+
+    if agent.tab.is_empty() {
+        return name;
     }
+    let mut labelled = vec![span(agent.tab.clone(), lead), span(" · ", DIM)];
+    labelled.extend(name);
+    labelled
 }
 
 fn base_name(path: &str) -> String {
@@ -567,6 +575,24 @@ mod tests {
         assert!(plain(row).ends_with("omp           4h"), "{:?}", plain(row));
         assert!(plain(row).contains("r·b  fix it"));
         assert!(row.contains("3;38;5;81momp"), "{row:?}");
+    }
+
+    #[test]
+    fn tab_label_leads_the_row_and_is_not_repeated_as_title() {
+        let named = one_agent(
+            r#""kind":"stray","harness":"omp","tab":"LEX-123","title":"fix it","last_activity":"2025-12-31T20:00:00Z""#,
+        );
+        assert!(
+            plain(&row_colours(&named, 90)).starts_with("· LEX-123 · ~/p stray  fix it"),
+            "{:?}",
+            plain(&row_colours(&named, 90))
+        );
+
+        let titled = one_agent(
+            r#""kind":"stray","harness":"omp","tab":"fix it","title":"fix it","last_activity":"2025-12-31T20:00:00Z""#,
+        );
+        let row = plain(&row_colours(&titled, 90));
+        assert_eq!(row.matches("fix it").count(), 1, "{row:?}");
     }
 
     #[test]

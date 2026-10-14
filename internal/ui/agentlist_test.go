@@ -82,6 +82,7 @@ func TestAgentListLabelsWorktreesByRepoNameOrHomeRelativeDir(t *testing.T) {
 		{"falls back to the home-relative dir without a branch", worktreeAgent("/Users/x/src/pi-platform/svc/api", "/Users/x/src/pi-platform", "", agents.GroupIdle, state.AttnInactive, settings.StateRunning), "~/src/pi-platform/svc/api"},
 		{"keeps dirs outside home absolute", worktreeAgent("/opt/svc", "/opt/svc", "", agents.GroupIdle, state.AttnInactive, settings.StateRunning), "/opt/svc"},
 		{"abbreviates stray dirs and marks them", agents.Agent{ID: "/Users/x/scratch", Dir: "/Users/x/scratch", Kind: agents.KindStray}, "~/scratch stray"},
+		{"leads with the tab label", agents.Agent{ID: "/Users/x/.lexicanum#s1", Dir: "/Users/x/.lexicanum", Kind: agents.KindStray, Tab: "LEX-123"}, "LEX-123 · ~/.lexicanum stray"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -121,6 +122,21 @@ func TestAgentListShowsTitleAndHarnessOnWideRowsOnly(t *testing.T) {
 	}
 	if !strings.Contains(narrow, "api·main") || !strings.Contains(narrow, "5m") {
 		t.Fatalf("narrow row missing name or age:\n%s", narrow)
+	}
+}
+
+func TestAgentListShowsTabLabelOnNarrowRowsWithoutRepeatingItAsTitle(t *testing.T) {
+	a := agents.Agent{ID: "/l#s1", Dir: "/l", Kind: agents.KindStray, Harness: "omp", Title: "Fix login", Tab: "Fix login", State: settings.StateRunning}
+	l := newAgentList()
+	l.SetAgents([]agents.Agent{a})
+
+	narrow, wide := l.View(agentListNow, 50, 40), l.View(agentListNow, 100, 40)
+
+	if !strings.Contains(narrow, "Fix login") {
+		t.Fatalf("narrow row missing tab label:\n%s", narrow)
+	}
+	if got := strings.Count(wide, "Fix login"); got != 1 {
+		t.Fatalf("wide row shows the label %d times:\n%s", got, wide)
 	}
 }
 

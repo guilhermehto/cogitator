@@ -304,7 +304,7 @@ func renderAgentRow(now time.Time, a agents.Agent, selected bool, width int) str
 	right := dimStyle.Render(formatRelative(now, a.LastActivity))
 
 	if width >= agentDetailMinWidth {
-		if a.Title != "" {
+		if a.Title != "" && a.Title != a.Tab {
 			left += "  " + wtPathStyle.Render(a.Title)
 		}
 		right = fitCell(agentColor(a.Harness).Render(a.Harness), agentHarnessWidth) + " " + alignRight(right, 4)
@@ -330,23 +330,30 @@ func agentStatusCell(a agents.Agent) string {
 }
 
 // agentStyledName is agentName with the repo or workspace muted so the branch
-// or session reads first; stopped agents are dimmed as in the Repos tab.
+// or session reads first, led by the agent's tab label when it has one;
+// stopped agents are dimmed as in the Repos tab.
 func agentStyledName(a agents.Agent) string {
 	lead := lipgloss.NewStyle()
 	if a.State == settings.StateStopped {
 		lead = wtStoppedStyle
 	}
 
+	var name string
 	switch {
 	case a.Kind == agents.KindWorkspace:
-		return wtRepoStyle.UnsetBold().Render(a.Workspace) + dimStyle.Render("/") + lead.Render(a.SessionName)
+		name = wtRepoStyle.UnsetBold().Render(a.Workspace) + dimStyle.Render("/") + lead.Render(a.SessionName)
 	case a.Kind == agents.KindStray:
-		return lead.Render(abbreviateHome(a.Dir)) + " " + recentStyle.Render("stray")
+		name = lead.Render(abbreviateHome(a.Dir)) + " " + recentStyle.Render("stray")
 	case a.Branch == "":
-		return lead.Render(abbreviateHome(a.Dir))
+		name = lead.Render(abbreviateHome(a.Dir))
+	default:
+		name = wtRepoStyle.UnsetBold().Render(filepath.Base(a.Repo)) + dimStyle.Render("·") + lead.Render(a.Branch)
 	}
 
-	return wtRepoStyle.UnsetBold().Render(filepath.Base(a.Repo)) + dimStyle.Render("·") + lead.Render(a.Branch)
+	if a.Tab == "" {
+		return name
+	}
+	return lead.Render(a.Tab) + dimStyle.Render(agentTabSeparator) + name
 }
 
 func alignRight(s string, width int) string {
@@ -359,19 +366,27 @@ func fitCell(s string, width int) string {
 	return s + strings.Repeat(" ", max(0, width-ansi.StringWidth(s)))
 }
 
+// agentTabSeparator sits between an agent's tab label and its name.
+const agentTabSeparator = " · "
+
 // agentName is the plain-text label rows display and the filter matches on.
 func agentName(a agents.Agent) string {
-	switch a.Kind {
-	case agents.KindWorkspace:
-		return a.Workspace + "/" + a.SessionName
-	case agents.KindStray:
-		return abbreviateHome(a.Dir) + " stray"
-	}
-	if a.Branch == "" {
-		return abbreviateHome(a.Dir)
+	var name string
+	switch {
+	case a.Kind == agents.KindWorkspace:
+		name = a.Workspace + "/" + a.SessionName
+	case a.Kind == agents.KindStray:
+		name = abbreviateHome(a.Dir) + " stray"
+	case a.Branch == "":
+		name = abbreviateHome(a.Dir)
+	default:
+		name = filepath.Base(a.Repo) + "·" + a.Branch
 	}
 
-	return filepath.Base(a.Repo) + "·" + a.Branch
+	if a.Tab == "" {
+		return name
+	}
+	return a.Tab + agentTabSeparator + name
 }
 
 func abbreviateHome(dir string) string {

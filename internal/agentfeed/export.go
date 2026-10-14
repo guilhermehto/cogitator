@@ -28,6 +28,7 @@ type ExportAgent struct {
 	SessionName  string `json:"session_name"`
 	Harness      string `json:"harness"`
 	Title        string `json:"title"`
+	Tab          string `json:"tab"`
 	Attention    string `json:"attention"`
 	State        string `json:"state"`
 	Group        string `json:"group"`
@@ -65,6 +66,7 @@ func exportAgent(a agents.Agent) ExportAgent {
 		SessionName:  a.SessionName,
 		Harness:      a.Harness,
 		Title:        a.Title,
+		Tab:          a.Tab,
 		Attention:    string(a.Attention),
 		State:        string(a.State),
 		Group:        groupName(a.Group),

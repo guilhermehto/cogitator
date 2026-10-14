@@ -5,6 +5,7 @@
 package agents
 
 import (
+	"cmp"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -56,6 +57,9 @@ type Agent struct {
 	Provider  string
 	SessionID string
 	Title     string
+	// Tab tells the agent apart from its neighbours: the name the user gave
+	// its tab, else, for siblings, the session title or the tab number.
+	Tab string
 
 	State        settings.RowState
 	Attention    state.Attention
@@ -460,7 +464,21 @@ func (ix paneIndex) sessionAgents(base Agent, views []state.SessionView, candida
 			taken[out[i].PaneID] = true
 		}
 	}
+
+	for i := range out {
+		out[i].Tab = cmp.Or(out[i].Tab, out[i].Title, ix.tabNumber(out[i].PaneID))
+	}
 	return out
+}
+
+// tabNumber names the tab holding paneID the way the multiplexer's tab bar
+// numbers it, or "" when the agent has no pane.
+func (ix paneIndex) tabNumber(paneID string) string {
+	p, ok := ix.byID[paneID]
+	if !ok {
+		return ""
+	}
+	return "tab " + strconv.Itoa(p.TabNumber)
 }
 
 func untaken(candidates []mux.Pane, taken map[string]bool) []mux.Pane {
@@ -488,6 +506,20 @@ func (ix paneIndex) join(a *Agent, p mux.Pane) {
 	a.PaneID = p.PaneID
 	a.MuxSessionID = p.SessionID
 	a.SessionOwned = ix.ownsSession(p)
+	if !launchedTabName(*a, p.TabName) {
+		a.Tab = p.TabName
+	}
+}
+
+// launchedTabName reports whether name is the one cogitator gives a tab it
+// opens for a, which the row already shows as repo and branch, workspace and
+// session, or directory.
+func launchedTabName(a Agent, name string) bool {
+	switch name {
+	case filepath.Base(a.Dir), filepath.Base(a.Repo) + "/" + a.Branch, a.Workspace + "/" + a.SessionName:
+		return true
+	}
+	return false
 }
 
 func (ix paneIndex) ownsSession(p mux.Pane) bool {

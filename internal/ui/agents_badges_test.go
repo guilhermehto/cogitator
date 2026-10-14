@@ -32,7 +32,7 @@ func newFakeTmuxServer(dir string) *fakeTmuxServer {
 func (s *fakeTmuxServer) Run(args ...string) (string, error) {
 	switch args[0] {
 	case "list-panes":
-		return fmt.Sprintf("%%1\t@1\t$1\tmain\t%s\tnode\t%s\t%s\t%s\t%s\n",
+		return fmt.Sprintf("%%1\t@1\t$1\tmain\t%s\tnode\t%s\t%s\t%s\t%s\t1\tnode\t1\n",
 			s.dir, s.dir, s.window["@cog_status"], s.window["@cog_reason"], s.window["@cog_since"]), nil
 	case "list-clients":
 		return fmt.Sprintf("/dev/ttys001\t%s\t%d\n", s.clientAt, s.clientActivity), nil

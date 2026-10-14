@@ -108,6 +108,12 @@ stopped with the same status icons as the TUI. On a popup at least 100 columns w
 half shows a live preview of the highlighted agent's pane: its status, harness, session title and
 the last lines of output, refreshed every second.
 
+Rows lead with the name you gave the agent's window, e.g. `LEX-123 · ~/notes stray`, here, in the
+TUI's Agents tab and in the zellij sidebar. Names tmux or zellij generated (automatic rename,
+`Tab #N`) and the names cogitator gives windows it launches are skipped. Several agents sharing a
+directory always get a label: the window name, else the session title, else the window number
+(`tab 3`). Renames show up within a couple of seconds.
+
 | Key               | Action                                                              |
 | ----------------- | ------------------------------------------------------------------- |
 | `j` / `k`         | move down / up                                                      |

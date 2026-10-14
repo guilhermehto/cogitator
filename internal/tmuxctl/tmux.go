@@ -539,6 +539,7 @@ var paneFormat = strings.Join([]string{
 	"#{pane_id}", "#{window_id}", "#{session_id}", "#{session_name}",
 	"#{pane_current_path}", "#{pane_current_command}",
 	"#{@cog_dir}", "#{@cog_status}", "#{@cog_reason}", "#{@cog_since}",
+	"#{window_index}", "#{window_name}", "#{automatic-rename}",
 }, "\t")
 
 // ListPanes returns every pane on the server in a single list-panes call.
@@ -555,7 +556,7 @@ func ListPanes(r Runner) ([]mux.Pane, error) {
 	var panes []mux.Pane
 	for _, line := range splitLines(out) {
 		fields := strings.Split(line, "\t")
-		if len(fields) != 10 {
+		if len(fields) != 13 {
 			continue
 		}
 
@@ -564,6 +565,7 @@ func ListPanes(r Runner) ([]mux.Pane, error) {
 			path = canonical
 		}
 
+		number, _ := strconv.Atoi(fields[10])
 		panes = append(panes, mux.Pane{
 			PaneID:      fields[0],
 			WindowID:    fields[1],
@@ -575,9 +577,21 @@ func ListPanes(r Runner) ([]mux.Pane, error) {
 			CogStatus:   fields[7],
 			CogReason:   fields[8],
 			CogSince:    fields[9],
+			TabName:     chosenWindowName(fields[11], fields[12]),
+			TabNumber:   number,
 		})
 	}
 	return panes, nil
+}
+
+// chosenWindowName is name when someone set it: rename-window and new-window
+// -n both turn automatic-rename off, so a window still renaming itself after
+// its running command carries no chosen name.
+func chosenWindowName(name, automaticRename string) string {
+	if automaticRename == "1" {
+		return ""
+	}
+	return name
 }
 
 // ListClientFocus returns the session and window each attached client is on.

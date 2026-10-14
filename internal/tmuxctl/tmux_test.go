@@ -848,8 +848,8 @@ func TestApplyOptions_NoOpWhenEmpty(t *testing.T) {
 func TestListPanes_ParsesPathsWithSpacesAndEmptyOptions(t *testing.T) {
 	withTMUX(t)
 	f := &fakeRunner{}
-	f.push("%1\t@2\t$3\tmain\t/no/such dir/with space\topencode\t/repo\tbusy\tneeds input\t1700000000\n"+
-		"%2\t@2\t$3\tmain\t/no/such\tzsh\t\t\t\t\n", nil)
+	f.push("%1\t@2\t$3\tmain\t/no/such dir/with space\topencode\t/repo\tbusy\tneeds input\t1700000000\t4\tLEX-123 notes\t0\n"+
+		"%2\t@2\t$3\tmain\t/no/such\tzsh\t\t\t\t\t5\tzsh\t1\n", nil)
 
 	panes, err := ListPanes(f)
 	if err != nil {
@@ -860,12 +860,13 @@ func TestListPanes_ParsesPathsWithSpacesAndEmptyOptions(t *testing.T) {
 		PaneID: "%1", WindowID: "@2", SessionID: "$3", SessionName: "main",
 		Cwd: "/no/such dir/with space", Command: "opencode",
 		CogDir: "/repo", CogStatus: "busy", CogReason: "needs input", CogSince: "1700000000",
+		TabName: "LEX-123 notes", TabNumber: 4,
 	}
 	if len(panes) != 2 || panes[0] != want {
 		t.Fatalf("got %+v", panes)
 	}
-	if panes[1].CogDir != "" || panes[1].Command != "zsh" {
-		t.Errorf("second pane: %+v", panes[1])
+	if panes[1].CogDir != "" || panes[1].Command != "zsh" || panes[1].TabName != "" || panes[1].TabNumber != 5 {
+		t.Errorf("second pane, whose window still renames itself: %+v", panes[1])
 	}
 }
 

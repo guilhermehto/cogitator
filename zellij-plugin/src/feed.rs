@@ -13,6 +13,7 @@ pub struct Agent {
     pub session_name: String,
     pub harness: String,
     pub title: String,
+    pub tab: String,
     pub attention: String,
     pub state: String,
     pub group: String,
@@ -152,7 +153,7 @@ mod tests {
 
     #[test]
     fn parses_full_agent() {
-        let input = r#"{"version":1,"home":"/h","agents":[{"id":"/a/b#s1","dir":"/a/b","kind":"worktree","repo":"r","branch":"br","workspace":"w","session_name":"s","harness":"omp","title":"t","attention":"question","state":"running","group":"needs_you","last_activity":"2026-01-01T00:00:00Z","mux_session":"m","window_id":"1","pane_id":"2","session_owned":true,"extra":"x"}]}"#;
+        let input = r#"{"version":1,"home":"/h","agents":[{"id":"/a/b#s1","dir":"/a/b","kind":"worktree","repo":"r","branch":"br","workspace":"w","session_name":"s","harness":"omp","title":"t","tab":"LEX-1","attention":"question","state":"running","group":"needs_you","last_activity":"2026-01-01T00:00:00Z","mux_session":"m","window_id":"1","pane_id":"2","session_owned":true,"extra":"x"}]}"#;
         let feed = parse(input).unwrap();
         assert_eq!(feed.home, "/h");
         assert_eq!(
@@ -167,6 +168,7 @@ mod tests {
                 session_name: "s".into(),
                 harness: "omp".into(),
                 title: "t".into(),
+                tab: "LEX-1".into(),
                 attention: "question".into(),
                 state: "running".into(),
                 group: "needs_you".into(),

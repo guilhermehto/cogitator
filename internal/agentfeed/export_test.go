@@ -34,6 +34,7 @@ func TestExportJSON_MapsEveryField(t *testing.T) {
 		SessionName:  "sess",
 		Harness:      "omp",
 		Title:        "title",
+		Tab:          "LEX-123",
 		Attention:    state.Attention("permission"),
 		State:        settings.StateRunning,
 		Group:        agents.GroupNeedsYou,
@@ -52,7 +53,7 @@ func TestExportJSON_MapsEveryField(t *testing.T) {
 	got := decodeExport(t, raw)
 	want := ExportAgent{
 		ID: "/repo/wt#ses_1", Dir: "/repo/wt", Kind: "worktree", Repo: "repo", Branch: "feat", Workspace: "ws",
-		SessionName: "sess", Harness: "omp", Title: "title", Attention: "permission", State: "running",
+		SessionName: "sess", Harness: "omp", Title: "title", Tab: "LEX-123", Attention: "permission", State: "running",
 		Group: "needs_you", LastActivity: "2026-01-02T02:04:05Z", MuxSession: "mux",
 		WindowID: "@1", PaneID: "%2", SessionOwned: true,
 	}

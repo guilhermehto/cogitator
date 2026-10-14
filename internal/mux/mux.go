@@ -35,7 +35,10 @@ const (
 
 // Pane is one multiplexer pane with the cogitator state of its window. Cwd is
 // canonical when it could be canonicalised, raw otherwise. CogDir is the
-// canonical dir cogitator launched in that window.
+// canonical dir cogitator launched in that window. TabName is the window's
+// name only when someone chose it; a name the multiplexer generated (tmux
+// automatic-rename, zellij "Tab #N") is left empty. TabNumber is the window
+// number the multiplexer's own tab bar shows.
 type Pane struct {
 	PaneID      string
 	WindowID    string
@@ -47,6 +50,8 @@ type Pane struct {
 	CogStatus   string
 	CogReason   string
 	CogSince    string
+	TabName     string
+	TabNumber   int
 }
 
 // ClientFocus is where one attached client is looking.
