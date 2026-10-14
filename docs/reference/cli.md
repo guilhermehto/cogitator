@@ -49,6 +49,11 @@ These are wired up during [agent setup](/guide/connect) and are not meant to be 
 All hook subcommands exit 0 silently when cogitator is not running. A closed monitor is the
 expected case, not a failure, so your agent is never blocked.
 
+Each hook also records the multiplexer pane it ran in (`$ZELLIJ_PANE_ID` or `$TMUX_PANE`).
+That is how several sessions in one directory each get their own Agents row on their own
+tab. A hook still pointing at an older cogitator binary cannot record its pane, so rebuild
+or reinstall after upgrading.
+
 ## Logging
 
 Logs are written with `log/slog` text formatting.
