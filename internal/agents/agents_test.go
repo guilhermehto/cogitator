@@ -379,6 +379,23 @@ func TestBuildKeepsOneAgentPerDirForASingleSession(t *testing.T) {
 	}
 }
 
+// omp started from a shell in ~ runs in /tmp; zellij reports the shell's cwd.
+func TestBuildPlacesALoneSessionOnTheHookPaneWhateverItsShellCwd(t *testing.T) {
+	panes := []mux.Pane{{PaneID: "bb:terminal_2", WindowID: "bb:1", SessionID: "bb", Cwd: "/home/me", Command: "omp"}}
+	reported := state.SessionView{SessionID: "s", Directory: "/tmp", Source: state.SourceLive, Provider: "omp", LastActivity: ago(time.Minute), PaneID: "bb:terminal_2"}
+	gone := reported
+	gone.PaneID = "bb:terminal_9"
+
+	got := build(Input{Live: []state.SessionView{reported}, Panes: panes})
+	if len(got) != 1 || got[0].WindowID != "bb:1" || got[0].Kind != KindStray {
+		t.Fatalf("agents = %+v, want the /tmp stray on tab bb:1", got)
+	}
+
+	if got := build(Input{Live: []state.SessionView{gone}, Panes: panes}); len(got) != 0 {
+		t.Fatalf("agents = %+v, want none once the reported pane is gone and no pane sits in /tmp", got)
+	}
+}
+
 func TestBuildLabelsSiblingsByTabNameThenTitleThenTabNumber(t *testing.T) {
 	panes := []mux.Pane{
 		{PaneID: "dev:terminal_1", WindowID: "dev:0", SessionID: "dev", Cwd: "/w/a", Command: "omp", TabName: "LEX-123", TabNumber: 1},

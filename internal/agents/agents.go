@@ -431,13 +431,17 @@ func indexPanes(panes []mux.Pane) paneIndex {
 	return ix
 }
 
-// sessionAgents returns base joined onto the best of candidates, or, when
-// several live sessions share its directory, one agent per session. Each
-// sibling takes the pane its hook reported, else the best candidate no
-// sibling holds yet, so every pane stays reachable even before a hook lands.
+// sessionAgents returns base joined onto the pane its session's hook
+// reported, else the best of candidates; when several live sessions share
+// its directory, one agent per session. Each sibling takes its reported pane,
+// else the best candidate no sibling holds yet, so every pane stays reachable
+// even before a hook lands. The reported pane wins because a pane's cwd is its
+// shell's, which need not be where the agent runs.
 func (ix paneIndex) sessionAgents(base Agent, views []state.SessionView, candidates []mux.Pane) []Agent {
 	if len(views) < 2 {
-		ix.attach(&base, candidates)
+		if len(views) == 0 || !ix.joinReported(&base, views[0].PaneID) {
+			ix.attach(&base, candidates)
+		}
 		return []Agent{base}
 	}
 
@@ -446,9 +450,8 @@ func (ix paneIndex) sessionAgents(base Agent, views []state.SessionView, candida
 	for i, sv := range views {
 		out[i] = sessionAgent(base, sv)
 		out[i].ID = base.Dir + "#" + sv.SessionID
-		if p, ok := ix.byID[sv.PaneID]; ok && sv.PaneID != "" {
-			ix.join(&out[i], p)
-			taken[p.PaneID] = true
+		if ix.joinReported(&out[i], sv.PaneID) {
+			taken[sv.PaneID] = true
 		}
 	}
 
@@ -469,6 +472,16 @@ func (ix paneIndex) sessionAgents(base Agent, views []state.SessionView, candida
 		out[i].Tab = cmp.Or(out[i].Tab, out[i].Title, ix.tabNumber(out[i].PaneID))
 	}
 	return out
+}
+
+// joinReported joins a onto the pane a hook reported, if it still exists.
+func (ix paneIndex) joinReported(a *Agent, paneID string) bool {
+	p, ok := ix.byID[paneID]
+	if !ok || paneID == "" {
+		return false
+	}
+	ix.join(a, p)
+	return true
 }
 
 // tabNumber names the tab holding paneID the way the multiplexer's tab bar
