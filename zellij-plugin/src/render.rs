@@ -139,6 +139,10 @@ fn render_body(app: &App, rows: usize, cols: usize, now: i64) -> Vec<String> {
         Status::NotRunning(_) => span("cogitator is not running — start it inside zellij", HINT),
         Status::PermissionDenied => span("permission denied — grant the plugin permissions", HINT),
         Status::Failed(msg) => span(msg.clone(), ERROR),
+        Status::Outdated => span(
+            "cogitator plugin outdated, run cogitator zellij install",
+            HINT,
+        ),
     };
     vec![paint(&truncate(vec![status], cols), None)]
 }
@@ -686,6 +690,18 @@ mod tests {
 
         app.apply_list_result(Some(3), b"", b"kaput");
         assert_eq!(plain_lines(&render(&app, 2, 4, NOW)), ["kap…"]);
+    }
+
+    #[test]
+    fn newer_feed_renders_outdated_message() {
+        let app = app_from(&format!(
+            r#"{{"version":{},"agents":[{{"id":"/a","dir":"/a"}}]}}"#,
+            crate::feed::VERSION + 1
+        ));
+        assert_eq!(
+            plain_lines(&render(&app, 3, 80, NOW))[0],
+            "cogitator plugin outdated, run cogitator zellij install"
+        );
     }
 
     #[test]

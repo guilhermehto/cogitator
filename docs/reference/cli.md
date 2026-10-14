@@ -39,11 +39,15 @@ These drive the [tmux integration](/guide/tmux) and talk to the running TUI:
   and dock the sidebar plugin in new sessions through a cogitator-owned layout. Release
   binaries (`brew install guilhermehto/tap/cogitator`) carry the plugin, so
   `cogitator zellij install` is the whole setup, with no Rust toolchain: it writes the plugin
-  to `~/.local/share/cogitator/` (`$XDG_DATA_HOME/cogitator` when set). A source build
-  (`go install`) has no plugin inside: run `make plugin` in a checkout and pass
+  to `~/.local/share/cogitator/cogitator-zellij-VERSION.wasm` (`$XDG_DATA_HOME/cogitator`
+  when set). After upgrading cogitator, re-run it: new sessions load the new plugin, since
+  zellij has never cached that file, and older copies are removed. A plugin older than the
+  running cogitator says `cogitator plugin outdated, run cogitator zellij install`. A source
+  build (`go install`) has no plugin inside: run `make plugin` in a checkout and pass
   `--plugin zellij-plugin/target/wasm32-wasip1/release/cogitator-zellij.wasm`, or pass
   `--no-sidebar` for the keybinds alone.
-- `cogitator zellij uninstall [--config PATH] [--dry-run]`: remove the owned blocks and layout.
+- `cogitator zellij uninstall [--config PATH] [--dry-run]`: remove the owned blocks, layout,
+  and plugin copies.
 
 The installers never set anything up twice. If cogitator's own wiring is already current,
 a re-run prints `already set up` and writes nothing. If it points at an older binary,

@@ -416,7 +416,7 @@ func withBundledPlugin(opts *zellijinstall.Options, noSidebar bool) error {
 	if !ok {
 		return errPluginNotBundled
 	}
-	opts.Bundled = &zellijinstall.BundledPlugin{Wasm: wasm}
+	opts.Bundled = &zellijinstall.BundledPlugin{Wasm: wasm, Version: version}
 
 	return nil
 }

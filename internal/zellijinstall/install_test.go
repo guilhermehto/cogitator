@@ -1216,8 +1216,25 @@ func TestInstallWithPluginRefusesHandWiredSidebarWithoutWriting(t *testing.T) {
 
 var testWasm = []byte("\x00asm bundled")
 
+const testWasmName = "cogitator-zellij-1.0.0.wasm"
+
 func bundled() *BundledPlugin {
-	return &BundledPlugin{Wasm: testWasm}
+	return &BundledPlugin{Wasm: testWasm, Version: "1.0.0"}
+}
+
+func dataWasm(env testEnv, name string) string {
+	return filepath.Join(env.home, ".local", "share", "cogitator", name)
+}
+
+func installedWasm(t *testing.T, env testEnv) []string {
+	t.Helper()
+
+	paths, err := filepath.Glob(dataWasm(env, "*.wasm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return paths
 }
 
 func TestInstallWritesBundledPluginToDataDir(t *testing.T) {
@@ -1240,7 +1257,7 @@ func TestInstallWritesBundledPluginToDataDir(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			wasm := filepath.Join(tc.wantDir(env), "cogitator-zellij.wasm")
+			wasm := filepath.Join(tc.wantDir(env), testWasmName)
 			if got := readFile(t, wasm); got != string(testWasm) {
 				t.Fatalf("bundled wasm = %q, want %q", got, testWasm)
 			}
@@ -1255,7 +1272,7 @@ func TestInstallWritesBundledPluginToDataDir(t *testing.T) {
 func TestInstallBundledDryRunNamesWasmWithoutWriting(t *testing.T) {
 	env := newTestEnv(t)
 	writeFile(t, env.conf, userShapedConfig, 0o644)
-	wasm := filepath.Join(env.home, ".local", "share", "cogitator", "cogitator-zellij.wasm")
+	wasm := dataWasm(env, testWasmName)
 
 	if err := env.installer.Install(Options{Bundled: bundled(), DryRun: true}); err != nil {
 		t.Fatal(err)
@@ -1323,14 +1340,20 @@ func TestCheckReportsBundledSidebarState(t *testing.T) {
 			if err := env.installer.Install(Options{Bundled: bundled()}); err != nil {
 				t.Fatal(err)
 			}
-			writeFile(t, filepath.Join(env.home, ".local", "share", "cogitator", "cogitator-zellij.wasm"), "\x00asm older", 0o644)
+			writeFile(t, dataWasm(env, testWasmName), "\x00asm older", 0o644)
 		}, installkit.Stale},
 		{"stale when the copy was deleted", func(t *testing.T, env testEnv) {
 			writeFile(t, env.conf, userShapedConfig, 0o644)
 			if err := env.installer.Install(Options{Bundled: bundled()}); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Remove(filepath.Join(env.home, ".local", "share", "cogitator", "cogitator-zellij.wasm")); err != nil {
+			if err := os.Remove(dataWasm(env, testWasmName)); err != nil {
+				t.Fatal(err)
+			}
+		}, installkit.Stale},
+		{"stale after an upgrade", func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(Options{Bundled: &BundledPlugin{Wasm: []byte("\x00asm old"), Version: "0.9.0"}}); err != nil {
 				t.Fatal(err)
 			}
 		}, installkit.Stale},
@@ -1348,6 +1371,128 @@ func TestCheckReportsBundledSidebarState(t *testing.T) {
 
 			if report.Sidebar.State != tc.want {
 				t.Fatalf("sidebar = %+v, want %v", report.Sidebar, tc.want)
+			}
+		})
+	}
+}
+
+func TestInstallUpgradeLeavesOnlyTheNewWasm(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+	oldWasm := &BundledPlugin{Wasm: []byte("\x00asm old"), Version: "0.9.0"}
+
+	if err := env.installer.Install(Options{Bundled: oldWasm}); err != nil {
+		t.Fatal(err)
+	}
+	env.out.Reset()
+	if err := env.installer.Install(Options{Bundled: bundled()}); err != nil {
+		t.Fatal(err)
+	}
+
+	wasm := dataWasm(env, testWasmName)
+	if got := installedWasm(t, env); len(got) != 1 || got[0] != wasm {
+		t.Fatalf("installed wasm = %v, want only %s", got, wasm)
+	}
+	layout := readFile(t, filepath.Join(filepath.Dir(env.conf), "layouts", "cogitator.kdl"))
+	if !strings.Contains(layout, `plugin location="file:`+wasm+`"`) || !strings.Contains(readFile(t, env.conf), `MessagePlugin "file:`+wasm+`"`) {
+		t.Fatalf("layout or sidebar bind does not reference %s:\n%s", wasm, layout)
+	}
+	if !strings.Contains(env.out.String(), "removed the unused plugin copy "+dataWasm(env, "cogitator-zellij-0.9.0.wasm")) {
+		t.Fatalf("upgrade does not report the removed copy: %q", env.out.String())
+	}
+}
+
+func TestInstallDryRunListsWasmItWouldRemove(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+	if err := env.installer.Install(Options{Bundled: &BundledPlugin{Wasm: []byte("\x00asm old"), Version: "0.9.0"}}); err != nil {
+		t.Fatal(err)
+	}
+	oldWasm := dataWasm(env, "cogitator-zellij-0.9.0.wasm")
+
+	if err := env.installer.Install(Options{Bundled: bundled(), DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(oldWasm); err != nil {
+		t.Fatalf("dry run removed the old copy: %v", err)
+	}
+	if !strings.Contains(env.out.String(), "would remove the unused plugin copy "+oldWasm) {
+		t.Fatalf("dry run does not list the old copy: %q", env.out.String())
+	}
+}
+
+func TestInstallWithExplicitPluginRemovesBundledCopies(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+	if err := env.installer.Install(Options{Bundled: bundled()}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := env.installer.Install(Options{Plugin: writePlugin(t)}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := installedWasm(t, env); len(got) != 0 {
+		t.Fatalf("bundled copies left after switching to --plugin: %v", got)
+	}
+}
+
+func TestInstallKeepsExplicitPluginInsideDataDir(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+	wasm := dataWasm(env, "cogitator-zellij-local.wasm")
+	writeFile(t, wasm, "\x00asm local", 0o644)
+
+	if err := env.installer.Install(Options{Plugin: wasm}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := installedWasm(t, env); len(got) != 1 {
+		t.Fatalf("installed wasm = %v, want the docked --plugin kept", got)
+	}
+}
+
+func TestUninstallRemovesBundledWasm(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig, 0o644)
+	if err := env.installer.Install(Options{Bundled: bundled()}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := env.installer.Uninstall(Options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := installedWasm(t, env); len(got) != 0 {
+		t.Fatalf("bundled copies left after uninstall: %v", got)
+	}
+}
+
+func TestBundledWasmFileName(t *testing.T) {
+	hashName := BundledPlugin{Wasm: testWasm, Version: "dev"}.fileName()
+
+	cases := []struct {
+		name    string
+		plugin  BundledPlugin
+		want    string
+		notWant string
+	}{
+		{"release version", BundledPlugin{Wasm: testWasm, Version: "0.2.0"}, "cogitator-zellij-0.2.0.wasm", ""},
+		{"snapshot version", BundledPlugin{Wasm: testWasm, Version: "0.2.0-SNAPSHOT-d9cef83"}, "cogitator-zellij-0.2.0-SNAPSHOT-d9cef83.wasm", ""},
+		{"empty version hashes the wasm", BundledPlugin{Wasm: testWasm}, hashName, ""},
+		{"path-like version hashes the wasm", BundledPlugin{Wasm: testWasm, Version: "../x"}, hashName, ""},
+		{"dev builds of other wasm differ", BundledPlugin{Wasm: []byte("\x00asm other"), Version: "dev"}, "", hashName},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.plugin.fileName()
+			if tc.want != "" && got != tc.want {
+				t.Fatalf("fileName = %q, want %q", got, tc.want)
+			}
+			if got == tc.notWant || !strings.HasPrefix(got, "cogitator-zellij-") || !strings.HasSuffix(got, ".wasm") {
+				t.Fatalf("fileName = %q, want a distinct cogitator-zellij-*.wasm", got)
 			}
 		})
 	}

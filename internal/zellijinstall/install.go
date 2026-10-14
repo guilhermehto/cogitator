@@ -13,6 +13,8 @@ package zellijinstall
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -36,7 +38,8 @@ const (
 	layoutName   = "cogitator.kdl"
 	layoutOwner  = "// managed by cogitator"
 	layoutHeader = layoutOwner + " — regenerate with `cogitator zellij install`"
-	bundledName  = "cogitator-zellij.wasm"
+	wasmPrefix   = "cogitator-zellij-"
+	wasmSuffix   = ".wasm"
 	beginMarker  = "// BEGIN cogitator"
 	endMarker    = "// END cogitator"
 	beginLine    = beginMarker + " (managed by cogitator — regenerate with `cogitator zellij install`)"
@@ -57,6 +60,7 @@ var (
 	bindNode          = regexp.MustCompile(`^\s*bind((?:\s+` + kdlStringPattern + `)+)`)
 	quotedArg         = regexp.MustCompile(`"((?:[^"\\]|\\.)*)"`)
 	defaultLayoutArg  = regexp.MustCompile(`^\s*default_layout\s+(` + kdlStringPattern + `)`)
+	fileNameVersion   = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._+-]*$`)
 )
 
 const (
@@ -119,8 +123,22 @@ type Options struct {
 }
 
 // BundledPlugin is the plugin wasm embedded in the cogitator binary.
+// Version names the installed copy, so an upgrade docks a new file that
+// zellij has never cached; "dev" or an unusable version falls back to a
+// hash of the wasm.
 type BundledPlugin struct {
-	Wasm []byte
+	Wasm    []byte
+	Version string
+}
+
+func (b BundledPlugin) fileName() string {
+	version := b.Version
+	if version == "dev" || !fileNameVersion.MatchString(version) {
+		sum := sha256.Sum256(b.Wasm)
+		version = hex.EncodeToString(sum[:6])
+	}
+
+	return wasmPrefix + version + wasmSuffix
 }
 
 func (o Options) hasPlugin() bool {
@@ -322,20 +340,37 @@ func (i Installer) Install(opts Options) error {
 		return nil
 	}
 
-	if err := t.writeWasm(); err != nil {
+	removed, err := i.write(t, updated, layout)
+	if err != nil {
 		return err
+	}
+	fmt.Fprintln(i.Out, installSummary(t.confPath, t.hadBlock, t.spec))
+	printPaths(i.Out, "removed the unused plugin copy ", removed)
+
+	return nil
+}
+
+// write lands the plugin copy before the layout that docks it, and the
+// layout before the config that selects it, then drops the plugin copies
+// the layout no longer points at.
+func (i Installer) write(t target, updated, layout string) ([]string, error) {
+	if err := t.writeWasm(); err != nil {
+		return nil, err
 	}
 
 	if err := writeLayout(t.spec.layoutPath, layout); err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := installkit.WriteFileAtomic(t.confPath, []byte(updated), t.mode); err != nil {
-		return fmt.Errorf("write %s: %w", t.confPath, err)
+		return nil, fmt.Errorf("write %s: %w", t.confPath, err)
 	}
-	fmt.Fprintln(i.Out, installSummary(t.confPath, t.hadBlock, t.spec))
 
-	return nil
+	if t.spec.layoutPath == "" {
+		return nil, nil
+	}
+
+	return removeFiles(i.unusedWasm(t.spec.plugin))
 }
 
 func (i Installer) printDryRun(t target, block, layout string) {
@@ -343,9 +378,12 @@ func (i Installer) printDryRun(t target, block, layout string) {
 	if t.wasm != nil {
 		fmt.Fprintf(i.Out, "would write the bundled plugin (%d bytes) to %s\n", len(t.wasm), t.spec.plugin)
 	}
-	if t.spec.layoutPath != "" {
-		fmt.Fprintf(i.Out, "would write %s:\n%s", t.spec.layoutPath, layout)
+	if t.spec.layoutPath == "" {
+		return
 	}
+
+	fmt.Fprintf(i.Out, "would write %s:\n%s", t.spec.layoutPath, layout)
+	printPaths(i.Out, "would remove the unused plugin copy ", i.unusedWasm(t.spec.plugin))
 }
 
 // wasmCurrent reports whether the bundled plugin copy already holds this
@@ -412,6 +450,9 @@ func (i Installer) Uninstall(opts Options) error {
 	layoutPath := i.layoutFile(opts.ConfigPath)
 	if opts.DryRun {
 		fmt.Fprintf(i.Out, "would remove cogitator keybinds from %s%s\n", confPath, layoutNote(layoutPath, ownsLayout(layoutPath)))
+		if ownsLayout(layoutPath) {
+			printPaths(i.Out, "would remove the plugin copy ", i.unusedWasm(""))
+		}
 		return nil
 	}
 
@@ -424,8 +465,14 @@ func (i Installer) Uninstall(opts Options) error {
 		return err
 	}
 	fmt.Fprintf(i.Out, "removed cogitator keybinds from %s%s\n", confPath, layoutNote(layoutPath, removed))
+	if !removed {
+		return nil
+	}
 
-	return nil
+	copies, err := removeFiles(i.unusedWasm(""))
+	printPaths(i.Out, "removed the plugin copy ", copies)
+
+	return err
 }
 
 func layoutNote(layoutPath string, owned bool) string {
@@ -463,7 +510,43 @@ func (i Installer) pluginPath(opts Options) (string, error) {
 		return "", errors.New("bundled plugin is empty")
 	}
 
-	return filepath.Join(i.dataDir(), bundledName), nil
+	return filepath.Join(i.dataDir(), opts.Bundled.fileName()), nil
+}
+
+// unusedWasm lists the plugin copies cogitator wrote to its data directory
+// other than keep, which the layout docks; keep "" lists them all.
+func (i Installer) unusedWasm(keep string) []string {
+	paths, _ := filepath.Glob(filepath.Join(i.dataDir(), wasmPrefix+"*"+wasmSuffix))
+	kept, keepErr := os.Stat(keep)
+
+	var unused []string
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err == nil && keepErr == nil && os.SameFile(info, kept) {
+			continue
+		}
+		unused = append(unused, path)
+	}
+
+	return unused
+}
+
+func removeFiles(paths []string) ([]string, error) {
+	var removed []string
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return removed, fmt.Errorf("remove %s: %w", path, err)
+		}
+		removed = append(removed, path)
+	}
+
+	return removed, nil
+}
+
+func printPaths(out io.Writer, prefix string, paths []string) {
+	for _, path := range paths {
+		fmt.Fprintln(out, prefix+path)
+	}
 }
 
 // sidebarLayout mirrors zellij's default layout (tab bar, one pane, status

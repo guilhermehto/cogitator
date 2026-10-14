@@ -1,4 +1,4 @@
-use crate::feed::{self, Agent};
+use crate::feed::{self, Agent, ParseError};
 use std::cell::Cell;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8,6 +8,7 @@ pub enum Status {
     NotRunning(String),
     Failed(String),
     PermissionDenied,
+    Outdated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +137,9 @@ impl App {
                     self.home = feed.home;
                     self.set_agents(feed.agents);
                     self.status = Status::Ready;
+                }
+                Err(ParseError::NewerVersion(_)) => {
+                    self.status = Status::Outdated;
                 }
                 Err(e) => {
                     self.status = Status::Failed(e.to_string());
@@ -398,6 +402,14 @@ pub(crate) mod tests {
         let mut app = App::new();
         app.apply_list_result(Some(2), b"", b"");
         assert_eq!(app.status(), &Status::Failed("exit 2".into()));
+    }
+
+    #[test]
+    fn newer_feed_version_is_outdated() {
+        let mut app = App::new();
+        let json = format!(r#"{{"version":{},"agents":[]}}"#, feed::VERSION + 1);
+        app.apply_list_result(Some(0), json.as_bytes(), b"");
+        assert_eq!(app.status(), &Status::Outdated);
     }
 
     #[test]

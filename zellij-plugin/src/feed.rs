@@ -42,8 +42,13 @@ pub struct Feed {
     pub agents: Vec<Agent>,
 }
 
+/// The feed wire version this plugin understands; cogitator bumps it when
+/// the shape changes, so a newer feed means the plugin needs reinstalling.
+pub const VERSION: u64 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
+    NewerVersion(u64),
     UnsupportedVersion(u64),
     Invalid(String),
 }
@@ -51,6 +56,7 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ParseError::NewerVersion(n) => write!(f, "feed version {n} is newer than this plugin"),
             ParseError::UnsupportedVersion(n) => write!(f, "unsupported feed version {n}"),
             ParseError::Invalid(msg) => write!(f, "invalid feed: {msg}"),
         }
@@ -68,7 +74,10 @@ struct Wire {
 
 pub fn parse(input: &str) -> Result<Feed, ParseError> {
     let wire: Wire = serde_json::from_str(input).map_err(|e| ParseError::Invalid(e.to_string()))?;
-    if wire.version != 1 {
+    if wire.version > VERSION {
+        return Err(ParseError::NewerVersion(wire.version));
+    }
+    if wire.version != VERSION {
         return Err(ParseError::UnsupportedVersion(wire.version));
     }
     Ok(Feed {
@@ -197,10 +206,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_version() {
+    fn rejects_newer_version_as_newer() {
+        let input = format!(r#"{{"version":{},"agents":[]}}"#, VERSION + 1);
+        assert_eq!(parse(&input), Err(ParseError::NewerVersion(VERSION + 1)));
+    }
+
+    #[test]
+    fn rejects_older_version_as_unsupported() {
         assert_eq!(
-            parse(r#"{"version":2,"agents":[]}"#),
-            Err(ParseError::UnsupportedVersion(2))
+            parse(r#"{"version":0,"agents":[]}"#),
+            Err(ParseError::UnsupportedVersion(0))
         );
     }
 
