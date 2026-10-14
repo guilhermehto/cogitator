@@ -829,7 +829,7 @@ func TestCapture_TabResolvesPreferredPane(t *testing.T) {
 	}
 
 	calls := r.callsTo("dump-screen")
-	if len(calls) != 1 || !slices.Equal(calls[0], []string{"action", "dump-screen", "-p", "terminal_5"}) {
+	if len(calls) != 1 || !slices.Equal(calls[0], []string{"action", "dump-screen", "-p", "terminal_5", "--ansi"}) {
 		t.Errorf("dump-screen calls = %v", calls)
 	}
 }
@@ -851,11 +851,23 @@ func TestCapture_PaneID(t *testing.T) {
 	}
 
 	want := [][]string{
-		{"action", "dump-screen", "-p", "terminal_8"},
-		{"--session", "repo:feat", "action", "dump-screen", "-p", "terminal_3"},
+		{"action", "dump-screen", "-p", "terminal_8", "--ansi"},
+		{"--session", "repo:feat", "action", "dump-screen", "-p", "terminal_3", "--ansi"},
 	}
 	if !reflect.DeepEqual(r.calls, want) {
 		t.Errorf("calls = %v, want %v", r.calls, want)
+	}
+}
+
+func TestCapture_DropsStyledBlankTail(t *testing.T) {
+	r := &fakeRunner{responses: map[string]string{"dump-screen": "a\n\x1b[48;2;1;2;3m   \x1b[0m\n"}}
+
+	got, err := newBackend(t, r).Capture(ownSession(t)+":terminal_8", 10)
+	if err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	if got != "a" {
+		t.Errorf("Capture = %q, want %q", got, "a")
 	}
 }
 
