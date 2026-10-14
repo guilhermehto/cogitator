@@ -22,6 +22,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
@@ -574,8 +576,8 @@ func (b Backend) ListPanes() ([]mux.Pane, error) {
 }
 
 // Capture implements mux.Backend. target is a pane id or a tab target (its
-// preferred pane); the result is the last lines lines of the viewport with
-// trailing blank lines dropped.
+// preferred pane); the result is the last lines lines of the viewport, SGR
+// styling kept, with trailing blank lines dropped.
 func (b Backend) Capture(target string, lines int) (string, error) {
 	if !b.Available() {
 		return "", mux.ErrNotAvailable
@@ -595,7 +597,7 @@ func (b Backend) Capture(target string, lines int) (string, error) {
 		local = best.localID()
 	}
 
-	out, err := b.in(session, "dump-screen", "-p", local)
+	out, err := b.in(session, "dump-screen", "-p", local, "--ansi")
 	if err != nil {
 		return "", fmt.Errorf("zellijctl: dump-screen %s: %w", address(session, local), err)
 	}
@@ -958,9 +960,10 @@ func canonical(path string) string {
 }
 
 // lastLines drops trailing blank lines and keeps the last n (all when n <= 0).
+// A line of only whitespace and escape sequences counts as blank.
 func lastLines(text string, n int) string {
 	lines := strings.Split(text, "\n")
-	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+	for len(lines) > 0 && strings.TrimSpace(ansi.Strip(lines[len(lines)-1])) == "" {
 		lines = lines[:len(lines)-1]
 	}
 	if n > 0 && len(lines) > n {

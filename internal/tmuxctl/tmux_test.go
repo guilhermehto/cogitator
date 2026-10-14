@@ -945,7 +945,7 @@ func TestCapturePane_RequestsTailOfTarget(t *testing.T) {
 	if out != "line1\nline2\n" {
 		t.Errorf("out = %q", out)
 	}
-	assertCall(t, f, 0, "capture-pane", "-p", "-J", "-S", "-30", "-t", "%7")
+	assertCall(t, f, 0, "capture-pane", "-p", "-e", "-J", "-S", "-30", "-t", "%7")
 }
 
 func TestCapturePane_NotAvailableOutsideTmux(t *testing.T) {

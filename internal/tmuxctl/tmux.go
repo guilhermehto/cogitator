@@ -747,13 +747,14 @@ func DisplayMessage(r Runner, client, text string) error {
 }
 
 // CapturePane returns the last lines lines of target's visible history, with
-// wrapped lines joined. target is a pane id or a window id (its active pane).
+// SGR styling kept and wrapped lines joined. target is a pane id or a window
+// id (its active pane).
 func CapturePane(r Runner, target string, lines int) (string, error) {
 	if !Available() {
 		return "", mux.ErrNotAvailable
 	}
 
-	out, err := r.Run("capture-pane", "-p", "-J", "-S", "-"+strconv.Itoa(lines), "-t", target)
+	out, err := r.Run("capture-pane", "-p", "-e", "-J", "-S", "-"+strconv.Itoa(lines), "-t", target)
 	if err != nil {
 		return "", fmt.Errorf("tmuxctl: capture-pane %s: %w", target, err)
 	}
