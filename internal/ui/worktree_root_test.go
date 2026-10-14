@@ -8,10 +8,10 @@ import (
 	"testing"
 
 	"github.com/guilhermehto/cogitator/internal/git"
+	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 )
 
 func TestNewWorktreeUsesConfiguredRoot(t *testing.T) {
@@ -31,8 +31,8 @@ func TestNewWorktreeUsesConfiguredRoot(t *testing.T) {
 				t.Fatal(err)
 			}
 			gitFake := &fakeGitOps{addResult: want, fetchAddResult: want}
-			tmuxFake := &fakeTmuxOps{available: true, ensureWindowResult: "main:1"}
-			m := model{width: 120, gitOp: gitFake, tmux: tmuxFake, harnOp: &fakeHarnessOps{}, spinnerActive: true}
+			tmuxFake := &fakeMux{available: true, ensureWindowResult: "main:1"}
+			m := model{width: 120, gitOp: gitFake, mux: tmuxFake, harnOp: &fakeHarnessOps{}, spinnerActive: true}
 			updated, cmd := m.startNewWorktree("/src/repo", "fix/auth", "fake", fromRemote)
 			if len(updated.workspaceRows) != 1 || updated.workspaceRows[0].Worktree != want {
 				t.Fatalf("pending row does not use configured root: %+v", updated.workspaceRows)
@@ -120,7 +120,7 @@ func TestWorktreeCreateAndDeleteOnDisk(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			tmuxFake := &fakeTmuxOps{available: true, ensureWindowResult: "main:1", findWindowErr: tmuxctl.ErrWindowNotFound}
+			tmuxFake := &fakeMux{available: true, ensureWindowResult: "main:1", findWindowErr: mux.ErrWindowNotFound}
 			m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, nil)
 			m.gitOp = realGitOps{}
 			_, cmd := m.startNewWorktree(repo, "fix/auth", "fake", false)

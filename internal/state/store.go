@@ -52,6 +52,9 @@ type SessionView struct {
 	// Provider identifies which coding-agent harness produced this session.
 	// Defaults to "opencode" for sessions discovered via the opencode SSE path.
 	Provider harness.Kind
+	// PaneID is the multiplexer pane the harness runs in, as reported by its
+	// hook; empty when unknown.
+	PaneID string
 }
 
 type Snapshot struct {
@@ -141,12 +144,16 @@ type Store struct {
 	// restored holds the last-known attention for sessions loaded from durable
 	// storage at startup. Keyed by (provider, sessionID). Entries are consumed
 	// by the snapshot override in step 3; this map is never used to create rows.
-	restored  map[providerSessionKey]RestoredSession
-	listeners []chan Snapshot
-	now       func() time.Time
-	lookupCtx context.Context
-	cfg       *config.Config
-	logger    *slog.Logger
+	restored map[providerSessionKey]RestoredSession
+	settler  attentionSettler
+	// settleTimer re-publishes when a held attention is due to change, so the
+	// settled label shows even if no further event arrives.
+	settleTimer *time.Timer
+	listeners   []chan Snapshot
+	now         func() time.Time
+	lookupCtx   context.Context
+	cfg         *config.Config
+	logger      *slog.Logger
 }
 
 func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) *Store {
@@ -160,6 +167,7 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) *Store {
 		instances:        map[string]*instanceState{},
 		providerSessions: map[providerSessionKey]*providerRow{},
 		restored:         map[providerSessionKey]RestoredSession{},
+		settler:          newAttentionSettler(cfg.AttentionSettle),
 		now:              time.Now,
 		lookupCtx:        ctx,
 		cfg:              cfg,
@@ -789,6 +797,7 @@ func sessionHasQuestion(inst *instanceState, sid string) bool {
 //     wasActive untouched so the eventual return to idle still counts.
 //   - Going idle (AttnInactive) after having been active flips finished on and
 //     consumes wasActive.
+//
 // finishedOr promotes a plain-inactive attention to AttnFinished when the
 // session's finished flag is set. Any non-inactive label (active, permission,
 // question, errored) is the live reason to look and is returned unchanged.
@@ -879,6 +888,7 @@ func (s *Store) MarkViewed(providerKind harness.Kind, instanceID, sessionID stri
 			changed = true
 		}
 	}
+	s.settler.forgetSession(sessionID)
 	s.mu.Unlock()
 	if changed {
 		s.publish()
@@ -1031,6 +1041,7 @@ func (s *Store) snapshot() Snapshot {
 			LastActivity: u.LastActivity,
 			Created:      u.Created,
 			Provider:     u.Provider,
+			PaneID:       u.PaneID,
 		}
 		best[key] = candidate{view: sv, live: src == SourceLive, healthy: true}
 	}
@@ -1055,6 +1066,8 @@ func (s *Store) snapshot() Snapshot {
 		}
 		rows = append(rows, view)
 	}
+	s.settleAttentionLocked(rows, now)
+
 	// Sort deterministically with a mixed provider+instance id set.
 	// Primary: provider kind (groups all opencode rows before all codex rows,
 	// or vice versa — stable alphabetic order). Secondary: instance id within
@@ -1074,4 +1087,33 @@ func (s *Store) snapshot() Snapshot {
 		return rows[i].LastActivity.After(rows[j].LastActivity)
 	})
 	return Snapshot{Sessions: rows, UnreachableInstances: unreachable, UpdatedAt: now}
+}
+
+// settleAttentionLocked replaces each row's derived attention with its settled
+// one and re-arms the publish that reveals the next held change.
+func (s *Store) settleAttentionLocked(rows []SessionView, now time.Time) {
+	present := make(map[providerSessionKey]bool, len(rows))
+	var nextDue time.Time
+	for i := range rows {
+		key := providerSessionKey{provider: rows[i].Provider, sessionID: rows[i].SessionID}
+		present[key] = true
+
+		var due time.Time
+		rows[i].Attention, due = s.settler.settle(key, rows[i].Attention, now)
+		if !due.IsZero() && (nextDue.IsZero() || due.Before(nextDue)) {
+			nextDue = due
+		}
+	}
+	s.settler.retain(present)
+
+	if nextDue.IsZero() {
+		return
+	}
+
+	if s.settleTimer == nil {
+		s.settleTimer = time.AfterFunc(nextDue.Sub(now), s.publish)
+		return
+	}
+
+	s.settleTimer.Reset(nextDue.Sub(now))
 }

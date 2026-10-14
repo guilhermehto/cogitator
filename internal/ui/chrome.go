@@ -27,6 +27,28 @@ var viewTabs = []struct {
 }{
 	{viewWorkspaces, "Workspaces"},
 	{viewSessions, "Repos"},
+	{viewAgents, "Agents"},
+}
+
+// nextView returns the view after v in Tab order, wrapping around.
+func nextView(v viewMode) viewMode {
+	for i, t := range viewTabs {
+		if t.view == v {
+			return viewTabs[(i+1)%len(viewTabs)].view
+		}
+	}
+
+	return viewTabs[0].view
+}
+
+func viewLabel(v viewMode) string {
+	for _, t := range viewTabs {
+		if t.view == v {
+			return strings.ToLower(t.label)
+		}
+	}
+
+	return ""
 }
 
 // headerSummary is the live-session tally shown on the right of the header.
@@ -112,17 +134,16 @@ func renderKeyHints(hints []keyHint, pinned keyHint, width int) string {
 // the active view, followed by the always-available globals.
 func (m model) keyHints() []keyHint {
 	var hints []keyHint
-	if m.view == viewWorkspaces {
+	switch m.view {
+	case viewAgents:
+		hints = m.agentKeyHints()
+	case viewWorkspaces:
 		hints = m.workspaceKeyHints()
-	} else {
+	default:
 		hints = m.repoKeyHints()
 	}
-	next := "repos"
-	if m.view != viewWorkspaces {
-		next = "workspaces"
-	}
 	return append(hints,
-		keyHint{"tab", next},
+		keyHint{"tab", viewLabel(nextView(m.view))},
 		keyHint{"ctrl+p", "switch"},
 		keyHint{"q", "quit"},
 	)

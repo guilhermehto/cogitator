@@ -81,6 +81,9 @@ type HookEvent struct {
 
 	// IsError is true when the event carries an error indicator.
 	IsError bool
+
+	// PaneID is the multiplexer pane the hook ran in, if stamped.
+	PaneID string
 }
 
 // hookEventNames maps both PascalCase and snake_case wire names to a canonical
@@ -170,6 +173,8 @@ func ParseHookEvent(raw []byte) (HookEvent, error) {
 			ev.IsError = true
 		}
 	}
+
+	ev.PaneID = hookipc.PaneID(m)
 
 	return ev, nil
 }

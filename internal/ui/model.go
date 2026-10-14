@@ -12,13 +12,15 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/guilhermehto/cogitator/internal/agentfeed"
+	"github.com/guilhermehto/cogitator/internal/agents"
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/git"
 	"github.com/guilhermehto/cogitator/internal/harness"
+	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
@@ -30,7 +32,7 @@ type snapshotMsg state.Snapshot
 // handler can apply them atomically.
 type workspaceRowsMsg struct {
 	rows       []settings.Row
-	launchMode tmuxctl.LaunchMode
+	launchMode mux.LaunchMode
 	// root is the resolved workspace root (settings.ResolveWorkspaceRoot),
 	// carried alongside rows/launchMode because buildWorkspaceRows resolves it
 	// even on its zero-repos early return — the exact case where View's
@@ -40,7 +42,8 @@ type workspaceRowsMsg struct {
 
 // viewMode selects which top-level view occupies the full pane: Repos
 // (viewSessions: worktrees merged across configured repos) or Workspaces
-// (multi-repo bundles and their sessions). newModel opens on Workspaces — it
+// (multi-repo bundles and their sessions), or Agents (the attention-ordered
+// triage list across both). newModel opens on Workspaces — it
 // is the "what I'm working on" surface. Iota order is load-bearing: the zero
 // value maps to viewSessions, keeping existing model{} literals in tests valid
 // without explicit initialisation — the same convention promptMode documents
@@ -50,6 +53,7 @@ type viewMode int
 const (
 	viewSessions viewMode = iota
 	viewWorkspaces
+	viewAgents
 )
 
 // wsStatusMsg carries the result of loadWorkspaceStatusCmd: the workspace set
@@ -197,6 +201,10 @@ const (
 	// skips entirely. Placed last so existing model{} literals keep their
 	// iota values.
 	promptWorkspaceBackfill
+	// promptConfirmKillAgent confirms closing the tmux window of the agent
+	// under the Agents cursor ('K'), captured in killAgentTarget. 'y' kills
+	// the window; any other key cancels.
+	promptConfirmKillAgent
 )
 
 // launchResultMsg is returned by launchCmd / resumeCmd after the tmux
@@ -217,6 +225,9 @@ type launchResultMsg struct {
 	// configured default overrode the row's recorded harness; empty otherwise.
 	// The launch handler upserts the roster to match only when it is set.
 	harnessKind string
+	// client is the tmux client a feed-initiated jump targets; empty for jumps
+	// made from inside cogitator itself.
+	client string
 }
 
 // worktreeCreatedMsg is returned by newWorktreeCmd after git.AddWorktree
@@ -270,50 +281,6 @@ type worktreeDeletedMsg struct {
 	err  error
 }
 
-// tmuxOps is the injectable seam for tmux operations used by the action Cmds.
-// The zero value is nil; production code uses the real tmuxctl package-level
-// functions via defaultTmuxOps. Tests inject a fake.
-type tmuxOps interface {
-	Available() bool
-	FindWindowByDir(dir string) (tmuxctl.Target, error)
-	WindowProcessAlive(target tmuxctl.Target) (bool, error)
-	RelaunchInWindow(target tmuxctl.Target, argv []string) error
-	EnsureWindow(dir, name string, argv []string) (tmuxctl.Target, error)
-	EnsureWindowMode(dir, name string, argv []string, mode tmuxctl.LaunchMode) (tmuxctl.Target, error)
-	Select(target tmuxctl.Target) error
-	SelectSession(target tmuxctl.Target) error
-	KillWindow(target tmuxctl.Target) error
-	KillSession(target tmuxctl.Target) error
-}
-
-// realTmuxOps delegates to the package-level tmuxctl functions.
-type realTmuxOps struct{}
-
-func (realTmuxOps) Available() bool { return tmuxctl.Available() }
-func (realTmuxOps) FindWindowByDir(dir string) (tmuxctl.Target, error) {
-	return tmuxctl.FindWindowByDir(dir)
-}
-func (realTmuxOps) WindowProcessAlive(target tmuxctl.Target) (bool, error) {
-	return tmuxctl.WindowProcessAlive(target)
-}
-func (realTmuxOps) RelaunchInWindow(target tmuxctl.Target, argv []string) error {
-	return tmuxctl.RelaunchInWindow(target, argv)
-}
-func (realTmuxOps) EnsureWindow(dir, name string, argv []string) (tmuxctl.Target, error) {
-	return tmuxctl.EnsureWindow(dir, name, argv)
-}
-func (realTmuxOps) EnsureWindowMode(dir, name string, argv []string, mode tmuxctl.LaunchMode) (tmuxctl.Target, error) {
-	return tmuxctl.EnsureWindowMode(dir, name, argv, mode)
-}
-func (realTmuxOps) Select(target tmuxctl.Target) error { return tmuxctl.Select(target) }
-func (realTmuxOps) SelectSession(target tmuxctl.Target) error {
-	return tmuxctl.SelectSession(target)
-}
-func (realTmuxOps) KillWindow(target tmuxctl.Target) error { return tmuxctl.KillWindow(target) }
-func (realTmuxOps) KillSession(target tmuxctl.Target) error {
-	return tmuxctl.KillSession(target)
-}
-
 // viewMarker is the injectable seam through which the model tells the state
 // store a session has been viewed by the user (clearing AttnFinished).
 // *state.Store satisfies it. The interface keeps internal/ui from importing a
@@ -322,14 +289,14 @@ type viewMarker interface {
 	MarkViewed(providerKind harness.Kind, instanceID, sessionID string)
 }
 
-// launchModeFor maps the workspace config's LaunchMode to the tmuxctl mode used
+// launchModeFor maps the workspace config's LaunchMode to the mux mode used
 // by the action Cmds. LaunchWindow maps to ModeWindow; everything else
 // (including the empty default) maps to ModeSession.
-func launchModeFor(m settings.LaunchMode) tmuxctl.LaunchMode {
+func launchModeFor(m settings.LaunchMode) mux.LaunchMode {
 	if m == settings.LaunchWindow {
-		return tmuxctl.ModeWindow
+		return mux.ModeWindow
 	}
-	return tmuxctl.ModeSession
+	return mux.ModeSession
 }
 
 // gitOps is the injectable seam for git worktree operations.
@@ -399,7 +366,7 @@ func (realHarnessOps) Kinds() []harness.Kind {
 }
 
 // storeOps is the injectable seam for workspace persistence, mirroring
-// tmuxOps/gitOps/harnessOps over their real implementations. *workspace.Store
+// mux.Backend/gitOps/harnessOps over their real implementations. *workspace.Store
 // satisfies it via realStoreOps. Kept narrow (mirrors the Store's own public
 // surface) so tests can inject a fake instead of driving real XDG paths in a
 // temp directory.
@@ -546,11 +513,20 @@ type model struct {
 	// presses 'R' to untrack the repo under the cursor. Empty when no removal
 	// is in progress; cleared on cancel and on dispatch of removeRepoCmd.
 	removeRepoTarget string
+	// killAgentTarget is the agent captured when the user presses 'K' in the
+	// Agents view; zero when no kill confirmation is open.
+	killAgentTarget agents.Agent
+	// selfPaneID is cogitator's own multiplexer pane, used to refuse killing
+	// the window the TUI runs in. Empty outside a multiplexer.
+	selfPaneID string
+	// dismissedAgents maps agent ID to when the user dismissed it with 'K';
+	// agents.Build hides those until they run again. Session-scoped.
+	dismissedAgents map[string]time.Time
 	// launchMode is the resolved tmux launch mode (window vs session) read from
 	// workspace config. Refreshed on each buildWorkspaceRows so config edits
 	// take effect without a restart. The zero value never drives a real launch —
 	// every launch path resolves the mode from config first (default: session).
-	launchMode tmuxctl.LaunchMode
+	launchMode mux.LaunchMode
 	// rowsBuilding is true while a background buildWorkspaceRowsCmd is in
 	// flight. Only one build runs at a time; a second snapshotMsg while a
 	// build is in flight sets rowsDirty instead of starting a second build.
@@ -602,19 +578,18 @@ type model struct {
 	repoFinderErr      string
 
 	// Session palette state, meaningful while prompt is promptSwitchSession or
-	// promptSearchSession. Candidate rows and targets are captured when the
-	// palette opens; labels provide fuzzy-match text for each candidate.
+	// promptSearchSession. Candidates are captured when the palette opens;
+	// labels provide fuzzy-match text for each candidate. sessionPaletteMatches
 	// indexes those slices, holding the current fuzzy-filtered view ordered
 	// best-first; sessionPaletteCursor indexes sessionPaletteMatches. Zero
 	// values are safe (palette closed).
-	sessionPaletteRows    []settings.Row
-	sessionPaletteTargets []launchTarget
-	sessionPaletteLabels  []string
-	sessionPaletteMatches []int
-	sessionPaletteCursor  int
+	sessionPaletteCandidates []sessionCandidate
+	sessionPaletteLabels     []string
+	sessionPaletteMatches    []int
+	sessionPaletteCursor     int
 
 	// switchOrder records the monotonically increasing sequence in which
-	// targets (worktrees or workspace sessions) were last jumped to or
+	// targets (worktrees, workspace sessions, or agents) were last jumped to or
 	// resumed, keyed by the target's launch directory (launchTarget.dir);
 	// switchSeq is the next sequence to hand out. It seeds the ctrl+P
 	// palette's most-recently-used ordering so pressing ctrl+P then enter
@@ -751,10 +726,31 @@ type model struct {
 	// and rosterUpserts). Tests inject fakes. Zero-value model{} literals in
 	// tests are safe: action Cmds guard on nil and return an error result
 	// rather than panicking.
-	tmux   tmuxOps
+	mux    mux.Backend
 	gitOp  gitOps
 	harnOp harnessOps
 	store  storeOps
+
+	// feed publishes the unified agent list to the feed socket; nil when the
+	// feed is not running (--demo, bind failure). feedActions delivers its
+	// focus/seen requests, listPanes is the tmux seam for panes.
+	feed         *agentfeed.Holder
+	feedActions  <-chan agentfeed.Action
+	listPanes    func() ([]mux.Pane, error)
+	panes        []mux.Pane
+	panesLoading bool
+	panesDirty   bool
+
+	// badges is the backend seam for the focus poll that publishes @cog_*
+	// badges; nil disables it (--demo, no feed, backend without badges).
+	badges       badgeBackend
+	focusPolling bool
+	// visits holds, per tmux client, the Done agent it is looking at; the
+	// focus poll marks it seen once the client switches away.
+	visits       map[string]agents.Visit
+	agents       []agents.Agent
+	agentsList   agentList
+	agentPreview agentPreview
 
 	// prompt/input drive the sessions-pane input bar shared by every prompt
 	// mode (new worktree, fetch branch, repo finder, session switcher, ...).
@@ -850,10 +846,18 @@ func wsSessionLaunchTarget(workspaceName string, sess workspace.SessionStatus) l
 //   - no window: EnsureWindow → Select
 //
 // The function is a tea.Cmd (runs off the UI goroutine).
-func launchCmd(ops tmuxOps, target launchTarget, harnOp harnessOps, mode tmuxctl.LaunchMode, defaultKind string) tea.Cmd {
-	inner := launchInner(ops, target, harnOp, mode, defaultKind)
+func launchCmd(ops mux.Backend, target launchTarget, harnOp harnessOps, mode mux.LaunchMode, defaultKind string) tea.Cmd {
+	return launchForClientCmd(ops, target, harnOp, mode, defaultKind, "")
+}
+
+// launchForClientCmd is launchCmd for a feed-initiated jump: the select moves
+// client rather than the current tmux client, and the result carries client so
+// a failure can be reported there.
+func launchForClientCmd(ops mux.Backend, target launchTarget, harnOp harnessOps, mode mux.LaunchMode, defaultKind, client string) tea.Cmd {
+	inner := launchInnerForClient(ops, target, harnOp, mode, defaultKind, client)
 	return func() tea.Msg {
 		res := inner()
+		res.client = client
 		// Stamp the session identity so the Update handler can mark it viewed
 		// (clearing AttnFinished) when the select succeeds.
 		res.provider = target.provider
@@ -893,10 +897,16 @@ func launchArgv(target launchTarget, harnOp harnessOps, defaultKind string) (arg
 	return argv, overrideKind
 }
 
-func launchInner(ops tmuxOps, target launchTarget, harnOp harnessOps, mode tmuxctl.LaunchMode, defaultKind string) func() launchResultMsg {
+func launchInner(ops mux.Backend, target launchTarget, harnOp harnessOps, mode mux.LaunchMode, defaultKind string) func() launchResultMsg {
+	return launchInnerForClient(ops, target, harnOp, mode, defaultKind, "")
+}
+
+// launchInnerForClient is launchInner selecting for a specific tmux client;
+// an empty client selects for the current one.
+func launchInnerForClient(ops mux.Backend, target launchTarget, harnOp harnessOps, mode mux.LaunchMode, defaultKind, client string) func() launchResultMsg {
 	return func() launchResultMsg {
 		if ops == nil || !ops.Available() {
-			return launchResultMsg{dir: target.dir, err: tmuxctl.ErrNotAvailable}
+			return launchResultMsg{dir: target.dir, err: mux.ErrNotAvailable}
 		}
 
 		dir := target.dir
@@ -910,11 +920,8 @@ func launchInner(ops tmuxOps, target launchTarget, harnOp harnessOps, mode tmuxc
 		// switches to the session and lets tmux restore its last-active
 		// window (so you land where you left off, not always the first
 		// window). In window mode it focuses the exact tagged window.
-		selectTarget := func(tmuxTarget tmuxctl.Target) error {
-			if mode == tmuxctl.ModeSession {
-				return ops.SelectSession(tmuxTarget)
-			}
-			return ops.Select(tmuxTarget)
+		selectTarget := func(tmuxTarget mux.Target) error {
+			return ops.Select(tmuxTarget, mode, client)
 		}
 
 		// Check tmux directly instead of trusting the caller's cached state.
@@ -941,7 +948,7 @@ func launchInner(ops tmuxOps, target launchTarget, harnOp harnessOps, mode tmuxc
 		}
 
 		// No window exists — create one and select it.
-		newTarget, err := ops.EnsureWindowMode(dir, target.name, argv, mode)
+		newTarget, err := ops.EnsureWindow(dir, target.name, argv, mode)
 		if err != nil {
 			return launchResultMsg{dir: dir, err: err}
 		}
@@ -973,7 +980,7 @@ func worktreeAddFn(gitOp gitOps, fromRemote bool) func(string, string, string) (
 // When fromRemote is true the branch is fetched from origin and checked out
 // (git.FetchAndAddWorktree); otherwise a fresh branch is created off the
 // current HEAD (git.AddWorktree). Both paths share the same launch flow.
-func newWorktreeCmd(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, branch, dest, harnessKind string, mode tmuxctl.LaunchMode, fromRemote bool) tea.Cmd {
+func newWorktreeCmd(ops mux.Backend, gitOp gitOps, harnOp harnessOps, repoPath, branch, dest, harnessKind string, mode mux.LaunchMode, fromRemote bool) tea.Cmd {
 	inner := newWorktreeInner(ops, gitOp, harnOp, repoPath, branch, dest, harnessKind, mode, fromRemote)
 	return func() tea.Msg {
 		// Stamp repo+branch on every result (including error paths) so the
@@ -985,10 +992,10 @@ func newWorktreeCmd(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, bran
 	}
 }
 
-func newWorktreeInner(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, branch, dest, harnessKind string, mode tmuxctl.LaunchMode, fromRemote bool) func() worktreeCreatedMsg {
+func newWorktreeInner(ops mux.Backend, gitOp gitOps, harnOp harnessOps, repoPath, branch, dest, harnessKind string, mode mux.LaunchMode, fromRemote bool) func() worktreeCreatedMsg {
 	return func() worktreeCreatedMsg {
 		if ops == nil || !ops.Available() {
-			return worktreeCreatedMsg{err: tmuxctl.ErrNotAvailable}
+			return worktreeCreatedMsg{err: mux.ErrNotAvailable}
 		}
 
 		addFn := worktreeAddFn(gitOp, fromRemote)
@@ -1014,11 +1021,11 @@ func newWorktreeInner(ops tmuxOps, gitOp gitOps, harnOp harnessOps, repoPath, br
 		}
 
 		windowName := filepath.Base(repoPath) + "/" + branch
-		target, err := ops.EnsureWindowMode(canonDest, windowName, argv, mode)
+		target, err := ops.EnsureWindow(canonDest, windowName, argv, mode)
 		if err != nil {
 			return worktreeCreatedMsg{canonDest: canonDest, harnessKind: string(kind), err: err}
 		}
-		if err := ops.Select(target); err != nil {
+		if err := ops.Select(target, mux.ModeWindow, ""); err != nil {
 			return worktreeCreatedMsg{canonDest: canonDest, harnessKind: string(kind), err: err}
 		}
 		return worktreeCreatedMsg{canonDest: canonDest, harnessKind: string(kind)}
@@ -1046,7 +1053,7 @@ func mergeStatusCmd(gitOp gitOps, repo, branch, path string) tea.Cmd {
 // no dead pane is left pointing at a missing directory. The git removal is the
 // only step that can fail the operation; branch deletion (inside RemoveWorktree)
 // and tmux cleanup are advisory and their errors are ignored.
-func deleteWorktreeCmd(ops tmuxOps, gitOp gitOps, repo, path, branch string, mode tmuxctl.LaunchMode, force bool) tea.Cmd {
+func deleteWorktreeCmd(ops mux.Backend, gitOp gitOps, repo, path, branch string, mode mux.LaunchMode, force bool) tea.Cmd {
 	return func() tea.Msg {
 		var removeFn func(string, string, string, bool) error
 		if gitOp != nil {
@@ -1336,7 +1343,7 @@ func (m model) Init() tea.Cmd {
 		wsC = loadWorkspaceStatusCmd(m.store, m.snap)
 		safeC = wsSafeTickCmd()
 	}
-	return tea.Batch(waitSnapshot(m.snaps), tick, wsC, safeC)
+	return tea.Batch(waitSnapshot(m.snaps), tick, wsC, safeC, listPanesCmd(m.listPanes), waitFeedAction(m.feedActions), m.initialFocusTick())
 }
 
 func waitSnapshot(ch <-chan state.Snapshot) tea.Cmd {
@@ -1649,7 +1656,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.removeWorktreeRow(target)
 					// deleteForce was resolved from config when the flow opened
 					// ('D'), so the action matches the warning shown at confirm.
-					return m, deleteWorktreeCmd(m.tmux, m.gitOp, target.Repo, target.Worktree, target.Branch, m.launchMode, m.deleteForce)
+					return m, deleteWorktreeCmd(m.mux, m.gitOp, target.Repo, target.Worktree, target.Branch, m.launchMode, m.deleteForce)
 				}
 				m.prompt = promptIdle
 				m.deleteTarget = settings.Row{}
@@ -1723,8 +1730,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 					idx := m.sessionPaletteMatches[clampIndex(m.sessionPaletteCursor, len(m.sessionPaletteMatches))]
-					row := m.sessionPaletteRows[idx]
-					target := m.sessionPaletteTargets[idx]
+					chosen := m.sessionPaletteCandidates[idx]
 					searchOnly := m.prompt == promptSearchSession
 					m.closeSessionPalette()
 					if searchOnly {
@@ -1732,7 +1738,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// the row again because workspaceRows may have refreshed while
 						// the palette was open.
 						for i, r := range m.workspaceRows {
-							if r.Worktree == row.Worktree {
+							if r.Worktree == chosen.row.Worktree {
 								m.sessionCursor = i
 								m.syncSessionScroll()
 								break
@@ -1740,32 +1746,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 						return m, nil
 					}
-					// Apply the same guards as the sessions-pane Enter handler.
-					tmuxAvail := m.tmux != nil && m.tmux.Available()
-					if !tmuxAvail {
-						m.tmuxHint = "tmux not available — start cogitator inside a tmux session to use jump/resume"
-						return m, nil
-					}
-					if row.State == settings.StateMissing {
-						m.tmuxHint = "worktree directory is missing — cannot resume"
-						return m, nil
-					}
-					if row.State == settings.StateCreating {
-						m.tmuxHint = "worktree is still being created…"
-						return m, nil
-					}
-					// Sync the sessions-pane cursor to the chosen row so the
-					// highlight reflects where the jump landed. A workspace
-					// session's target dir has no matching entry in
-					// m.workspaceRows, so this is a harmless no-op for those.
-					for i, r := range m.workspaceRows {
-						if r.Worktree == target.dir {
-							m.sessionCursor = i
-							break
-						}
-					}
-					m.recordSessionSwitch(target.dir)
-					return m, launchCmd(m.tmux, target, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
+					return m.switchToCandidate(chosen)
 				case "up", "ctrl+p":
 					m.sessionPaletteCursor = clampIndex(m.sessionPaletteCursor-1, len(m.sessionPaletteMatches))
 					return m, nil
@@ -1801,7 +1782,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			case promptWorkspaceBackfill:
 				return m.updateWorkspaceBackfillActive(msg)
+
+			case promptConfirmKillAgent:
+				return m.updateKillAgentConfirm(msg)
 			}
+		}
+
+		// The Agents filter owns esc/q so typing a query never quits.
+		if m.view == viewAgents && m.agentsList.Filtering() {
+			return m.updateAgentsView(msg)
 		}
 
 		// (b) Global quit — only when no prompt is active.
@@ -1811,14 +1800,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// (b.1) Session switcher — ctrl+P opens the fuzzy "go to session"
-		// palette over every worktree row and workspace session. Global
-		// (works regardless of which pane is focused) and only reachable
-		// here when no prompt is active, since the prompt pre-empt block
-		// above short-circuits first.
+		// palette over the active tab's items: worktree rows (Repos),
+		// workspace sessions (Workspaces), or agents (Agents). Reachable from
+		// every tab, and only when no prompt is active, since the prompt
+		// pre-empt block above short-circuits first.
 		if msg.String() == "ctrl+p" {
+			placeholder, emptyHint := sessionSwitcherCopy(m.view)
 			candidates, startOnPrevious := m.orderedSessionCandidates()
 			if len(candidates) == 0 {
-				m.tmuxHint = "no sessions to switch to"
+				if m.view == viewWorkspaces {
+					m.wsHint = emptyHint
+				} else {
+					m.tmuxHint = emptyHint
+				}
 				return m, nil
 			}
 			// Seed the cursor on the previous session (row 1) so ctrl+P then enter
@@ -1827,7 +1821,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if startOnPrevious {
 				startCursor = 1
 			}
-			m.openSessionPalette(promptSwitchSession, candidates, startCursor, "go to session")
+			m.openSessionPalette(promptSwitchSession, candidates, startCursor, placeholder)
 			return m, m.input.Focus()
 		}
 
@@ -1867,12 +1861,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "tab" {
 			m.wsHint = ""
 			m.tmuxHint = ""
-			if m.view == viewWorkspaces {
-				m.view = viewSessions
-			} else {
-				m.view = viewWorkspaces
-			}
-			return m, nil
+			m.view = nextView(m.view)
+			return m, m.syncAgentPreview()
+		}
+
+		if m.view == viewAgents {
+			return m.updateAgentsView(msg)
 		}
 
 		// Workspaces-view keys route through their own methods rather than
@@ -1977,9 +1971,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			// Jump to a running agent or resume a stopped one.
 			// Guard: tmux must be available.
-			tmuxAvail := m.tmux != nil && m.tmux.Available()
+			tmuxAvail := m.mux != nil && m.mux.Available()
 			if !tmuxAvail {
-				m.tmuxHint = "tmux not available — start cogitator inside a tmux session to use jump/resume"
+				m.tmuxHint = hintNoMuxJump
 				return m, nil
 			}
 			if len(m.workspaceRows) == 0 {
@@ -2001,13 +1995,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			target := rowLaunchTarget(row)
 			m.recordSessionSwitch(target.dir)
-			return m, launchCmd(m.tmux, target, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
+			return m, launchCmd(m.mux, target, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
 
 		case "n":
 			// New worktree: collect a branch name via prompt.
-			tmuxAvail := m.tmux != nil && m.tmux.Available()
+			tmuxAvail := m.mux != nil && m.mux.Available()
 			if !tmuxAvail {
-				m.tmuxHint = "tmux not available — start cogitator inside a tmux session to create worktrees"
+				m.tmuxHint = hintNoMuxCreate
 				return m, nil
 			}
 			if len(m.workspaceRows) == 0 {
@@ -2035,9 +2029,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// branch name via prompt, then (after the harness chooser) fetch
 			// and check it out. Mirrors 'n' but sets worktreeFromRemote so the
 			// chooser dispatches the fetch path.
-			tmuxAvail := m.tmux != nil && m.tmux.Available()
+			tmuxAvail := m.mux != nil && m.mux.Available()
 			if !tmuxAvail {
-				m.tmuxHint = "tmux not available — start cogitator inside a tmux session to create worktrees"
+				m.tmuxHint = hintNoMuxCreate
 				return m, nil
 			}
 			if len(m.workspaceRows) == 0 {
@@ -2153,6 +2147,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.Width = max(0, paneInnerWidth(m.width)-promptLabelLen)
 		m.syncSessionScroll()
 		m.syncWsScroll()
+		return m, m.syncAgentPreview()
 
 	case launchResultMsg:
 		// A launch/resume Cmd completed.
@@ -2163,10 +2158,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.tmuxHint = hint
 			}
+			if msg.client != "" {
+				m.tmuxHint = hint
+				return m, displayMessageCmd(m.mux, msg.client, hint)
+			}
 			return m, nil
 		}
-		if m.viewMarker != nil && msg.sessionID != "" {
+		if m.viewMarker != nil && msg.sessionID != "" && m.badges == nil {
 			// The user landed in the session — clear any "work finished" badge.
+			// With the focus poll running it clears once they leave instead.
 			m.viewMarker.MarkViewed(harness.Kind(msg.provider), msg.instanceID, msg.sessionID)
 		}
 		// When a configured default overrode the row's recorded harness on a
@@ -2253,7 +2253,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Rebuild rows so the new repo appears immediately rather than
 			// waiting for the next snapshot. Reapply the create overlay so an
 			// in-flight fetch's spinner row is not dropped by the rebuild.
-			rows, mode, root := buildWorkspaceRows(m.snap, m.cfg)
+			rows, mode, root := buildWorkspaceRows(m.snap, m.cfg, m.mux)
 			m.workspaceRows = injectPendingCreates(rows, m.pendingCreates)
 			m.launchMode = mode
 			m.workspaceRoot = root
@@ -2280,7 +2280,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Rebuild rows so the repo disappears immediately rather than
 			// waiting for the next snapshot. Reapply the create overlay so an
 			// in-flight fetch's spinner row is not dropped by the rebuild.
-			rows, mode, root := buildWorkspaceRows(m.snap, m.cfg)
+			rows, mode, root := buildWorkspaceRows(m.snap, m.cfg, m.mux)
 			m.workspaceRows = injectPendingCreates(rows, m.pendingCreates)
 			m.launchMode = mode
 			m.workspaceRoot = root
@@ -2472,7 +2472,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.rowsDirty = true
 			} else {
 				m.rowsBuilding = true
-				buildC = buildWorkspaceRowsCmd(m.snap, m.cfg)
+				buildC = buildWorkspaceRowsCmd(m.snap, m.cfg, m.mux)
 			}
 		}
 		var wsC tea.Cmd
@@ -2487,7 +2487,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				wsC = loadWorkspaceStatusCmd(m.store, m.snap)
 			}
 		}
-		return m, tea.Batch(next, bellC, buildC, wsC)
+		m.refreshAgents()
+		return m, tea.Batch(next, bellC, buildC, wsC, m.requestPanes())
+
+	case feedActionMsg:
+		return m, tea.Batch(waitFeedAction(m.feedActions), m.handleFeedAction(agentfeed.Action(msg)))
+
+	case panesMsg:
+		return m, m.applyPanes(msg)
+
+	case agentKilledMsg:
+		return m, m.applyAgentKilled(msg)
+
+	case focusTickMsg:
+		return m, m.handleFocusTick()
+
+	case focusPollMsg:
+		return m, m.applyFocusPoll(msg)
+
+	case previewDebounceMsg, previewRefreshMsg, previewCaptureMsg:
+		return m, m.handleAgentPreviewMsg(msg)
+
+	case badgeWriteMsg:
+		return m, nil
 
 	case workspaceRowsMsg:
 		// Apply both optimistic overlays: drop rows awaiting deletion, and
@@ -2504,10 +2526,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sessionCursor = n - 1
 		}
 		m.rowsBuilding = false
+		m.refreshAgents()
 		if m.rowsDirty {
 			m.rowsDirty = false
 			m.rowsBuilding = true
-			return m, buildWorkspaceRowsCmd(m.snap, m.cfg)
+			return m, buildWorkspaceRowsCmd(m.snap, m.cfg, m.mux)
 		}
 		return m, nil
 
@@ -2520,6 +2543,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clampWsCursor()
 		m.pruneWsPendingDeletes()
 		m.wsBuilding = false
+		m.refreshAgents()
 		var reloadC tea.Cmd
 		if m.wsDirty {
 			m.wsDirty = false
@@ -2703,12 +2727,9 @@ func (m *model) closeRepoFinder() {
 // openSessionPalette snapshots candidates and prepares the shared fuzzy palette.
 // startCursor is clamped against the initial unfiltered result list.
 func (m *model) openSessionPalette(mode promptMode, candidates []sessionCandidate, startCursor int, placeholder string) {
-	m.sessionPaletteRows = make([]settings.Row, len(candidates))
-	m.sessionPaletteTargets = make([]launchTarget, len(candidates))
+	m.sessionPaletteCandidates = candidates
 	m.sessionPaletteLabels = make([]string, len(candidates))
 	for i, c := range candidates {
-		m.sessionPaletteRows[i] = c.row
-		m.sessionPaletteTargets[i] = c.target
 		m.sessionPaletteLabels[i] = c.label
 	}
 	m.sessionPaletteMatches = fuzzyMatchIndices("", m.sessionPaletteLabels)
@@ -2725,8 +2746,7 @@ func (m *model) closeSessionPalette() {
 	m.prompt = promptIdle
 	m.input.Blur()
 	m.input.SetValue("")
-	m.sessionPaletteRows = nil
-	m.sessionPaletteTargets = nil
+	m.sessionPaletteCandidates = nil
 	m.sessionPaletteLabels = nil
 	m.sessionPaletteMatches = nil
 	m.sessionPaletteCursor = 0
@@ -2769,20 +2789,35 @@ func sessionPaletteLabel(row settings.Row) string {
 	return label
 }
 
+// switchKind identifies what a ctrl+P candidate jumps to, selecting its enter
+// dispatch in switchToCandidate.
+type switchKind int
+
+const (
+	switchWorktree switchKind = iota
+	switchWsSession
+	switchAgent
+)
+
 // sessionCandidate is one entry the ctrl+P switcher can jump to: row is the
 // render-only settings.Row shim renderPaletteRow (render.go) needs for its
 // status glyph and branch styling; target is the neutral launch identity
-// dispatched on enter; label is the fuzzy-match text.
+// dispatched on enter, and its dir is the switchOrder key; label is the
+// fuzzy-match text. agentID is set only for switchAgent candidates, whose
+// enter goes through focusAgent rather than target.
 type sessionCandidate struct {
-	row    settings.Row
-	target launchTarget
-	label  string
+	kind    switchKind
+	row     settings.Row
+	target  launchTarget
+	label   string
+	agentID string
 }
 
 func worktreeCandidates(rows []settings.Row) []sessionCandidate {
 	out := make([]sessionCandidate, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, sessionCandidate{
+			kind:   switchWorktree,
 			row:    row,
 			target: rowLaunchTarget(row),
 			label:  sessionPaletteLabel(row),
@@ -2791,22 +2826,19 @@ func worktreeCandidates(rows []settings.Row) []sessionCandidate {
 	return out
 }
 
-// sessionSwitchCandidates collects every target the ctrl+P switcher offers:
-// every Sessions-pane worktree row (m.workspaceRows) plus every assembled
-// workspace session across m.wsStatuses. A workspace session still being
-// assembled has Session.Dir == "" (the same pending-create discriminator
-// stripPendingWsSessions documents, workspace_cmd.go) and is excluded,
-// mirroring how a Sessions-pane creating row has no equivalent exclusion
-// needed here (it is still keyed on a real, if not-yet-existing, worktree
-// path).
-func (m model) sessionSwitchCandidates() []sessionCandidate {
-	out := worktreeCandidates(m.workspaceRows)
-	for _, ws := range m.wsStatuses {
+// wsSessionCandidates lists every assembled workspace session, labelled
+// "<workspace>/<session>". A session still being assembled has
+// Session.Dir == "" (the pending-create discriminator stripPendingWsSessions
+// documents, workspace_cmd.go) and is excluded: there is nothing to jump to.
+func wsSessionCandidates(statuses []workspace.WorkspaceStatus) []sessionCandidate {
+	var out []sessionCandidate
+	for _, ws := range statuses {
 		for _, sess := range ws.Sessions {
 			if sess.Session.Dir == "" {
 				continue
 			}
 			out = append(out, sessionCandidate{
+				kind: switchWsSession,
 				row: settings.Row{
 					Worktree:  sess.Session.Dir,
 					Branch:    sess.Session.Branch,
@@ -2824,10 +2856,130 @@ func (m model) sessionSwitchCandidates() []sessionCandidate {
 	return out
 }
 
+// agentCandidates lists every agent in m.agents, keeping their attention-first
+// order for agents never switched to.
+func (m model) agentCandidates() []sessionCandidate {
+	out := make([]sessionCandidate, 0, len(m.agents))
+	for _, a := range m.agents {
+		out = append(out, sessionCandidate{
+			kind:    switchAgent,
+			row:     settings.Row{State: a.State, Attention: a.Attention},
+			target:  launchTarget{dir: m.agentSwitchKey(a)},
+			label:   agentName(a),
+			agentID: a.ID,
+		})
+	}
+	return out
+}
+
+// agentSwitchKey is the switchOrder key focusAgent records for a: the managed
+// launch target's dir (the raw worktree or session dir the other tabs record
+// too), or the agent ID for agents focused by pane and untracked agents.
+func (m model) agentSwitchKey(a agents.Agent) string {
+	if focusesPane(a) {
+		return a.ID
+	}
+	if target, ok := m.managedLaunchTarget(a); ok {
+		return target.dir
+	}
+	return a.ID
+}
+
+// sessionSwitchCandidates collects the targets the ctrl+P switcher offers in
+// the active tab: worktree rows in Repos, workspace sessions in Workspaces,
+// agents in Agents.
+func (m model) sessionSwitchCandidates() []sessionCandidate {
+	switch m.view {
+	case viewAgents:
+		return m.agentCandidates()
+	case viewWorkspaces:
+		return wsSessionCandidates(m.wsStatuses)
+	default:
+		return worktreeCandidates(m.workspaceRows)
+	}
+}
+
+// sessionSwitcherCopy returns the ctrl+P input placeholder and the hint shown
+// when the tab has nothing to switch to.
+func sessionSwitcherCopy(v viewMode) (placeholder, emptyHint string) {
+	switch v {
+	case viewAgents:
+		return "go to agent", "no agents to switch to"
+	case viewWorkspaces:
+		return "go to workspace session", "no workspace sessions to switch to"
+	default:
+		return "go to worktree", "no worktrees to switch to"
+	}
+}
+
+// switchToCandidate dispatches the ctrl+P switcher's enter on chosen.
+func (m model) switchToCandidate(chosen sessionCandidate) (tea.Model, tea.Cmd) {
+	switch chosen.kind {
+	case switchAgent:
+		return m.switchToAgent(chosen.agentID)
+	case switchWsSession:
+		return m.switchToWsSession(chosen)
+	default:
+		return m.switchToWorktree(chosen)
+	}
+}
+
+// switchToWorktree jumps to or resumes a worktree row behind the same guards
+// as the Repos-pane enter, then syncs the Repos cursor to it.
+func (m model) switchToWorktree(chosen sessionCandidate) (tea.Model, tea.Cmd) {
+	tmuxAvail := m.mux != nil && m.mux.Available()
+	if !tmuxAvail {
+		m.tmuxHint = hintNoMuxJump
+		return m, nil
+	}
+	if chosen.row.State == settings.StateMissing {
+		m.tmuxHint = "worktree directory is missing — cannot resume"
+		return m, nil
+	}
+	if chosen.row.State == settings.StateCreating {
+		m.tmuxHint = "worktree is still being created…"
+		return m, nil
+	}
+
+	for i, r := range m.workspaceRows {
+		if r.Worktree == chosen.target.dir {
+			m.sessionCursor = i
+			break
+		}
+	}
+	m.recordSessionSwitch(chosen.target.dir)
+	return m, launchCmd(m.mux, chosen.target, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
+}
+
+// switchToWsSession moves the Workspaces cursor onto the chosen session, then
+// launches it exactly as enter on that row would. The entry is looked up
+// afresh because wsStatuses may have reloaded while the palette was open.
+func (m model) switchToWsSession(chosen sessionCandidate) (tea.Model, tea.Cmd) {
+	if entry, ok := wsSessionEntry(m.wsStatuses, chosen.target.dir); ok {
+		m.wsCursor = entry
+		m.syncWsScroll()
+	}
+	return m.launchWsSession(chosen.target, chosen.row.State)
+}
+
+// switchToAgent focuses the chosen agent exactly as enter in the Agents tab
+// does, and lands the Agents list cursor on it. An agent gone since the
+// palette opened is ignored, as the Agents tab ignores a stale cursor.
+func (m model) switchToAgent(id string) (tea.Model, tea.Cmd) {
+	agent, ok := m.agentByID(id)
+	if !ok {
+		return m, nil
+	}
+
+	m.agentsList.cursorID = agent.ID
+	cmd := m.focusAgent(agent, "")
+	return m, tea.Batch(cmd, m.syncAgentPreview())
+}
+
 // orderedSessionCandidates returns sessionSwitchCandidates ordered
 // most-recently switched-to first (per switchOrder, keyed by each
-// candidate's target directory), preserving the existing alphabetical order
-// for candidates never switched to this run. startOnPrevious is true when
+// candidate's target directory), preserving the tab's own order for
+// candidates never switched to this run. startOnPrevious is true when
 // both of the top two candidates have a recorded switch — i.e. a genuine
 // "previous" session exists — so the palette cursor should start on row 1.
 func (m model) orderedSessionCandidates() (candidates []sessionCandidate, startOnPrevious bool) {
@@ -2888,6 +3040,8 @@ func (m model) renderHarnessChooser(fieldW int) string {
 // dialogs are composited over, so the pane stays visible behind them.
 func (m model) activeViewBackdrop(paneW, innerH int, rows []state.SessionView, recentByInstance map[string]int) string {
 	switch {
+	case m.view == viewAgents:
+		return m.renderAgentsView(paneW, innerH)
 	case m.view == viewWorkspaces:
 		return m.renderWorkspacesView(paneW, innerH)
 	case len(m.workspaceRows) > 0:
@@ -2970,9 +3124,12 @@ func (m model) View() string {
 			now = time.Now()
 		}
 		var backdrop string
-		if m.view == viewWorkspaces {
+		switch m.view {
+		case viewAgents:
+			backdrop = m.renderAgentsView(paneW, sessionsInnerH)
+		case viewWorkspaces:
 			backdrop = m.renderWorkspacesView(paneW, sessionsInnerH)
-		} else {
+		default:
 			backdrop = m.renderWorkspaceRowsViewport(paneW, sessionsInnerH, m.workspaceRows, m.sessionCursor, now)
 		}
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderSessionPalette(paneW, sessionsInnerH))
@@ -3000,6 +3157,8 @@ func (m model) View() string {
 	case m.prompt == promptWorkspaceBackfill:
 		backdrop := m.renderWorkspacesView(paneW, sessionsInnerH)
 		sessionContent = overlayBox(backdrop, paneW, sessionsInnerH, m.renderWorkspaceBackfillPrompt(paneW, sessionsInnerH))
+	case m.view == viewAgents:
+		sessionContent = m.renderAgentsView(paneW, sessionsInnerH)
 	case m.view == viewWorkspaces:
 		sessionContent = m.renderWorkspacesView(paneW, sessionsInnerH)
 	case len(m.workspaceRows) > 0:
@@ -3081,16 +3240,18 @@ func newModel(snaps <-chan state.Snapshot, cfg *config.Config, bellEnabled, debu
 		// Probe safe-to-delete as soon as the first workspace load lands.
 		wsSafeDue: true,
 
-		// Inject real implementations for tmux, git, and harness operations.
-		// Tests can override these fields with fakes after construction. store
-		// is wired separately by RunTUI (mirrors viewMarker/rosterUpserts).
-		tmux:   realTmuxOps{},
+		// Inject real implementations for multiplexer, git, and harness
+		// operations. Tests can override these fields with fakes after
+		// construction. store is wired separately by RunTUI (mirrors
+		// viewMarker/rosterUpserts).
+		mux:    NewBackend(),
 		gitOp:  realGitOps{},
 		harnOp: realHarnessOps{},
 
-		prompt: promptIdle,
-		view:   viewWorkspaces,
-		input:  ti,
+		prompt:     promptIdle,
+		view:       viewWorkspaces,
+		input:      ti,
+		agentsList: newAgentList(),
 	}
 }
 
@@ -3134,9 +3295,9 @@ func (m model) repoBoundary(dir int) int {
 // background and delivers the result as a workspaceRowsMsg. snap and cfg are
 // captured by value at dispatch time so the closure is not affected by later
 // mutations to the model.
-func buildWorkspaceRowsCmd(snap state.Snapshot, cfg *config.Config) tea.Cmd {
+func buildWorkspaceRowsCmd(snap state.Snapshot, cfg *config.Config, backend mux.Backend) tea.Cmd {
 	return func() tea.Msg {
-		rows, mode, root := buildWorkspaceRows(snap, cfg)
+		rows, mode, root := buildWorkspaceRows(snap, cfg, backend)
 		return workspaceRowsMsg{rows: rows, launchMode: mode, root: root}
 	}
 }
@@ -3181,7 +3342,7 @@ func loadWorkspaceStatusCmd(store storeOps, snap state.Snapshot) tea.Cmd {
 // is called on every snapshot update so the list stays in sync with live
 // session changes.
 //
-// tmuxDirs is gathered from tmuxctl.ListCogDirs() when tmux is available.
+// tmuxDirs is gathered from backend.ListDirs() when the backend is available.
 // When tmux is unavailable or the call fails, an empty map is used (safe
 // fallback: unknown rows render as stopped instead of unknown).
 //
@@ -3194,10 +3355,10 @@ func loadWorkspaceStatusCmd(store storeOps, snap state.Snapshot) tea.Cmd {
 // the launch mode and workspace root are still resolved in that case —
 // the fallback view (which renders exactly when repos are empty) needs the
 // root to exclude workspace-owned sessions from its own listing.
-func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) ([]settings.Row, tmuxctl.LaunchMode, string) {
+func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config, backend mux.Backend) ([]settings.Row, mux.LaunchMode, string) {
 	wsCfg, err := settings.LoadConfig()
 	if err != nil {
-		return nil, tmuxctl.ModeWindow, ""
+		return nil, mux.ModeWindow, ""
 	}
 	mode := launchModeFor(wsCfg.LaunchMode)
 	root, err := settings.ResolveWorkspaceRoot(wsCfg)
@@ -3253,8 +3414,8 @@ func buildWorkspaceRows(snap state.Snapshot, cfg *config.Config) ([]settings.Row
 	// a tmux window exists for a dir whose harness lacks LiveStatus.
 	// Non-fatal: if tmux is unavailable or the call fails, use an empty map.
 	var tmuxDirs map[string]bool
-	if tmuxctl.Available() {
-		if dirs, err := tmuxctl.ListCogDirs(); err == nil {
+	if backend != nil && backend.Available() {
+		if dirs, err := backend.ListDirs(); err == nil {
 			tmuxDirs = dirs
 		}
 	}
@@ -3338,23 +3499,31 @@ func (m model) updateWorkspaceLaunch(msg tea.KeyMsg) (model, tea.Cmd, bool) {
 		return m, nil, false
 	}
 
-	tmuxAvail := m.tmux != nil && m.tmux.Available()
+	next, cmd := m.launchWsSession(wsSessionLaunchTarget(ws.Workspace.Name, sess), sess.State)
+	return next, cmd, true
+}
+
+// launchWsSession launches (or jumps/resumes) a workspace session target in
+// st, refusing with a wsHint when tmux is unavailable or the session is
+// missing or still being created. Shared by enter on a Workspaces row and the
+// ctrl+P switcher so both apply the same guards.
+func (m model) launchWsSession(target launchTarget, st settings.RowState) (model, tea.Cmd) {
+	tmuxAvail := m.mux != nil && m.mux.Available()
 	if !tmuxAvail {
-		m.wsHint = "tmux not available — start cogitator inside a tmux session to use jump/resume"
-		return m, nil, true
+		m.wsHint = hintNoMuxJump
+		return m, nil
 	}
-	if sess.State == settings.StateMissing {
+	if st == settings.StateMissing {
 		m.wsHint = "session directory is missing — cannot resume"
-		return m, nil, true
+		return m, nil
 	}
-	if sess.State == settings.StateCreating {
+	if st == settings.StateCreating {
 		m.wsHint = "session is still being created…"
-		return m, nil, true
+		return m, nil
 	}
 
-	target := wsSessionLaunchTarget(ws.Workspace.Name, sess)
 	m.recordSessionSwitch(target.dir)
-	return m, launchCmd(m.tmux, target, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp)), true
+	return m, launchCmd(m.mux, target, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp))
 }
 
 // resolvedDefaultHarness returns the configured default harness kind when one
@@ -3411,7 +3580,7 @@ func (m model) startNewWorktree(repoPath, branch, harnessKind string, fromRemote
 		m.spinnerActive = true
 		spinnerC = spinnerTickCmd()
 	}
-	actionCmd := newWorktreeCmd(m.tmux, m.gitOp, m.harnOp, repoPath, branch, dest, harnessKind, launchMode, fromRemote)
+	actionCmd := newWorktreeCmd(m.mux, m.gitOp, m.harnOp, repoPath, branch, dest, harnessKind, launchMode, fromRemote)
 	return m, tea.Batch(actionCmd, spinnerC)
 }
 

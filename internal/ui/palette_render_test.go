@@ -43,7 +43,7 @@ func TestOverlayBox_PadsShortBackdropToFieldHeight(t *testing.T) {
 }
 
 func TestRenderPaletteRow_ShowsRepoAndBranch(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, nil)
+	m := makeTestModel(&fakeMux{available: true}, nil, &fakeHarnessOps{}, nil)
 	row := makeRow("/home/me/alpha", "/home/me/alpha", "main", "title", settings.StateStopped, state.AttnInactive, fixedNow)
 
 	got := ansi.Strip(m.renderPaletteRow(row, "alpha main", "am", 40))
@@ -53,7 +53,7 @@ func TestRenderPaletteRow_ShowsRepoAndBranch(t *testing.T) {
 }
 
 func TestRenderPaletteRow_RepoOnlyLabelHasNoTrailingBranch(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, nil)
+	m := makeTestModel(&fakeMux{available: true}, nil, &fakeHarnessOps{}, nil)
 	row := makeRow("/home/me/alpha", "/home/me/alpha", "", "", settings.StateStopped, state.AttnInactive, fixedNow)
 
 	got := strings.TrimSpace(ansi.Strip(m.renderPaletteRow(row, "alpha", "", 40)))
@@ -64,7 +64,7 @@ func TestRenderPaletteRow_RepoOnlyLabelHasNoTrailingBranch(t *testing.T) {
 }
 
 func TestView_PaletteOverlaysSwitcherBox(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []settings.Row{
+	m := makeTestModel(&fakeMux{available: true}, nil, &fakeHarnessOps{}, []settings.Row{
 		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", settings.StateStopped, state.AttnInactive, fixedNow),
 		makeRow("/home/me/beta", "/home/me/beta", "dev", "b", settings.StateRunning, state.AttnActive, fixedNow),
 	})
@@ -84,7 +84,7 @@ func TestView_PaletteOverlaysSwitcherBox(t *testing.T) {
 }
 
 func TestView_SearchPaletteUsesCursorOnlyCopy(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []settings.Row{
+	m := makeTestModel(&fakeMux{available: true}, nil, &fakeHarnessOps{}, []settings.Row{
 		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 	m.width, m.height = 100, 30

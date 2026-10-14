@@ -62,6 +62,70 @@ func TestReadSessions_HeaderTitlePreferred(t *testing.T) {
 	}
 }
 
+func TestReadSessions_AcceptsLeadingTitleRecord(t *testing.T) {
+	agentDir := t.TempDir()
+	created := time.Date(2026, 10, 13, 9, 32, 0, 0, time.UTC)
+	last := created.Add(5 * time.Minute)
+
+	content := `{"type":"title","v":1,"title":"Find tmux install command","source":"auto","updatedAt":"` + iso(last.Add(time.Hour)) + `","pad":"      "}
+{"type":"session","version":3,"id":"titled1","timestamp":"` + iso(created) + `","cwd":"/tmp/wt"}
+{"type":"message","id":"e1","parentId":null,"timestamp":"` + iso(last) + `","message":{"role":"user","content":"first user prompt"}}
+`
+	writeSessionFile(t, agentDir, "-tmp-wt", "2026-10-13T09-32-00-000Z_titled1.jsonl", content)
+
+	got, err := omp.ReadSessions(agentDir)
+	if err != nil {
+		t.Fatalf("ReadSessions: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1 (title record must not hide the session)", len(got))
+	}
+	s := got[0]
+	if s.ID != "titled1" {
+		t.Errorf("ID = %q, want titled1", s.ID)
+	}
+	if s.Title != "Find tmux install command" {
+		t.Errorf("Title = %q, want the title record", s.Title)
+	}
+	if !s.LastActivity.Equal(last) {
+		t.Errorf("LastActivity = %v, want %v (title updatedAt is not activity)", s.LastActivity, last)
+	}
+}
+
+func TestReadSessions_ExitRecordEndsSessionWithoutCountingAsActivity(t *testing.T) {
+	agentDir := t.TempDir()
+	created := time.Date(2026, 6, 24, 10, 0, 0, 0, time.UTC)
+	lastMessage := created.Add(10 * time.Minute)
+	exited := time.Date(2026, 10, 13, 9, 51, 0, 0, time.UTC)
+	resumed := exited.Add(time.Minute)
+
+	header := `{"type":"session","version":3,"id":"%s","timestamp":"` + iso(created) + `","cwd":"/tmp/%s"}
+{"type":"message","id":"e1","parentId":null,"timestamp":"` + iso(lastMessage) + `","message":{"role":"user","content":"hi"}}
+{"type":"custom","customType":"session_exit","data":{"reason":"sighup"},"id":"x1","timestamp":"` + iso(exited) + `"}
+`
+	writeSessionFile(t, agentDir, "-tmp-ended", "2026_ended.jsonl", strings.ReplaceAll(header, "%s", "ended"))
+	writeSessionFile(t, agentDir, "-tmp-resumed", "2026_resumed.jsonl", strings.ReplaceAll(header, "%s", "resumed")+
+		`{"type":"message","id":"e2","parentId":"x1","timestamp":"`+iso(resumed)+`","message":{"role":"user","content":"back"}}
+`)
+
+	got, err := omp.ReadSessions(agentDir)
+	if err != nil {
+		t.Fatalf("ReadSessions: %v", err)
+	}
+	by := map[string]omp.Session{}
+	for _, s := range got {
+		by[s.ID] = s
+	}
+
+	ended := by["ended"]
+	if !ended.LastActivity.Equal(lastMessage) || !ended.ExitedAt.Equal(exited) {
+		t.Errorf("ended: LastActivity=%v ExitedAt=%v, want %v and %v", ended.LastActivity, ended.ExitedAt, lastMessage, exited)
+	}
+	if again := by["resumed"]; !again.LastActivity.Equal(resumed) {
+		t.Errorf("resumed: LastActivity=%v, want %v (activity after the exit)", again.LastActivity, resumed)
+	}
+}
+
 func TestReadSessions_TitleDerivedFromUserMessage(t *testing.T) {
 	agentDir := t.TempDir()
 	ts := time.Date(2026, 6, 19, 9, 0, 0, 0, time.UTC)

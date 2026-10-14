@@ -93,6 +93,48 @@ func TestPollOnce_MapsFieldsAndRecency(t *testing.T) {
 	}
 }
 
+func TestPollOnce_ExitedSessionIsNotLive(t *testing.T) {
+	p := omp.NewProvider("", 5*time.Second, 30*time.Minute, nil)
+	sink := &fakeSink{}
+	now := time.Now()
+	lastActive := now.Add(-2000 * time.Hour)
+
+	p.PollOnceForTest(sink, []omp.Session{
+		{ID: "killed", Dir: "/tmp/k", LastActivity: lastActive, ExitedAt: now.Add(-time.Minute)},
+		{ID: "resumed", Dir: "/tmp/r", LastActivity: now.Add(-time.Minute), ExitedAt: now.Add(-time.Hour)},
+	})
+
+	by := map[string]provider.SessionUpdate{}
+	for _, u := range sink.lastReplace() {
+		by[u.SessionID] = u
+	}
+	if u := by["killed"]; u.Source != "recent" || !u.LastActivity.Equal(lastActive) {
+		t.Errorf("killed: Source=%q LastActivity=%v, want recent and the pre-exit activity", u.Source, u.LastActivity)
+	}
+	if by["resumed"].Source != "live" {
+		t.Errorf("resumed: Source=%q, want live (active after its last exit)", by["resumed"].Source)
+	}
+}
+
+func TestHandleHookFrame_ShutdownEndsSessionUntilItStartsAgain(t *testing.T) {
+	p := omp.NewProvider("", 5*time.Second, 30*time.Minute, nil)
+	sink := &fakeSink{}
+	old := time.Now().Add(-2000 * time.Hour)
+	p.PollOnceForTest(sink, []omp.Session{{ID: "s3", Dir: "/tmp/wt", LastActivity: old}})
+
+	p.HandleHookFrameForTest([]byte(`{"hook_event_name":"session_shutdown","session_id":"s3"}`), sink)
+	u, _ := sink.lastUpdate()
+	if u.Source != "recent" || !u.LastActivity.Equal(old) {
+		t.Errorf("after shutdown: Source=%q LastActivity=%v, want recent and unchanged activity", u.Source, u.LastActivity)
+	}
+
+	p.HandleHookFrameForTest([]byte(`{"hook_event_name":"session_start","session_id":"s3"}`), sink)
+	u, _ = sink.lastUpdate()
+	if u.Source != "live" {
+		t.Errorf("after restart: Source=%q, want live", u.Source)
+	}
+}
+
 func TestHandleHookFrame_StatusTransitions(t *testing.T) {
 	p := omp.NewProvider("", 5*time.Second, 30*time.Minute, nil)
 	sink := &fakeSink{}
@@ -205,5 +247,21 @@ func TestPollOnce_PreservesHookSeededSession(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("hook-seeded session early1 was pruned by a poll that missed it: %+v", batch)
+	}
+}
+
+func TestPollOnce_KeepsPaneFromEarlierHook(t *testing.T) {
+	p := omp.NewProvider("", 5*time.Second, 30*time.Minute, nil)
+	sink := &fakeSink{}
+	sessions := []omp.Session{{ID: "s1", Dir: "/tmp/wt", LastActivity: time.Now()}}
+	p.PollOnceForTest(sink, sessions)
+
+	p.HandleHookFrameForTest([]byte(`{"hook_event_name":"turn_start","session_id":"s1","cogitator_pane_id":"dev:terminal_3"}`), sink)
+	p.HandleHookFrameForTest([]byte(`{"hook_event_name":"turn_end","session_id":"s1"}`), sink)
+	p.PollOnceForTest(sink, sessions)
+
+	batch := sink.lastReplace()
+	if len(batch) != 1 || batch[0].PaneID != "dev:terminal_3" {
+		t.Errorf("PaneID after unstamped hook and poll = %+v, want dev:terminal_3", batch)
 	}
 }

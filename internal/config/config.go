@@ -12,6 +12,7 @@ type Config struct {
 	RecentWindow            time.Duration
 	PollEvery               time.Duration
 	RecencyPollEvery        time.Duration
+	FocusPollEvery          time.Duration
 	StatusDeadline          time.Duration
 	MessageActivityDebounce time.Duration
 	DiscoveryBrowseTimeout  time.Duration
@@ -27,6 +28,11 @@ type Config struct {
 	// attention (permission, question, error) are never hidden regardless
 	// of age. A non-positive value disables the rule.
 	InactiveHideAfter time.Duration
+
+	// AttentionSettle is how long a session's new attention must hold before
+	// it shows, damping flicker from bursty status relays. Becoming active
+	// shows at once. A non-positive value shows every change immediately.
+	AttentionSettle time.Duration
 
 	// CodexEnabled enables the polled Codex session monitor. Default false.
 	// When false, no Codex provider is started and cogitator behaves exactly
@@ -144,6 +150,7 @@ func Default() *Config {
 		RecentWindow:            30 * time.Minute,
 		PollEvery:               5 * time.Second,
 		RecencyPollEvery:        30 * time.Second,
+		FocusPollEvery:          2 * time.Second,
 		StatusDeadline:          3 * time.Second,
 		MessageActivityDebounce: 250 * time.Millisecond,
 		DiscoveryBrowseTimeout:  4 * time.Second,
@@ -155,6 +162,7 @@ func Default() *Config {
 		SessionLookupTimeout:    5 * time.Second,
 		UnreachableThreshold:    3,
 		InactiveHideAfter:       5 * time.Minute,
+		AttentionSettle:         5 * time.Second,
 
 		CodexEnabled:       codexHomeDirExists(),
 		CodexHome:          os.Getenv("CODEX_HOME"),

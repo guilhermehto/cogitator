@@ -199,7 +199,7 @@ func (m model) renderAllSessions(width int, rows []state.SessionView, recentByIn
 	if len(rows) == 0 && len(recentByInstance) == 0 {
 		b.WriteString("\n  " + wtRepoStyle.Render("No repos tracked yet") + "\n\n")
 		b.WriteString("  " + dimStyle.Render("Press ") + hintKeyStyle.Render("A") + dimStyle.Render(" to pick a git repo — its worktrees appear here, ready to") + "\n")
-		b.WriteString("  " + dimStyle.Render("launch or resume in tmux. Live agent sessions show up here too."))
+		b.WriteString("  " + dimStyle.Render("launch or resume in tmux or zellij. Live agent sessions show up here too."))
 		return b.String()
 	}
 	b.WriteString(columnHeader(width-2) + "\n")
@@ -856,7 +856,7 @@ func (m model) renderSessionPalette(fieldW, fieldH int) string {
 		query := m.input.Value()
 		for i := start; i < end; i++ {
 			ci := m.sessionPaletteMatches[i]
-			line := padToWidth(m.renderPaletteRow(m.sessionPaletteRows[ci], m.sessionPaletteLabels[ci], query, contentW), contentW)
+			line := padToWidth(m.renderPaletteRow(m.sessionPaletteCandidates[ci].row, m.sessionPaletteLabels[ci], query, contentW), contentW)
 			if i == cursor {
 				line = highlightSelectedRow(line)
 			}
@@ -1017,7 +1017,7 @@ var (
 		{"gg / G", "top / bottom"},
 		{"ctrl+u/d", "prev / next repo"},
 		{"/", "search sessions"},
-		{"ctrl+P", "switch session"},
+		{"ctrl+P", "switch within tab"},
 	}}
 	helpRepos = helpSection{"Repos", [][2]string{
 		{"enter", "jump / resume"},
@@ -1036,6 +1036,12 @@ var (
 		{"e", "add / remove repos"},
 		{"D", "delete selection"},
 		{"P", "pull (ff-only)"},
+	}}
+	helpAgents = helpSection{"Agents", [][2]string{
+		{"enter", "jump to agent"},
+		{"x", "mark seen"},
+		{"K", "kill agent window, or dismiss a windowless agent"},
+		{"/", "filter"},
 	}}
 	helpGeneral = helpSection{"General", [][2]string{
 		{"tab", "switch view"},
@@ -1077,8 +1083,11 @@ func statusLegend() [][2]string {
 // handed to overlayBox, two wider than the text area) is too narrow.
 func renderHelp(fieldW int, view viewMode) string {
 	viewSection := helpRepos
-	if view == viewWorkspaces {
+	switch view {
+	case viewWorkspaces:
 		viewSection = helpWorkspaces
+	case viewAgents:
+		viewSection = helpAgents
 	}
 	leftSections := []helpSection{viewSection, helpGeneral}
 	rightSections := []helpSection{helpNavigate}

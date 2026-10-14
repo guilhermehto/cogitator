@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"log/slog"
@@ -34,6 +35,9 @@ type hookOverlay struct {
 
 	// lastActivity is the time of the most recent hook event for this session.
 	lastActivity time.Time
+
+	// paneID is the multiplexer pane the latest stamped hook ran in.
+	paneID string
 }
 
 // Provider polls CODEX_HOME on a configurable interval and emits
@@ -214,6 +218,7 @@ func (p *Provider) handleHookFrame(raw []byte, sink provider.Sink) {
 	p.mu.Lock()
 	ov := p.overlays[sessionID]
 	ov.lastActivity = now
+	ov.paneID = cmp.Or(ev.PaneID, ov.paneID)
 
 	switch ev.EventName {
 	case "session_start", "user_prompt_submit", "pre_tool_use", "post_tool_use":
@@ -307,5 +312,6 @@ func (p *Provider) mergeToUpdate(s Session, ov hookOverlay, now time.Time) provi
 		LastActivity:  lastActivity,
 		Created:       s.Created,
 		Source:        src,
+		PaneID:        ov.paneID,
 	}
 }

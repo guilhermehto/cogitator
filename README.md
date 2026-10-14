@@ -283,7 +283,7 @@ and [Live attention reference → omp](#omp-reference) for how it behaves.
 
 | Key | Context | Action |
 | --- | --- | --- |
-| `ctrl+P` | anywhere (outside a prompt) | open the session switcher: fuzzy-find a repo/branch or workspace session (listed as `<workspace>/<session>`) and jump to it (`cmd+P` is not supported — terminals don't forward it to TUI apps) |
+| `ctrl+P` | anywhere (outside a prompt) | open the switcher for the active tab: fuzzy-find a repo/branch (Repos), a workspace session listed as `<workspace>/<session>` (Workspaces) or an agent (Agents), and jump to it (`cmd+P` is not supported — terminals don't forward it to TUI apps) |
 | `Tab` | anywhere (outside a prompt) | swap focus between the Workspaces pane (shown on launch) and the Repos pane |
 | `/` | Repos pane focused | fuzzy-search repo/branch names; Enter moves the list cursor to the selected session without jumping into it |
 | `a` | Repos pane focused | toggle collapsed/expanded recent sessions |
@@ -375,7 +375,7 @@ jumps).
   `CLAUDE.md` importing it) telling coding agents that it is not a repo itself
   and each subdirectory is a separate git worktree.
 
-`ctrl+P` lists workspace sessions in the session switcher too, labelled
+In the Workspaces tab, `ctrl+P` lists workspace sessions in the switcher, labelled
 `<workspace>/<session>`. See [Key bindings](#key-bindings) for the full set of
 Workspaces-pane keys (`N`, `n`, `e`, `D`).
 
@@ -444,6 +444,7 @@ exits 0 — omp shows no failure and never blocks your turns.
 - `--debug`: show diagnostic UI elements that are noisy during normal use (e.g. the unreachable-instance footer).
 - `--log-level`: set log verbosity (`debug|info|warn|error`). Default is `info`.
 - `--version`: print module version, commit, and build date.
+- `cogitator pick` / `cogitator next`: agent picker popup and "jump to what needs you" for tmux key bindings; see [tmux integration](https://guilhermehto.github.io/cogitator/guide/tmux).
 
 ## Logging
 

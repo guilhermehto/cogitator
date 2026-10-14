@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/guilhermehto/cogitator/internal/agentfeed"
 	"github.com/guilhermehto/cogitator/internal/claudecode"
 	"github.com/guilhermehto/cogitator/internal/codex"
 	"github.com/guilhermehto/cogitator/internal/config"
@@ -101,6 +102,25 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 	m.viewMarker = store
 	// Wire the workspace store so the Workspaces view can load workspaces.json.
 	m.store = wsStore
-	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+	m.selfPaneID = m.mux.SelfPaneID()
+	feedHolder, feedActions, stopFeed := startAgentFeed(ctx, agentfeed.SocketPath(), logger)
+	defer stopFeed()
+	if feedHolder != nil {
+		m.attachFeed(feedHolder, feedActions, m.mux.ListPanes)
+		m.attachBadges(m.mux)
+	}
+
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	badges, hasBadges := m.mux.(badgeBackend)
+	if hasBadges {
+		stopHangupWatch := quitOnHangup(p)
+		defer stopHangupWatch()
+	}
+
+	_, err := p.Run()
+	if feedHolder != nil && hasBadges {
+		clearBadges(badges, shutdownClearTimeout)
+	}
+
 	return err
 }

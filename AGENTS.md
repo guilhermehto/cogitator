@@ -9,6 +9,8 @@
 - `internal/state/`, `discovery/`, `supervisor/`, `oc/` — mDNS discovery, SSE event ingest, opencode API (`oc/generated.go` is generated — see CONTRIBUTING).
 - `internal/settings/` — single-repo config, session roster, merge, repo discovery.
 - `internal/workspace/` — multi-repo workspace/session domain: types (`workspace.go`), mutex-guarded `workspaces.json` store (`store.go`), session path derivation/validation (`paths.go`), worktree-bundle assemble/teardown (`assemble.go`), live status joins (`status.go`).
+- `internal/agents/`, `agentfeed/` — cross-harness agent model, `@cog_*` tmux badge diffs, focus/seen decisions; the feed that `pick`/`next` read from the running TUI.
+- `internal/tmuxinstall/` — `cogitator tmux install|uninstall`: owned tmux.conf + one `source-file` line.
 - `internal/git/`, `harness/`, `tmuxctl/`, `pathnorm/` — git ops, harness registry, tmux control, canonical paths.
 - `internal/config/`, `logging/` — timing/threshold defaults, logging.
 - `docs/` — VitePress site (self-contained npm package; `npm run dev|build` inside `docs/`), deployed to GitHub Pages by `.github/workflows/docs.yml`. `make demo` copies `tui.png` into `docs/public/`.

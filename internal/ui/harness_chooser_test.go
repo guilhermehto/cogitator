@@ -208,7 +208,7 @@ func TestChooserEscCancelsFlow(t *testing.T) {
 }
 
 func TestChooserEnterDispatchesNewWorktreeCmdWithChosenKind(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: true, ensureWindowResult: "main:1"}
+	tmuxFake := &fakeMux{available: true, ensureWindowResult: "main:1"}
 	gitFake := &fakeGitOps{addResult: "/r-feat"}
 	harnFake := &fakeHarnessOpsWithKinds{kinds: []harness.Kind{"codex", "opencode"}}
 
@@ -220,7 +220,7 @@ func TestChooserEnterDispatchesNewWorktreeCmdWithChosenKind(t *testing.T) {
 		newWorktreeBranch:    "feat",
 		harnessChooserKinds:  []harness.Kind{"codex", "opencode"},
 		harnessChooserCursor: 0, // codex selected
-		tmux:                 tmuxFake,
+		mux:                  tmuxFake,
 		gitOp:                gitFake,
 		harnOp:               harnFake,
 	}
@@ -255,7 +255,7 @@ func TestChooserEnterDispatchesNewWorktreeCmdWithChosenKind(t *testing.T) {
 // fetch-from-origin path (FetchAndAddWorktree) when the flow was started by 'F'
 // (worktreeFromRemote set), and resets the flag afterwards.
 func TestChooserEnterFetchesWhenFromRemote(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: true, ensureWindowResult: "main:1"}
+	tmuxFake := &fakeMux{available: true, ensureWindowResult: "main:1"}
 	gitFake := &fakeGitOps{fetchAddResult: "/r-feat"}
 	harnFake := &fakeHarnessOpsWithKinds{kinds: []harness.Kind{"codex", "opencode"}}
 
@@ -268,7 +268,7 @@ func TestChooserEnterFetchesWhenFromRemote(t *testing.T) {
 		worktreeFromRemote:   true,
 		harnessChooserKinds:  []harness.Kind{"codex", "opencode"},
 		harnessChooserCursor: 1, // opencode
-		tmux:                 tmuxFake,
+		mux:                  tmuxFake,
 		gitOp:                gitFake,
 		harnOp:               harnFake,
 	}

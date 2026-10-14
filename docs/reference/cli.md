@@ -18,6 +18,25 @@ line. It exits when either:
 - a non-empty snapshot arrives, or
 - the status deadline is reached (default: 3s).
 
+When the cogitator TUI is running, `--status` reads its live feed instead of running
+discovery itself; otherwise it falls back to mDNS discovery as above.
+
+## Subcommands
+
+These drive the [tmux integration](/guide/tmux) and talk to the running TUI:
+
+- `cogitator pick [--client X]`: open the agent picker (meant for a tmux popup).
+- `cogitator next [--client X --window W --session S]`: jump to the next agent that needs
+  you. Always exits 0 and prints nothing, reporting through a tmux message; exits 2 only on
+  usage errors.
+
+- `cogitator tmux install [--next-key KEY] [--pick-key KEY] [--config PATH] [--binary PATH] [--dry-run] [--no-reload]`:
+  write the key bindings to a cogitator-owned file and add one `source-file -q` line to your
+  tmux config. Defaults: `--next-key Space`, `--pick-key a`.
+- `cogitator tmux uninstall [--config PATH] [--dry-run] [--no-reload]`: undo the install.
+
+See [tmux integration](/guide/tmux#setup) for details. All `pick` and `next` flags are optional and fall back to tmux's current client, window, and session.
+
 ## Hook subcommands
 
 These are wired up during [agent setup](/guide/connect) and are not meant to be run by hand:
@@ -29,6 +48,11 @@ These are wired up during [agent setup](/guide/connect) and are not meant to be 
 
 All hook subcommands exit 0 silently when cogitator is not running. A closed monitor is the
 expected case, not a failure, so your agent is never blocked.
+
+Each hook also records the multiplexer pane it ran in (`$ZELLIJ_PANE_ID` or `$TMUX_PANE`).
+That is how several sessions in one directory each get their own Agents row on their own
+tab. A hook still pointing at an older cogitator binary cannot record its pane, so rebuild
+or reinstall after upgrading.
 
 ## Logging
 

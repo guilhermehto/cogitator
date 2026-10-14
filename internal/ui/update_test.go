@@ -16,10 +16,10 @@ import (
 
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/harness"
+	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
@@ -203,14 +203,14 @@ func TestWorkspaceRowsMsgAppliesRows(t *testing.T) {
 	rows := []settings.Row{
 		makeRow("/r", "/r/a", "main", "built", settings.StateRunning, state.AttnActive, fixedNow),
 	}
-	msg := workspaceRowsMsg{rows: rows, launchMode: tmuxctl.ModeSession}
+	msg := workspaceRowsMsg{rows: rows, launchMode: mux.ModeSession}
 	updated, _ := m.Update(msg)
 	m2 := updated.(model)
 
 	if len(m2.workspaceRows) != 1 || m2.workspaceRows[0].Title != "built" {
 		t.Errorf("workspaceRows not applied; got %v", m2.workspaceRows)
 	}
-	if m2.launchMode != tmuxctl.ModeSession {
+	if m2.launchMode != mux.ModeSession {
 		t.Errorf("launchMode not applied; got %v", m2.launchMode)
 	}
 }
@@ -378,7 +378,7 @@ func TestSnapshotMsgCoalescedBuildUsesLatestSnap(t *testing.T) {
 	// Simulate first build completing (buildCmd1 runs in background; here we
 	// synthesise the result directly to avoid real I/O).
 	_ = buildCmd1
-	updated3, followUpCmd := m2.Update(workspaceRowsMsg{rows: nil, launchMode: tmuxctl.ModeWindow})
+	updated3, followUpCmd := m2.Update(workspaceRowsMsg{rows: nil, launchMode: mux.ModeWindow})
 	m3 := updated3.(model)
 
 	if m3.rowsDirty {
@@ -566,7 +566,7 @@ func TestMembershipChangedMsgStillOpensBackfillWhenIdle(t *testing.T) {
 // workspace session instead of the ordinary worktree the user asked for.
 func TestMembershipChangedMsgCannotStrandWsCreateTargetAcrossViews(t *testing.T) {
 	setWsTestXDG(t)
-	tmuxFake := &fakeTmuxOps{available: true, ensureWindowResult: "main:1"}
+	tmuxFake := &fakeMux{available: true, ensureWindowResult: "main:1"}
 	gitFake := &fakeGitOps{addResult: "/r-feat"}
 	harnFake := &fakeHarnessOpsWithKinds{kinds: []harness.Kind{"codex"}}
 
@@ -575,7 +575,7 @@ func TestMembershipChangedMsgCannotStrandWsCreateTargetAcrossViews(t *testing.T)
 		view:           viewWorkspaces,
 		prompt:         promptNewWorkspaceSession,
 		wsCreateTarget: "payments",
-		tmux:           tmuxFake,
+		mux:            tmuxFake,
 		gitOp:          gitFake,
 		harnOp:         harnFake,
 		wsStatuses:     workspaceWithSessions("payments", "session-one"),

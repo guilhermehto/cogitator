@@ -18,9 +18,9 @@ import (
 
 	"github.com/guilhermehto/cogitator/internal/git"
 	"github.com/guilhermehto/cogitator/internal/harness"
+	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
@@ -30,12 +30,12 @@ import (
 func TestLaunchModeForDefaultsToSession(t *testing.T) {
 	cases := []struct {
 		in   settings.LaunchMode
-		want tmuxctl.LaunchMode
+		want mux.LaunchMode
 	}{
-		{"", tmuxctl.ModeSession},
-		{settings.LaunchSession, tmuxctl.ModeSession},
-		{settings.LaunchWindow, tmuxctl.ModeWindow},
-		{"bogus", tmuxctl.ModeSession},
+		{"", mux.ModeSession},
+		{settings.LaunchSession, mux.ModeSession},
+		{settings.LaunchWindow, mux.ModeWindow},
+		{"bogus", mux.ModeSession},
 	}
 	for _, c := range cases {
 		if got := launchModeFor(c.in); got != c.want {
@@ -48,33 +48,49 @@ func TestLaunchModeForDefaultsToSession(t *testing.T) {
 // Fake implementations
 // ---------------------------------------------------------------------------
 
-// fakeTmuxOps records calls and returns canned responses.
-type fakeTmuxOps struct {
+// fakeMux records calls and returns canned responses.
+type fakeMux struct {
 	available          bool
-	findWindowResult   tmuxctl.Target
+	findWindowResult   mux.Target
 	findWindowErr      error
 	processAlive       bool
 	processAliveErr    error
 	relaunchErr        error
-	ensureWindowResult tmuxctl.Target
+	ensureWindowResult mux.Target
 	ensureWindowErr    error
 	selectErr          error
 	killWindowErr      error
 	killSessionErr     error
+	displayMessageErr  error
 
 	// Call recording.
 	findWindowCalls    []string
-	processAliveCalls  []tmuxctl.Target
+	processAliveCalls  []mux.Target
 	relaunchCalls      []relaunchCall
 	ensureWindowCalls  []ensureWindowCall
-	selectCalls        []tmuxctl.Target
-	selectSessionCalls []tmuxctl.Target
-	killWindowCalls    []tmuxctl.Target
-	killSessionCalls   []tmuxctl.Target
+	selectCalls        []mux.Target
+	selectSessionCalls []mux.Target
+	killWindowCalls    []mux.Target
+	killSessionCalls   []mux.Target
+
+	clientSelectCalls   []clientSelectCall
+	displayMessageCalls []displayMessageCall
+}
+
+type clientSelectCall struct {
+	target  mux.Target
+	paneID  string
+	session bool
+	client  string
+}
+
+type displayMessageCall struct {
+	client string
+	text   string
 }
 
 type relaunchCall struct {
-	target tmuxctl.Target
+	target mux.Target
 	argv   []string
 }
 
@@ -82,54 +98,76 @@ type ensureWindowCall struct {
 	dir  string
 	name string
 	argv []string
-	mode tmuxctl.LaunchMode
+	mode mux.LaunchMode
 }
 
-func (f *fakeTmuxOps) Available() bool { return f.available }
+var _ mux.Backend = (*fakeMux)(nil)
 
-func (f *fakeTmuxOps) FindWindowByDir(dir string) (tmuxctl.Target, error) {
+func (f *fakeMux) Name() string { return "fake" }
+
+func (f *fakeMux) Available() bool { return f.available }
+
+func (f *fakeMux) FindWindowByDir(dir string) (mux.Target, error) {
 	f.findWindowCalls = append(f.findWindowCalls, dir)
 	return f.findWindowResult, f.findWindowErr
 }
 
-func (f *fakeTmuxOps) WindowProcessAlive(target tmuxctl.Target) (bool, error) {
+func (f *fakeMux) WindowProcessAlive(target mux.Target) (bool, error) {
 	f.processAliveCalls = append(f.processAliveCalls, target)
 	return f.processAlive, f.processAliveErr
 }
 
-func (f *fakeTmuxOps) RelaunchInWindow(target tmuxctl.Target, argv []string) error {
+func (f *fakeMux) RelaunchInWindow(target mux.Target, argv []string) error {
 	f.relaunchCalls = append(f.relaunchCalls, relaunchCall{target: target, argv: argv})
 	return f.relaunchErr
 }
 
-func (f *fakeTmuxOps) EnsureWindow(dir, name string, argv []string) (tmuxctl.Target, error) {
-	return f.EnsureWindowMode(dir, name, argv, tmuxctl.ModeWindow)
-}
-
-func (f *fakeTmuxOps) EnsureWindowMode(dir, name string, argv []string, mode tmuxctl.LaunchMode) (tmuxctl.Target, error) {
+func (f *fakeMux) EnsureWindow(dir, name string, argv []string, mode mux.LaunchMode) (mux.Target, error) {
 	f.ensureWindowCalls = append(f.ensureWindowCalls, ensureWindowCall{dir: dir, name: name, argv: argv, mode: mode})
 	return f.ensureWindowResult, f.ensureWindowErr
 }
 
-func (f *fakeTmuxOps) Select(target tmuxctl.Target) error {
-	f.selectCalls = append(f.selectCalls, target)
+func (f *fakeMux) Select(target mux.Target, mode mux.LaunchMode, client string) error {
+	session := mode == mux.ModeSession
+	if client != "" {
+		f.clientSelectCalls = append(f.clientSelectCalls, clientSelectCall{target: target, session: session, client: client})
+	}
+	if session {
+		f.selectSessionCalls = append(f.selectSessionCalls, target)
+	} else {
+		f.selectCalls = append(f.selectCalls, target)
+	}
 	return f.selectErr
 }
 
-func (f *fakeTmuxOps) SelectSession(target tmuxctl.Target) error {
-	f.selectSessionCalls = append(f.selectSessionCalls, target)
+func (f *fakeMux) SelectPane(paneID, client string) error {
+	f.clientSelectCalls = append(f.clientSelectCalls, clientSelectCall{paneID: paneID, client: client})
 	return f.selectErr
 }
 
-func (f *fakeTmuxOps) KillWindow(target tmuxctl.Target) error {
+func (f *fakeMux) Message(client, text string) error {
+	f.displayMessageCalls = append(f.displayMessageCalls, displayMessageCall{client: client, text: text})
+	return f.displayMessageErr
+}
+
+func (f *fakeMux) Kill(target mux.Target, mode mux.LaunchMode) error {
+	if mode == mux.ModeSession {
+		f.killSessionCalls = append(f.killSessionCalls, target)
+		return f.killSessionErr
+	}
 	f.killWindowCalls = append(f.killWindowCalls, target)
 	return f.killWindowErr
 }
 
-func (f *fakeTmuxOps) KillSession(target tmuxctl.Target) error {
-	f.killSessionCalls = append(f.killSessionCalls, target)
-	return f.killSessionErr
-}
+func (f *fakeMux) ListDirs() (map[string]bool, error) { return nil, nil }
+
+func (f *fakeMux) ListPanes() ([]mux.Pane, error) { return nil, nil }
+
+func (f *fakeMux) Capture(string, int) (string, error) { return "", nil }
+
+func (f *fakeMux) SelfPaneID() string { return "" }
+
+func (f *fakeMux) CurrentLocation() (mux.Location, error) { return mux.Location{}, nil }
 
 // fakeGitOps records AddWorktree/FetchAndAddWorktree/RemoveWorktree/
 // BranchMergeStatus calls and returns canned results.
@@ -306,12 +344,12 @@ func worktreeCreatedFrom(t *testing.T, cmd tea.Cmd) worktreeCreatedMsg {
 
 // makeTestModel builds a model with injected fakes and the given rows.
 // The textinput is initialized so Focus() calls don't panic.
-func makeTestModel(tmux *fakeTmuxOps, gitOp *fakeGitOps, harnOp *fakeHarnessOps, rows []settings.Row) model {
+func makeTestModel(tmux *fakeMux, gitOp *fakeGitOps, harnOp *fakeHarnessOps, rows []settings.Row) model {
 	ti := newTestInput()
 	return model{
 		width:         120,
 		workspaceRows: rows,
-		tmux:          tmux,
+		mux:           tmux,
 		gitOp:         gitOp,
 		harnOp:        harnOp,
 		input:         ti,
@@ -332,7 +370,7 @@ func newTestInput() textinput.Model {
 // ---------------------------------------------------------------------------
 
 func TestEnterShowsHintWhenTmuxUnavailable(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: false}
+	tmuxFake := &fakeMux{available: false}
 	m := makeTestModel(tmuxFake, nil, nil, []settings.Row{
 		makeRow("/r", "/r/a", "main", "row-a", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
@@ -352,7 +390,7 @@ func TestEnterShowsHintWhenTmuxUnavailable(t *testing.T) {
 }
 
 func TestNShowsHintWhenTmuxUnavailable(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: false}
+	tmuxFake := &fakeMux{available: false}
 	m := makeTestModel(tmuxFake, nil, nil, []settings.Row{
 		makeRow("/r", "/r/a", "main", "row-a", settings.StateStopped, state.AttnInactive, time.Time{}),
 	})
@@ -373,7 +411,7 @@ func TestNShowsHintWhenTmuxUnavailable(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestEnterOnRunningRowCallsSelect(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{
+	tmuxFake := &fakeMux{
 		available:        true,
 		findWindowResult: "main:1",
 		findWindowErr:    nil,
@@ -413,7 +451,7 @@ func TestEnterOnRunningRowCallsSelect(t *testing.T) {
 }
 
 func TestEnterOnRunningRowMarksLiveProvider(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{
+	tmuxFake := &fakeMux{
 		available:        true,
 		findWindowResult: "main:1",
 		processAlive:     true,
@@ -438,7 +476,7 @@ func TestEnterOnRunningRowMarksLiveProvider(t *testing.T) {
 // let tmux restore its last-active window) rather than forcing the worktree's
 // original window via Select.
 func TestEnterOnRunningRowSessionModeCallsSelectSession(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{
+	tmuxFake := &fakeMux{
 		available:        true,
 		findWindowResult: "repo-a:1",
 		processAlive:     true,
@@ -446,7 +484,7 @@ func TestEnterOnRunningRowSessionModeCallsSelectSession(t *testing.T) {
 	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{}, []settings.Row{
 		makeRow("/r", "/r/a", "main", "row-a", settings.StateRunning, state.AttnActive, fixedNow),
 	})
-	m.launchMode = tmuxctl.ModeSession
+	m.launchMode = mux.ModeSession
 
 	_, cmd := m.Update(keyMsg("enter"))
 	if _, ok := runCmd(cmd).(launchResultMsg); !ok {
@@ -462,7 +500,7 @@ func TestEnterOnRunningRowSessionModeCallsSelectSession(t *testing.T) {
 }
 
 func TestEnterOnRunningRowDeadWindowCallsRelaunchThenSelect(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{
+	tmuxFake := &fakeMux{
 		available:        true,
 		findWindowResult: "main:6",
 		processAlive:     false,
@@ -500,16 +538,16 @@ func TestEnterOnRunningRowDeadWindowCallsRelaunchThenSelect(t *testing.T) {
 }
 
 func TestEnterOnRunningRowNoWindowSessionModeCreatesSessionThenSelectsSession(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{
+	tmuxFake := &fakeMux{
 		available:          true,
-		findWindowErr:      tmuxctl.ErrWindowNotFound,
+		findWindowErr:      mux.ErrWindowNotFound,
 		ensureWindowResult: "repo-a:0",
 		selectErr:          nil,
 	}
 	m := makeTestModel(tmuxFake, nil, &fakeHarnessOps{argv: []string{"fake", "/r/a"}}, []settings.Row{
 		makeRow("/r", "/r/a", "main", "row-a", settings.StateRunning, state.AttnActive, fixedNow),
 	})
-	m.launchMode = tmuxctl.ModeSession
+	m.launchMode = mux.ModeSession
 
 	_, cmd := m.Update(keyMsg("enter"))
 	msg := runCmd(cmd)
@@ -528,7 +566,7 @@ func TestEnterOnRunningRowNoWindowSessionModeCreatesSessionThenSelectsSession(t 
 		t.Fatalf("expected 1 EnsureWindowMode call, got %d", len(tmuxFake.ensureWindowCalls))
 	}
 	ensure := tmuxFake.ensureWindowCalls[0]
-	if ensure.dir != "/r/a" || ensure.mode != tmuxctl.ModeSession {
+	if ensure.dir != "/r/a" || ensure.mode != mux.ModeSession {
 		t.Errorf("EnsureWindowMode = dir %q mode %v, want /r/a session mode", ensure.dir, ensure.mode)
 	}
 	if len(tmuxFake.selectSessionCalls) != 1 || tmuxFake.selectSessionCalls[0] != "repo-a:0" {
@@ -547,7 +585,7 @@ func TestEnterOnRunningRowNoWindowSessionModeCreatesSessionThenSelectsSession(t 
 // ---------------------------------------------------------------------------
 
 func TestEnterOnStoppedRowWindowAliveCallsSelect(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{
+	tmuxFake := &fakeMux{
 		available:        true,
 		findWindowResult: "main:2",
 		findWindowErr:    nil,
@@ -581,7 +619,7 @@ func TestEnterOnStoppedRowWindowAliveCallsSelect(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestEnterOnStoppedRowWindowDeadCallsRelaunchThenSelect(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{
+	tmuxFake := &fakeMux{
 		available:        true,
 		findWindowResult: "main:3",
 		findWindowErr:    nil,
@@ -619,9 +657,9 @@ func TestEnterOnStoppedRowWindowDeadCallsRelaunchThenSelect(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestEnterOnStoppedRowNoWindowCallsEnsureWindowThenSelect(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{
+	tmuxFake := &fakeMux{
 		available:          true,
-		findWindowErr:      tmuxctl.ErrWindowNotFound,
+		findWindowErr:      mux.ErrWindowNotFound,
 		ensureWindowResult: "main:4",
 		ensureWindowErr:    nil,
 		selectErr:          nil,
@@ -668,7 +706,7 @@ func TestLaunchResultMsgErrorSetsHint(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestEnterOnMissingRowShowsHint(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: true}
+	tmuxFake := &fakeMux{available: true}
 	m := makeTestModel(tmuxFake, nil, nil, []settings.Row{
 		makeRow("/r", "/r/gone", "main", "old title", settings.StateMissing, state.AttnInactive, fixedNow),
 	})
@@ -692,7 +730,7 @@ func TestEnterOnMissingRowShowsHint(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNKeyOpensNewWorktreePrompt(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: true}
+	tmuxFake := &fakeMux{available: true}
 	m := makeTestModel(tmuxFake, nil, nil, []settings.Row{
 		makeRow("/r", "/r/a", "main", "row-a", settings.StateStopped, state.AttnInactive, time.Time{}),
 	})
@@ -709,7 +747,7 @@ func TestNKeyOpensNewWorktreePrompt(t *testing.T) {
 }
 
 func TestNKeyEscCancelsPrompt(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: true}
+	tmuxFake := &fakeMux{available: true}
 	m := makeTestModel(tmuxFake, nil, nil, []settings.Row{
 		makeRow("/r", "/r/a", "main", "row-a", settings.StateStopped, state.AttnInactive, time.Time{}),
 	})
@@ -741,14 +779,14 @@ func TestNKeyEscCancelsPrompt(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNewWorktreeCmdCallsAddWorktreeAndLaunch(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{
+	tmuxFake := &fakeMux{
 		available:          true,
 		ensureWindowResult: "main:6",
 	}
 	gitFake := &fakeGitOps{addResult: "/r-feat"}
 	harnFake := &fakeHarnessOps{argv: []string{"fake", "/r-feat"}}
 
-	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "/r-feat", "fake", tmuxctl.ModeWindow, false)
+	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "/r-feat", "fake", mux.ModeWindow, false)
 	msg := runCmd(cmd)
 
 	result, ok := msg.(worktreeCreatedMsg)
@@ -770,7 +808,7 @@ func TestNewWorktreeCmdCallsAddWorktreeAndLaunch(t *testing.T) {
 	if len(tmuxFake.ensureWindowCalls) != 1 {
 		t.Errorf("expected 1 EnsureWindow call, got %d", len(tmuxFake.ensureWindowCalls))
 	}
-	if got := tmuxFake.ensureWindowCalls[0].mode; got != tmuxctl.ModeWindow {
+	if got := tmuxFake.ensureWindowCalls[0].mode; got != mux.ModeWindow {
 		t.Errorf("EnsureWindow mode = %v, want ModeWindow", got)
 	}
 	if len(tmuxFake.selectCalls) != 1 || tmuxFake.selectCalls[0] != "main:6" {
@@ -779,31 +817,31 @@ func TestNewWorktreeCmdCallsAddWorktreeAndLaunch(t *testing.T) {
 }
 
 func TestNewWorktreeCmdSessionModePropagates(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{
+	tmuxFake := &fakeMux{
 		available:          true,
 		ensureWindowResult: "r-feat:0",
 	}
 	gitFake := &fakeGitOps{addResult: "/r-feat"}
 	harnFake := &fakeHarnessOps{argv: []string{"fake", "/r-feat"}}
 
-	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "/r-feat", "fake", tmuxctl.ModeSession, false)
+	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "/r-feat", "fake", mux.ModeSession, false)
 	if _, ok := runCmd(cmd).(worktreeCreatedMsg); !ok {
 		t.Fatal("expected worktreeCreatedMsg")
 	}
 	if len(tmuxFake.ensureWindowCalls) != 1 {
 		t.Fatalf("expected 1 EnsureWindow call, got %d", len(tmuxFake.ensureWindowCalls))
 	}
-	if got := tmuxFake.ensureWindowCalls[0].mode; got != tmuxctl.ModeSession {
+	if got := tmuxFake.ensureWindowCalls[0].mode; got != mux.ModeSession {
 		t.Errorf("EnsureWindow mode = %v, want ModeSession", got)
 	}
 }
 
 func TestNewWorktreeCmdGitErrorReturnsMsg(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: true}
+	tmuxFake := &fakeMux{available: true}
 	gitFake := &fakeGitOps{addErr: errors.New("branch already exists")}
 	harnFake := &fakeHarnessOps{}
 
-	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "/r-feat", "fake", tmuxctl.ModeWindow, false)
+	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "/r-feat", "fake", mux.ModeWindow, false)
 	msg := runCmd(cmd)
 
 	result, ok := msg.(worktreeCreatedMsg)
@@ -819,18 +857,18 @@ func TestNewWorktreeCmdGitErrorReturnsMsg(t *testing.T) {
 }
 
 func TestNewWorktreeCmdTmuxUnavailableReturnsMsg(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: false}
+	tmuxFake := &fakeMux{available: false}
 	gitFake := &fakeGitOps{}
 	harnFake := &fakeHarnessOps{}
 
-	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "/r-feat", "fake", tmuxctl.ModeWindow, false)
+	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "/r-feat", "fake", mux.ModeWindow, false)
 	msg := runCmd(cmd)
 
 	result, ok := msg.(worktreeCreatedMsg)
 	if !ok {
 		t.Fatalf("expected worktreeCreatedMsg, got %T", msg)
 	}
-	if !errors.Is(result.err, tmuxctl.ErrNotAvailable) {
+	if !errors.Is(result.err, mux.ErrNotAvailable) {
 		t.Errorf("expected ErrNotAvailable, got %v", result.err)
 	}
 }
@@ -839,14 +877,14 @@ func TestNewWorktreeCmdTmuxUnavailableReturnsMsg(t *testing.T) {
 // command checks the branch out via FetchAndAddWorktree (fetch from origin)
 // rather than AddWorktree (create fresh), while sharing the same launch flow.
 func TestNewWorktreeCmdFromRemoteFetches(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{
+	tmuxFake := &fakeMux{
 		available:          true,
 		ensureWindowResult: "main:6",
 	}
 	gitFake := &fakeGitOps{fetchAddResult: "/r-feat"}
 	harnFake := &fakeHarnessOps{argv: []string{"fake", "/r-feat"}}
 
-	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "/r-feat", "fake", tmuxctl.ModeWindow, true)
+	cmd := newWorktreeCmd(tmuxFake, gitFake, harnFake, "/r", "feat", "/r-feat", "fake", mux.ModeWindow, true)
 	msg := runCmd(cmd)
 
 	result, ok := msg.(worktreeCreatedMsg)
@@ -881,7 +919,7 @@ func TestNewWorktreeCmdFromRemoteFetches(t *testing.T) {
 // the branch-name prompt in fetch mode (worktreeFromRemote set) with the repo
 // captured.
 func TestFKeyOpensFetchBranchPrompt(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: true}
+	tmuxFake := &fakeMux{available: true}
 	m := makeTestModel(tmuxFake, &fakeGitOps{}, &fakeHarnessOps{}, []settings.Row{
 		makeRow("/r", "/r", "main", "row-a", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
@@ -906,7 +944,7 @@ func TestFKeyOpensFetchBranchPrompt(t *testing.T) {
 // TestFKeyShowsHintWhenTmuxUnavailable verifies 'F' degrades gracefully without
 // tmux: no prompt, no cmd, a tmux hint.
 func TestFKeyShowsHintWhenTmuxUnavailable(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: false}
+	tmuxFake := &fakeMux{available: false}
 	m := makeTestModel(tmuxFake, nil, nil, []settings.Row{
 		makeRow("/r", "/r", "main", "row-a", settings.StateStopped, state.AttnInactive, time.Time{}),
 	})
@@ -928,7 +966,7 @@ func TestFKeyShowsHintWhenTmuxUnavailable(t *testing.T) {
 // TestNKeyClearsFromRemoteFlag verifies the create-fresh path ('n') resets any
 // stale worktreeFromRemote set by a prior interrupted fetch flow.
 func TestNKeyClearsFromRemoteFlag(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: true}
+	tmuxFake := &fakeMux{available: true}
 	m := makeTestModel(tmuxFake, &fakeGitOps{}, &fakeHarnessOps{}, []settings.Row{
 		makeRow("/r", "/r", "main", "row-a", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
@@ -982,7 +1020,7 @@ func TestInjectPendingCreatesSkipsExistingRow(t *testing.T) {
 }
 
 func TestClearPendingCreateRemovesRowAndEntry(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, &fakeGitOps{}, &fakeHarnessOps{}, []settings.Row{
+	m := makeTestModel(&fakeMux{available: true}, &fakeGitOps{}, &fakeHarnessOps{}, []settings.Row{
 		makeRow("/r", "/r", "main", "", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 	m.addPendingCreate("/r", "/r-feat", "feat", false)
@@ -1005,7 +1043,7 @@ func TestClearPendingCreateRemovesRowAndEntry(t *testing.T) {
 // TestSpinnerTickAdvancesAndStops verifies the spinner ticker advances the frame
 // while a create is pending and stops (resetting the frame) once none remain.
 func TestSpinnerTickAdvancesAndStops(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, &fakeGitOps{}, &fakeHarnessOps{}, nil)
+	m := makeTestModel(&fakeMux{available: true}, &fakeGitOps{}, &fakeHarnessOps{}, nil)
 	m.addPendingCreate("/r", "/r-feat", "feat", true)
 	m.spinnerActive = true
 
@@ -1033,7 +1071,7 @@ func TestSpinnerTickAdvancesAndStops(t *testing.T) {
 }
 
 func TestWorktreeCreatedMsgClearsPendingCreate(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, &fakeGitOps{}, &fakeHarnessOps{}, []settings.Row{
+	m := makeTestModel(&fakeMux{available: true}, &fakeGitOps{}, &fakeHarnessOps{}, []settings.Row{
 		makeRow("/r", "/r", "main", "", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 	m.addPendingCreate("/r", "/r-feat", "feat", true)
@@ -1058,7 +1096,7 @@ func TestWorktreeCreatedMsgClearsPendingCreate(t *testing.T) {
 // TestEnterOnCreatingRowDoesNotLaunch verifies the placeholder row is not
 // enterable: enter surfaces a hint and never touches tmux.
 func TestEnterOnCreatingRowDoesNotLaunch(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: true}
+	tmuxFake := &fakeMux{available: true}
 	m := makeTestModel(tmuxFake, &fakeGitOps{}, &fakeHarnessOps{}, []settings.Row{
 		{Repo: "/r", Worktree: "/r-feat", Branch: "feat", State: settings.StateCreating},
 	})
@@ -1126,13 +1164,13 @@ func TestRenderWorkspaceRowsStoppedRowShowsTitle(t *testing.T) {
 func TestRenderWorkspaceRowsShowsTmuxHint(t *testing.T) {
 	m := model{
 		width:    200,
-		tmuxHint: "tmux not available — start cogitator inside a tmux session",
+		tmuxHint: hintNoMuxJump,
 	}
 	rows := []settings.Row{
 		makeRow("/r", "/r/a", "main", "row-a", settings.StateStopped, state.AttnInactive, time.Time{}),
 	}
 	got := m.renderWorkspaceRows(200, rows, 0, fixedNow)
-	if !strings.Contains(got, "tmux not available") {
+	if !strings.Contains(got, hintNoMuxJump) {
 		t.Fatalf("tmuxHint must appear in rendered output, got %q", got)
 	}
 }
@@ -1142,7 +1180,7 @@ func TestRenderWorkspaceRowsShowsTmuxHint(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDKeyOpensDeleteConfirmAndProbesMerge(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: true}
+	tmuxFake := &fakeMux{available: true}
 	gitFake := &fakeGitOps{mergeState: git.MergeMerged, mergeBase: "main"}
 	m := makeTestModel(tmuxFake, gitFake, &fakeHarnessOps{}, []settings.Row{
 		makeRow("/r", "/r/a", "feat", "title", settings.StateStopped, state.AttnInactive, fixedNow),
@@ -1172,7 +1210,7 @@ func TestDKeyOpensDeleteConfirmAndProbesMerge(t *testing.T) {
 }
 
 func TestDKeyOnMainWorktreeShowsHint(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: true}
+	tmuxFake := &fakeMux{available: true}
 	m := makeTestModel(tmuxFake, &fakeGitOps{}, &fakeHarnessOps{}, []settings.Row{
 		// Worktree == Repo → the repository's primary worktree.
 		makeRow("/r", "/r", "main", "title", settings.StateRunning, state.AttnActive, fixedNow),
@@ -1193,7 +1231,7 @@ func TestDKeyOnMainWorktreeShowsHint(t *testing.T) {
 }
 
 func TestDKeyOnUnconfiguredRowShowsHint(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: true}
+	tmuxFake := &fakeMux{available: true}
 	m := makeTestModel(tmuxFake, &fakeGitOps{}, &fakeHarnessOps{}, []settings.Row{
 		// Repo == "" → not part of a configured repo.
 		makeRow("", "/somewhere/wt", "feat", "title", settings.StateRunning, state.AttnActive, fixedNow),
@@ -1268,7 +1306,7 @@ func TestDeleteConfirmSecondDefaultCancels(t *testing.T) {
 			width:        120,
 			prompt:       promptConfirmDeleteWorktree2,
 			deleteTarget: makeRow("/r", "/r/a", "feat", "", settings.StateStopped, state.AttnInactive, fixedNow),
-			tmux:         &fakeTmuxOps{available: true},
+			mux:          &fakeMux{available: true},
 			gitOp:        &fakeGitOps{},
 		}
 
@@ -1288,7 +1326,7 @@ func TestDeleteConfirmSecondDefaultCancels(t *testing.T) {
 }
 
 func TestDeleteWorktreeFullConfirmFlowDispatchesRemove(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: true, findWindowErr: tmuxctl.ErrWindowNotFound}
+	tmuxFake := &fakeMux{available: true, findWindowErr: mux.ErrWindowNotFound}
 	gitFake := &fakeGitOps{mergeState: git.MergeMerged, mergeBase: "main"}
 	m := makeTestModel(tmuxFake, gitFake, &fakeHarnessOps{}, []settings.Row{
 		makeRow("/r", "/r/a", "feat", "title", settings.StateStopped, state.AttnInactive, fixedNow),
@@ -1340,10 +1378,10 @@ func TestDeleteWorktreeFullConfirmFlowDispatchesRemove(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDeleteWorktreeCmdRemovesAndKillsWindow(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: true, findWindowResult: "main:2"}
+	tmuxFake := &fakeMux{available: true, findWindowResult: "main:2"}
 	gitFake := &fakeGitOps{}
 
-	result, ok := runCmd(deleteWorktreeCmd(tmuxFake, gitFake, "/r", "/r/a", "feat", tmuxctl.ModeWindow, true)).(worktreeDeletedMsg)
+	result, ok := runCmd(deleteWorktreeCmd(tmuxFake, gitFake, "/r", "/r/a", "feat", mux.ModeWindow, true)).(worktreeDeletedMsg)
 	if !ok {
 		t.Fatalf("expected worktreeDeletedMsg")
 	}
@@ -1368,10 +1406,10 @@ func TestDeleteWorktreeCmdRemovesAndKillsWindow(t *testing.T) {
 }
 
 func TestDeleteWorktreeCmdRemovesAndKillsSessionInSessionMode(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: true, findWindowResult: "repo-feat:0"}
+	tmuxFake := &fakeMux{available: true, findWindowResult: "repo-feat:0"}
 	gitFake := &fakeGitOps{}
 
-	result, ok := runCmd(deleteWorktreeCmd(tmuxFake, gitFake, "/r", "/r/a", "feat", tmuxctl.ModeSession, true)).(worktreeDeletedMsg)
+	result, ok := runCmd(deleteWorktreeCmd(tmuxFake, gitFake, "/r", "/r/a", "feat", mux.ModeSession, true)).(worktreeDeletedMsg)
 	if !ok {
 		t.Fatalf("expected worktreeDeletedMsg")
 	}
@@ -1390,10 +1428,10 @@ func TestDeleteWorktreeCmdRemovesAndKillsSessionInSessionMode(t *testing.T) {
 }
 
 func TestDeleteWorktreeCmdGitErrorSkipsWindowKill(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: true, findWindowResult: "main:2"}
+	tmuxFake := &fakeMux{available: true, findWindowResult: "main:2"}
 	gitFake := &fakeGitOps{removeErr: errors.New("worktree contains modified or untracked files")}
 
-	result, ok := runCmd(deleteWorktreeCmd(tmuxFake, gitFake, "/r", "/r/a", "feat", tmuxctl.ModeWindow, true)).(worktreeDeletedMsg)
+	result, ok := runCmd(deleteWorktreeCmd(tmuxFake, gitFake, "/r", "/r/a", "feat", mux.ModeWindow, true)).(worktreeDeletedMsg)
 	if !ok {
 		t.Fatalf("expected worktreeDeletedMsg")
 	}
@@ -1657,15 +1695,15 @@ func wsStatusWithSession(workspaceName string, sess workspace.SessionStatus) wor
 }
 
 func TestWorkspaceLaunch_EnterOnSessionRowOpensSessionDirNamedForWorkspace(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{
+	tmuxFake := &fakeMux{
 		available:          true,
-		findWindowErr:      tmuxctl.ErrWindowNotFound,
+		findWindowErr:      mux.ErrWindowNotFound,
 		ensureWindowResult: "payments/Feature X:0",
 	}
 	sess := wsSession("Feature X", "feature-x", "/root/payments/feature-x", "fake", settings.StateStopped)
 	m := model{
 		width: 120, height: 40, view: viewWorkspaces, input: newTestInput(),
-		tmux: tmuxFake, harnOp: &fakeHarnessOps{argv: []string{"fake", "/root/payments/feature-x"}},
+		mux: tmuxFake, harnOp: &fakeHarnessOps{argv: []string{"fake", "/root/payments/feature-x"}},
 		wsStatuses: []workspace.WorkspaceStatus{wsStatusWithSession("payments", sess)},
 		wsCursor:   1, // the session row (0 is the workspace header)
 	}
@@ -1694,7 +1732,7 @@ func TestWorkspaceLaunch_EnterOnSessionRowOpensSessionDirNamedForWorkspace(t *te
 }
 
 func TestWorkspaceLaunch_AlreadyOpenSelectsExistingTargetInstead(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{
+	tmuxFake := &fakeMux{
 		available:        true,
 		findWindowResult: "payments/Feature X:1",
 		processAlive:     true,
@@ -1702,7 +1740,7 @@ func TestWorkspaceLaunch_AlreadyOpenSelectsExistingTargetInstead(t *testing.T) {
 	sess := wsSession("Feature X", "feature-x", "/root/payments/feature-x", "fake", settings.StateRunning)
 	m := model{
 		width: 120, height: 40, view: viewWorkspaces, input: newTestInput(),
-		tmux: tmuxFake, harnOp: &fakeHarnessOps{},
+		mux: tmuxFake, harnOp: &fakeHarnessOps{},
 		wsStatuses: []workspace.WorkspaceStatus{wsStatusWithSession("payments", sess)},
 		wsCursor:   1,
 	}
@@ -1724,15 +1762,15 @@ func TestWorkspaceLaunch_DefaultHarnessDoesNotOverrideSessionHarness(t *testing.
 	if err := settings.SetDefaultHarness("opencode"); err != nil {
 		t.Fatalf("set default: %v", err)
 	}
-	tmuxFake := &fakeTmuxOps{
+	tmuxFake := &fakeMux{
 		available:          true,
-		findWindowErr:      tmuxctl.ErrWindowNotFound,
+		findWindowErr:      mux.ErrWindowNotFound,
 		ensureWindowResult: "payments/Feature X:0",
 	}
 	sess := wsSession("Feature X", "feature-x", "/root/payments/feature-x", "codex", settings.StateStopped)
 	m := model{
 		width: 120, height: 40, view: viewWorkspaces, input: newTestInput(),
-		tmux: tmuxFake, harnOp: &fakeHarnessOpsWithKinds{kinds: []harness.Kind{"codex", "opencode"}},
+		mux: tmuxFake, harnOp: &fakeHarnessOpsWithKinds{kinds: []harness.Kind{"codex", "opencode"}},
 		wsStatuses: []workspace.WorkspaceStatus{wsStatusWithSession("payments", sess)},
 		wsCursor:   1,
 	}
@@ -1748,11 +1786,11 @@ func TestWorkspaceLaunch_DefaultHarnessDoesNotOverrideSessionHarness(t *testing.
 }
 
 func TestWorkspaceLaunch_TmuxUnavailableSetsWsHint(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: false}
+	tmuxFake := &fakeMux{available: false}
 	sess := wsSession("Feature X", "feature-x", "/root/payments/feature-x", "opencode", settings.StateStopped)
 	m := model{
 		width: 120, height: 40, view: viewWorkspaces, input: newTestInput(),
-		tmux:       tmuxFake,
+		mux:        tmuxFake,
 		wsStatuses: []workspace.WorkspaceStatus{wsStatusWithSession("payments", sess)},
 		wsCursor:   1,
 	}
@@ -1769,11 +1807,11 @@ func TestWorkspaceLaunch_TmuxUnavailableSetsWsHint(t *testing.T) {
 }
 
 func TestWorkspaceLaunch_MissingSessionSetsWsHintAndLaunchesNothing(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: true}
+	tmuxFake := &fakeMux{available: true}
 	sess := wsSession("Feature X", "feature-x", "/root/payments/feature-x", "opencode", settings.StateMissing)
 	m := model{
 		width: 120, height: 40, view: viewWorkspaces, input: newTestInput(),
-		tmux:       tmuxFake,
+		mux:        tmuxFake,
 		wsStatuses: []workspace.WorkspaceStatus{wsStatusWithSession("payments", sess)},
 		wsCursor:   1,
 	}
@@ -1793,11 +1831,11 @@ func TestWorkspaceLaunch_MissingSessionSetsWsHintAndLaunchesNothing(t *testing.T
 }
 
 func TestWorkspaceLaunch_CreatingSessionSetsWsHint(t *testing.T) {
-	tmuxFake := &fakeTmuxOps{available: true}
+	tmuxFake := &fakeMux{available: true}
 	sess := wsSession("Feature X", "", "", "", settings.StateCreating)
 	m := model{
 		width: 120, height: 40, view: viewWorkspaces, input: newTestInput(),
-		tmux:       tmuxFake,
+		mux:        tmuxFake,
 		wsStatuses: []workspace.WorkspaceStatus{wsStatusWithSession("payments", sess)},
 		wsCursor:   1,
 	}

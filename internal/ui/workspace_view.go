@@ -141,6 +141,20 @@ func wsEntryCount(statuses []workspace.WorkspaceStatus) int {
 	return n
 }
 
+// wsSessionEntry returns the cursor entry of the session row whose directory
+// is dir, and false when no session in statuses lives there.
+func wsSessionEntry(statuses []workspace.WorkspaceStatus, dir string) (int, bool) {
+	for _, dl := range wsDisplayLines(statuses) {
+		if dl.kind != wsLineSession {
+			continue
+		}
+		if statuses[dl.wsIndex].Sessions[dl.sessIndex].Session.Dir == dir {
+			return dl.entry, true
+		}
+	}
+	return 0, false
+}
+
 // wsWindow returns the visible half-open range in lines for the given cursor
 // entry, mirroring workspaceWindow's scroll-preservation behaviour: the
 // scroll offset stays put while the cursor remains inside the viewport and

@@ -7,10 +7,11 @@
 //
 // where <agent-dir> defaults to ~/.omp/agent and is overridable via
 // $PI_CODING_AGENT_DIR (or $PI_CONFIG_DIR/agent). Each line is a JSON object.
-// Line 1 is always the session header (type "session"); its fields carry the
-// session id, cwd, title, and creation timestamp. When the header has no
-// title, one is derived from the first user "message" entry. Last-activity is
-// the timestamp of the final parseable line.
+// Line 1 is the session header (type "session"), optionally preceded by a
+// title record (type "title"); the header carries the session id, cwd, title,
+// and creation timestamp. The title record wins over the header title. When
+// neither has a title, one is derived from the first user "message" entry.
+// Last-activity is the timestamp of the final parseable line.
 //
 // The package is intentionally free of internal/ui, bubbletea, internal/oc,
 // and internal/state — it is a pure filesystem-in / structs-out parser.
@@ -47,8 +48,14 @@ type Session struct {
 	// Created is the session initiation time from the header.
 	Created time.Time
 
-	// LastActivity is the timestamp of the last parseable line in the file.
+	// LastActivity is the timestamp of the last parseable line in the file,
+	// excluding session_exit records.
 	LastActivity time.Time
+
+	// ExitedAt is the timestamp of the latest session_exit record omp appends
+	// when the process ends; zero when none. The session has ended when it is
+	// not before LastActivity.
+	ExitedAt time.Time
 }
 
 // maxTitleRunes is the maximum number of Unicode code points kept in a
@@ -67,9 +74,9 @@ const maxTitleRunes = 80
 //   - A file that disappears between listing and open → silently skipped.
 //   - Malformed JSON lines → skipped; the session is still returned if the
 //     header was already parsed.
-//   - A file whose first parseable line is not a session header → skipped
-//     entirely (this excludes subagent transcripts and other non-session
-//     JSONL, mirroring omp's own loader).
+//   - A file whose first parseable line, after any title record, is not a
+//     session header → skipped entirely (this excludes subagent transcripts
+//     and other non-session JSONL, mirroring omp's own loader).
 func ReadSessions(ompHome string) ([]Session, error) {
 	return readSessions(ompHome, nil)
 }
@@ -154,9 +161,9 @@ func parseSessionFile(path string) (Session, bool) {
 	defer f.Close()
 
 	var (
-		s            Session
-		seenHeader   bool
-		lastActivity time.Time
+		s           Session
+		seenHeader  bool
+		recordTitle string
 	)
 
 	scanner := bufio.NewScanner(f)
@@ -176,36 +183,24 @@ func parseSessionFile(path string) (Session, bool) {
 		}
 
 		if !seenHeader {
-			// The first parseable line MUST be the session header; anything
-			// else means this is not a session file (e.g. a subagent
-			// transcript) and is rejected wholesale.
+			if raw.Type == "title" {
+				recordTitle = raw.Title
+				continue
+			}
+
+			// The first parseable line after any title record MUST be the
+			// session header; anything else means this is not a session file
+			// (e.g. a subagent transcript) and is rejected wholesale.
 			if raw.Type != "session" || raw.ID == "" {
 				return Session{}, false
 			}
+
 			seenHeader = true
-			created, _ := parseTimestamp(raw.Timestamp)
-			dir, _ := pathnorm.Canonical(raw.CWD)
-			s = Session{
-				ID:      raw.ID,
-				Dir:     dir,
-				Title:   truncateTitle(strings.TrimSpace(raw.Title)),
-				Created: created,
-			}
-			lastActivity = created
+			s = sessionFromHeader(raw, recordTitle)
 			continue
 		}
 
-		if ts, ok := parseTimestamp(raw.Timestamp); ok {
-			lastActivity = ts
-		}
-
-		// Derive a title from the first user message only when the header
-		// carried none.
-		if s.Title == "" && raw.Type == "message" && len(raw.Message) > 0 {
-			if title := userMessageTitle(raw.Message); title != "" {
-				s.Title = truncateTitle(title)
-			}
-		}
+		applyEntry(&s, raw)
 	}
 	// scanner.Err() is intentionally ignored: a truncated/partial final line
 	// is already handled by the json.Unmarshal skip above; a read error after
@@ -215,8 +210,52 @@ func parseSessionFile(path string) (Session, bool) {
 		return Session{}, false
 	}
 
-	s.LastActivity = lastActivity
 	return s, true
+}
+
+// sessionFromHeader builds a Session from the "session" header line. A
+// non-empty recordTitle (from a leading "title" record) overrides the header's
+// own title.
+func sessionFromHeader(header rawLine, recordTitle string) Session {
+	created, _ := parseTimestamp(header.Timestamp)
+	dir, _ := pathnorm.Canonical(header.CWD)
+
+	title := header.Title
+	if recordTitle != "" {
+		title = recordTitle
+	}
+
+	return Session{
+		ID:           header.ID,
+		Dir:          dir,
+		Title:        truncateTitle(strings.TrimSpace(title)),
+		Created:      created,
+		LastActivity: created,
+	}
+}
+
+// applyEntry folds one post-header line into s: exit records set ExitedAt,
+// every other timestamped line advances LastActivity, and the first user
+// message supplies a title when the header carried none.
+func applyEntry(s *Session, entry rawLine) {
+	ts, hasTimestamp := parseTimestamp(entry.Timestamp)
+	if entry.Type == "custom" && entry.CustomType == "session_exit" {
+		if hasTimestamp {
+			s.ExitedAt = ts
+		}
+
+		return
+	}
+
+	if hasTimestamp {
+		s.LastActivity = ts
+	}
+
+	if s.Title == "" && entry.Type == "message" && len(entry.Message) > 0 {
+		if title := userMessageTitle(entry.Message); title != "" {
+			s.Title = truncateTitle(title)
+		}
+	}
 }
 
 // userMessageTitle extracts the first text from a "message" entry payload when
@@ -287,12 +326,13 @@ func sortByLastActivityDesc(sessions []Session) {
 // header fields (id/cwd/title) and the message-entry payload so a single
 // unmarshal serves both.
 type rawLine struct {
-	Type      string          `json:"type"`
-	Timestamp string          `json:"timestamp"`
-	ID        string          `json:"id"`
-	CWD       string          `json:"cwd"`
-	Title     string          `json:"title"`
-	Message   json.RawMessage `json:"message"`
+	Type       string          `json:"type"`
+	CustomType string          `json:"customType"`
+	Timestamp  string          `json:"timestamp"`
+	ID         string          `json:"id"`
+	CWD        string          `json:"cwd"`
+	Title      string          `json:"title"`
+	Message    json.RawMessage `json:"message"`
 }
 
 // msgPayload is the relevant subset of a "message" entry's message object.

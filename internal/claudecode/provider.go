@@ -1,6 +1,7 @@
 package claudecode
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"log/slog"
@@ -38,6 +39,9 @@ type hookOverlay struct {
 
 	// lastActivity is the time of the most recent hook event for this session.
 	lastActivity time.Time
+
+	// paneID is the multiplexer pane the latest stamped hook ran in.
+	paneID string
 }
 
 // Provider polls ~/.claude on a configurable interval and emits
@@ -227,6 +231,7 @@ func (p *Provider) handleHookFrame(raw []byte, sink provider.Sink) {
 	p.mu.Lock()
 	ov := p.overlays[sessionID]
 	ov.lastActivity = now
+	ov.paneID = cmp.Or(ev.PaneID, ov.paneID)
 
 	switch ev.EventName {
 	case "SessionStart":
@@ -389,5 +394,6 @@ func (p *Provider) mergeToUpdate(s Session, ov hookOverlay, now time.Time) provi
 		LastActivity:  lastActivity,
 		Created:       s.Created,
 		Source:        src,
+		PaneID:        ov.paneID,
 	}
 }
