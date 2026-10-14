@@ -49,48 +49,7 @@ func hookStdin() io.Reader {
 func main() {
 	// Route subcommands before flag.Parse() so bare subcommand names are not
 	// misinterpreted as unknown flags.
-	if len(os.Args) > 1 && os.Args[1] == "codex-hook" {
-		if err := codex.SendHook(context.Background(), hookStdin()); err != nil {
-			// A closed cogitator TUI is the expected case, not a failure:
-			// exit 0 silently so Codex never shows a "hook failed" banner.
-			if errors.Is(err, codex.ErrListenerUnavailable) {
-				return
-			}
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	if len(os.Args) > 1 && os.Args[1] == "claude-hook" {
-		if err := claudecode.SendHook(context.Background(), hookStdin()); err != nil {
-			// A closed cogitator TUI is the expected case, not a failure:
-			// exit 0 silently so Claude Code never shows a "hook failed" banner.
-			if errors.Is(err, claudecode.ErrListenerUnavailable) {
-				return
-			}
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	if len(os.Args) > 1 && os.Args[1] == "omp-hook" {
-		// `omp-hook install` writes the live-attention extension into the omp
-		// extensions directory; the bare form forwards a hook event from stdin.
-		if len(os.Args) > 2 && os.Args[2] == "install" {
-			runOmpHookInstall(os.Args[3:])
-			return
-		}
-		if err := omp.SendHook(context.Background(), hookStdin()); err != nil {
-			// A closed cogitator TUI is the expected case, not a failure:
-			// exit 0 silently so omp never shows a "hook failed" banner.
-			if errors.Is(err, omp.ErrListenerUnavailable) {
-				return
-			}
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
+	if len(os.Args) > 1 && runHookCommand(os.Args[1], os.Args[2:]) {
 		return
 	}
 
@@ -317,6 +276,71 @@ func runZellijCommand(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// runHookCommand routes the hook subcommands and reports whether name was
+// one. `<harness>-hook install` wires the harness; the bare form forwards a
+// hook event from stdin.
+func runHookCommand(name string, args []string) bool {
+	switch name {
+	case "claude-hook":
+		installOrForwardHook(args, runClaudeHookInstall, claudecode.SendHook)
+	case "codex-hook":
+		installOrForwardHook(args, nil, codex.SendHook)
+	case "omp-hook":
+		installOrForwardHook(args, runOmpHookInstall, omp.SendHook)
+	default:
+		return false
+	}
+
+	return true
+}
+
+func installOrForwardHook(args []string, install func([]string), send func(context.Context, io.Reader) error) {
+	if install != nil && len(args) > 0 && args[0] == "install" {
+		install(args[1:])
+		return
+	}
+
+	// A closed cogitator TUI is the expected case, not a failure: exit 0
+	// silently so the harness never shows a "hook failed" banner.
+	if err := send(context.Background(), hookStdin()); err != nil && !errors.Is(err, hookipc.ErrListenerUnavailable) {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+// runClaudeHookInstall merges cogitator's hooks into Claude Code's
+// settings.json with the binary's absolute path in every command.
+func runClaudeHookInstall(args []string) {
+	flags := flag.NewFlagSet("claude-hook install", flag.ExitOnError)
+	binary := flags.String("binary", "", "cogitator binary the hooks run (default: PATH lookup, then this executable)")
+	force := flags.Bool("force", false, "install even when cogitator is already wired into Claude Code by hand")
+	_ = flags.Parse(args)
+
+	found, err := claudecode.InstallHooks(config.Default().ClaudeCodeHome, resolveHookBinary(*binary), *force)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	if found.State == installkit.Current {
+		fmt.Printf("Claude Code hooks already set up: %s\n", found.Path)
+		return
+	}
+	fmt.Printf("Installed Claude Code hooks: %s\n", found.Path)
+	fmt.Println("Restart Claude Code for the hooks to take effect.")
+}
+
+// resolveHookBinary is the absolute cogitator binary hook commands run.
+func resolveHookBinary(flagValue string) string {
+	bin, err := installkit.ResolveBinary(flagValue, exec.LookPath, os.Executable)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	return bin
 }
 
 // runOmpHookInstall writes the omp extension with this binary's absolute path

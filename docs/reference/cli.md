@@ -43,9 +43,9 @@ These drive the [tmux integration](/guide/tmux) and talk to the running TUI:
 The installers never set anything up twice. If cogitator's own wiring is already current,
 a re-run prints `already set up` and writes nothing. If it points at an older binary,
 plugin, or keys, the re-run updates it in place. If you wired cogitator yourself (a
-hand-written bind, a layout that loads the plugin, an edited omp extension), the installer
-names the file and line, leaves it alone, and exits non-zero. Pass `--force` to install
-anyway.
+hand-written bind, a layout that loads the plugin, an edited omp extension, a hook that runs
+a wrapper script), the installer names the file and line, leaves it alone, and exits
+non-zero. Pass `--force` to install anyway.
 
 See [tmux integration](/guide/tmux#setup) for details. All `pick` and `next` flags are optional and fall back to tmux's current client, window, and session.
 
@@ -53,7 +53,9 @@ See [tmux integration](/guide/tmux#setup) for details. All `pick` and `next` fla
 
 These are wired up during [agent setup](/guide/connect) and are not meant to be run by hand:
 
-- `cogitator claude-hook`: receives Claude Code lifecycle events on stdin.
+- `cogitator claude-hook`: receives Claude Code lifecycle events on stdin;
+  `cogitator claude-hook install [--binary PATH] [--force]` merges the hooks into
+  `~/.claude/settings.json` (`$CLAUDE_HOME/settings.json` when set).
 - `cogitator codex-hook`: receives Codex lifecycle events on stdin.
 - `cogitator omp-hook`: receives omp lifecycle events; `cogitator omp-hook install [--force]`
   writes the omp extension to `~/.omp/agent/extensions/cogitator.ts`.
