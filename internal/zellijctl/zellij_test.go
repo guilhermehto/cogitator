@@ -107,16 +107,17 @@ func sessionsList(names ...string) string {
 }
 
 type paneFixture struct {
-	ID      int
-	Plugin  bool
-	URL     string
-	Exited  bool
-	Held    bool
-	Tab     int
-	TabName string
-	Command string
-	Started string
-	Cwd     string
+	ID         int
+	Plugin     bool
+	URL        string
+	Exited     bool
+	Held       bool
+	Suppressed bool
+	Tab        int
+	TabName    string
+	Command    string
+	Started    string
+	Cwd        string
 }
 
 // panesJSON renders panes in the shape probed from `list-panes -a -j`.
@@ -129,7 +130,7 @@ func panesJSON(t *testing.T, panes ...paneFixture) string {
 			"is_plugin":        p.Plugin,
 			"is_focused":       false,
 			"is_floating":      false,
-			"is_suppressed":    false,
+			"is_suppressed":    p.Suppressed,
 			"title":            p.Command,
 			"exited":           p.Exited,
 			"exit_status":      nil,
@@ -461,7 +462,7 @@ func TestEnsureWindow_WindowModeOpensTabInOwnSession(t *testing.T) {
 	}
 }
 
-func TestEnsureWindow_SessionModeCreatesFreeSessionAndSwapsInHarness(t *testing.T) {
+func TestEnsureWindow_SessionModeCreatesFreeSessionAndRunsHarnessOverShell(t *testing.T) {
 	cases := []struct {
 		name     string
 		sessions []string
@@ -476,14 +477,24 @@ func TestEnsureWindow_SessionModeCreatesFreeSessionAndSwapsInHarness(t *testing.
 			raw, canonical := canonicalTempDir(t)
 			r := &fakeRunner{
 				responses: map[string]string{"list-sessions": sessionsList(c.sessions...), "list-panes": "[]"},
+				// The listing holds the initial shell and the shell that replaces it.
 				sessions: map[string]map[string]string{c.want: {"list-panes": panesJSON(t,
 					paneFixture{ID: 1, Plugin: true, Tab: 0},
 					paneFixture{ID: 3, Plugin: true, URL: "about", Tab: 0},
 					paneFixture{ID: 0, Tab: 0, Command: "/bin/zsh", Cwd: t.TempDir()},
+					paneFixture{ID: 5, Tab: 0, Command: "/opt/bin/fish", Cwd: canonical},
 				)}},
 			}
+			b := newBackend(t, r)
+			env := b.Getenv
+			b.Getenv = func(k string) string {
+				if k == "SHELL" {
+					return "/opt/bin/fish"
+				}
+				return env(k)
+			}
 
-			got, err := newBackend(t, r).EnsureWindow(raw, "cz-repo/feat/x", []string{"claude", "--resume"}, mux.ModeSession)
+			got, err := b.EnsureWindow(raw, "cz-repo/feat/x", []string{"claude", "--resume"}, mux.ModeSession)
 			if err != nil {
 				t.Fatalf("EnsureWindow: %v", err)
 			}
@@ -494,7 +505,8 @@ func TestEnsureWindow_SessionModeCreatesFreeSessionAndSwapsInHarness(t *testing.
 			want := [][]string{
 				{"attach", "-b", c.want, "options", "--show-startup-tips", "false"},
 				{"--session", c.want, "action", "close-pane", "--pane-id", "plugin_3"},
-				{"--session", c.want, "action", "new-pane", "--in-place", "--close-replaced-pane", "--pane-id", "terminal_0", "--cwd", canonical, "--", "claude", "--resume"},
+				{"--session", c.want, "action", "new-pane", "--in-place", "--close-replaced-pane", "--pane-id", "terminal_0", "--cwd", canonical, "--", "/opt/bin/fish"},
+				{"--session", c.want, "action", "new-pane", "--in-place", "--close-on-exit", "--pane-id", "terminal_5", "--cwd", canonical, "--", "claude", "--resume"},
 			}
 			if got := r.mutations(); !reflect.DeepEqual(got, want) {
 				t.Errorf("mutations =\n%v\nwant\n%v", got, want)
@@ -536,6 +548,7 @@ func TestEnsureWindow_SessionModeFitsNameToSocketPath(t *testing.T) {
 				responses: map[string]string{"list-sessions": sessionsList(c.sessions...), "list-panes": "[]"},
 				sessions: map[string]map[string]string{c.want: {"list-panes": panesJSON(t,
 					paneFixture{ID: 0, Tab: 0, Command: "/bin/zsh", Cwd: t.TempDir()},
+					paneFixture{ID: 1, Tab: 0, Command: "/bin/sh", Cwd: t.TempDir()},
 				)}},
 			}
 
@@ -831,6 +844,23 @@ func TestCapture_TabResolvesPreferredPane(t *testing.T) {
 	calls := r.callsTo("dump-screen")
 	if len(calls) != 1 || !slices.Equal(calls[0], []string{"action", "dump-screen", "-p", "terminal_5", "--ansi"}) {
 		t.Errorf("dump-screen calls = %v", calls)
+	}
+}
+
+func TestCapture_TabSkipsShellSuspendedUnderPane(t *testing.T) {
+	raw, _ := canonicalTempDir(t)
+	r := &fakeRunner{responses: map[string]string{"list-panes": panesJSON(t,
+		paneFixture{ID: 1, Tab: 2, Command: "/bin/zsh", Cwd: raw, Suppressed: true},
+		paneFixture{ID: 2, Tab: 2, Command: "sh", Started: "sh -c make", Cwd: raw},
+	)}}
+
+	if _, err := newBackend(t, r).Capture(ownSession(t)+":2", 5); err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+
+	calls := r.callsTo("dump-screen")
+	if len(calls) != 1 || !slices.Equal(calls[0], []string{"action", "dump-screen", "-p", "terminal_2", "--ansi"}) {
+		t.Errorf("dump-screen calls = %v, want the visible terminal_2", calls)
 	}
 }
 
