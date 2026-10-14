@@ -82,9 +82,15 @@ func (m *model) attachBadges(b mux.Backend) {
 	}
 }
 
+// handleFocusTick polls focus and badges, which refreshes the panes too. A
+// backend without badges (zellij) still refreshes its panes on the tick, so a
+// renamed tab reaches the agent list without waiting for a session event.
 func (m *model) handleFocusTick() tea.Cmd {
 	next := focusTickCmd(m.cfg.FocusPollEvery)
-	if m.badges == nil || m.focusPolling {
+	if m.badges == nil {
+		return tea.Batch(next, m.requestPanes())
+	}
+	if m.focusPolling {
 		return next
 	}
 
@@ -161,7 +167,7 @@ func quitOnHangup(p *tea.Program) (stop func()) {
 }
 
 func (m model) initialFocusTick() tea.Cmd {
-	if m.badges == nil {
+	if m.badges == nil && m.listPanes == nil {
 		return nil
 	}
 

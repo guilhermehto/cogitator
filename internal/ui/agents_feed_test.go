@@ -90,6 +90,33 @@ func TestFeedGroupsFinishedWorktreeAgentAsDone(t *testing.T) {
 	}
 }
 
+// zellij has no badges, so nothing else re-reads its panes between session
+// events.
+func TestFocusTickPicksUpRenamedTabWithoutBadges(t *testing.T) {
+	dir := t.TempDir()
+	rows := []settings.Row{worktreeRow(dir, settings.StateRunning, state.AttnActive)}
+	tabName := ""
+	m := feedTestModel(&fakeMux{available: true}, nil)
+	m.listPanes = func() ([]mux.Pane, error) {
+		return []mux.Pane{{PaneID: "s:terminal_1", WindowID: "s:1", SessionID: "s", Cwd: dir, Command: "opencode", CogDir: dir, TabName: tabName}}, nil
+	}
+	m = rebuildAgents(t, m, rows)
+
+	tabName = "LEX-456"
+	updated, cmd := m.Update(focusTickMsg{})
+	m = updated.(model)
+	for _, msg := range runBatchWithTimeout(cmd) {
+		if panes, ok := msg.(panesMsg); ok {
+			updated, _ = m.Update(panes)
+			m = updated.(model)
+		}
+	}
+
+	if len(m.agents) != 1 || m.agents[0].Tab != "LEX-456" {
+		t.Fatalf("agents = %+v, want the renamed tab LEX-456", m.agents)
+	}
+}
+
 func TestFeedFocusSelectsRunningAgentWindowForClientAndClearsBadge(t *testing.T) {
 	dir := t.TempDir()
 	rows := []settings.Row{worktreeRow(dir, settings.StateRunning, state.AttnFinished)}
