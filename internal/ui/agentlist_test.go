@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/guilhermehto/cogitator/internal/agents"
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
@@ -39,17 +41,32 @@ func typeKeys(l *agentList, keys ...string) agentListResult {
 	return result
 }
 
-func TestAgentListShowsGroupHeadersInOrder(t *testing.T) {
+func TestAgentListMatchesSidebarSectionsAndOldestFirstOrder(t *testing.T) {
+	at := func(branch string, group agents.Group, age time.Duration) agents.Agent {
+		a := worktreeAgent("/"+branch, "r", branch, group, state.AttnInactive, settings.StateRunning)
+		a.LastActivity = agentListNow.Add(-age)
+		if age == 0 {
+			a.LastActivity = time.Time{}
+		}
+		return a
+	}
 	l := newAgentList()
-	l.SetAgents(agentsInEveryGroup())
+	l.SetAgents([]agents.Agent{
+		at("ask-new", agents.GroupNeedsYou, time.Minute),
+		at("ask-old", agents.GroupNeedsYou, 10*time.Minute),
+		at("done", agents.GroupDone, 3*time.Minute),
+		at("unknown", agents.GroupWorking, 0),
+		at("idle", agents.GroupIdle, 8*time.Minute),
+		at("stopped", agents.GroupStopped, 20*time.Minute),
+	})
 
-	view := l.View(agentListNow, 100, 40)
+	view := ansi.Strip(l.View(agentListNow, 60, 40))
 
 	last := -1
-	for _, title := range []string{"Needs you · 1", "Done · 1", "Working · 1", "Idle · 1", "Stopped · 1"} {
-		idx := strings.Index(view, title)
+	for _, want := range []string{"Needs you · 2", "r·ask-old", "r·ask-new", "Agents · 4", "r·stopped", "r·idle", "r·done", "r·unknown"} {
+		idx := strings.Index(view, want)
 		if idx < 0 || idx < last {
-			t.Fatalf("header %q missing or out of order in:\n%s", title, view)
+			t.Fatalf("%q missing or out of order in:\n%s", want, view)
 		}
 		last = idx
 	}
@@ -188,8 +205,8 @@ func TestAgentListNavigationKeys(t *testing.T) {
 	l.SetAgents(agentsInEveryGroup())
 
 	typeKeys(&l, "G")
-	if l.cursorID != "/e" {
-		t.Fatalf("G cursor = %q, want /e", l.cursorID)
+	if l.cursorID != "/tmp/scratch" {
+		t.Fatalf("G cursor = %q, want /tmp/scratch", l.cursorID)
 	}
 
 	typeKeys(&l, "g", "g")

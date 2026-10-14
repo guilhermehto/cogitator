@@ -69,14 +69,14 @@ func TestHeaderShowsAllThreeTabs(t *testing.T) {
 	}
 }
 
-func TestAgentsViewListsDoneAgentUnderDoneGroup(t *testing.T) {
+func TestAgentsViewListsDoneAgentInTheAgentsSection(t *testing.T) {
 	m := agentsTabModel(t, &fakeMux{available: true}, &recordingViewMarker{})
 	m.view = viewAgents
 
 	out := m.View()
 
-	if !strings.Contains(out, "Done · 1") {
-		t.Fatalf("agents view missing Done group:\n%s", out)
+	if !strings.Contains(out, "Agents · 1") || strings.Contains(out, "Needs you") {
+		t.Fatalf("agents view should list the done agent under Agents only:\n%s", out)
 	}
 }
 

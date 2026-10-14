@@ -1,9 +1,11 @@
 package ui
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,22 +28,6 @@ const (
 // agentHomeDir is read once so row labels can abbreviate it to "~".
 var agentHomeDir, _ = os.UserHomeDir()
 
-var agentGroupTitles = map[agents.Group]string{
-	agents.GroupNeedsYou: "Needs you",
-	agents.GroupDone:     "Done",
-	agents.GroupWorking:  "Working",
-	agents.GroupIdle:     "Idle",
-	agents.GroupStopped:  "Stopped",
-}
-
-var agentGroupStyles = map[agents.Group]lipgloss.Style{
-	agents.GroupNeedsYou: attnPermStyle,
-	agents.GroupDone:     attnFinishedStyle,
-	agents.GroupWorking:  attnActiveStyle.Bold(true),
-	agents.GroupIdle:     headerStyle,
-	agents.GroupStopped:  headerStyle,
-}
-
 type agentListIntent int
 
 const (
@@ -59,9 +45,9 @@ type agentListResult struct {
 	agentID string
 }
 
-// agentList is the attention-ordered agent list shared by the pick popup and
-// the main TUI. The cursor is pinned to an agent ID so re-sorts never move it
-// off the agent the user is looking at.
+// agentList is the agent list shared by the pick popup and the main TUI. The
+// cursor is pinned to an agent ID so re-sorts never move it off the agent the
+// user is looking at.
 type agentList struct {
 	agents    []agents.Agent
 	cursorID  string
@@ -78,12 +64,35 @@ func newAgentList() agentList {
 	return agentList{filter: input}
 }
 
+// SetAgents lists agents the way the zellij sidebar does (set_agents in
+// zellij-plugin/src/app.rs): those that need you first, then the rest, each
+// part oldest activity first so whoever has waited longest sits on top, with
+// agents of unknown activity closing their part in cogitator's order.
 func (l *agentList) SetAgents(list []agents.Agent) {
-	l.agents = list
+	l.agents = slices.Clone(list)
+	slices.SortStableFunc(l.agents, func(a, b agents.Agent) int {
+		if c := cmp.Compare(agentListPart(a), agentListPart(b)); c != 0 {
+			return c
+		}
+		return a.LastActivity.Compare(b.LastActivity)
+	})
 	l.settleCursor()
 }
 
-// visible returns the agents matching the filter, keeping the group order.
+// agentListPart ranks needs-you agents first and, within each section,
+// agents with a known last activity before those without.
+func agentListPart(a agents.Agent) int {
+	part := 0
+	if a.Group != agents.GroupNeedsYou {
+		part = 2
+	}
+	if a.LastActivity.IsZero() {
+		part++
+	}
+	return part
+}
+
+// visible returns the agents matching the filter, keeping the list order.
 func (l agentList) visible() []agents.Agent {
 	query := l.filter.Value()
 	if strings.TrimSpace(query) == "" {
@@ -242,25 +251,40 @@ func (l agentList) selection(intent agentListIntent) agentListResult {
 }
 
 // View renders at most height lines, scrolled so the cursor row stays visible.
+// Like the zellij sidebar, agents that need you get their own section above
+// the rest; SetAgents keeps them at the front of the list.
 func (l agentList) View(now time.Time, width, height int) string {
 	list := l.visible()
+	split := 0
+	for split < len(list) && list[split].Group == agents.GroupNeedsYou {
+		split++
+	}
+	sections := []struct {
+		title string
+		style lipgloss.Style
+		rows  []agents.Agent
+	}{
+		{"Needs you", attnPermStyle, list[:split]},
+		{"Agents", headerStyle, list[split:]},
+	}
 
 	var lines []string
 	cursorLine := 0
-	counts := agentGroupCounts(list)
-	lastGroup := agents.Group(-1)
-	for _, a := range list {
-		if a.Group != lastGroup {
-			if lastGroup >= 0 {
-				lines = append(lines, "")
+	for _, s := range sections {
+		if len(s.rows) == 0 {
+			continue
+		}
+
+		if len(lines) > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, s.style.Render(s.title)+dimStyle.Render(fmt.Sprintf(" · %d", len(s.rows))))
+		for _, a := range s.rows {
+			if a.ID == l.cursorID {
+				cursorLine = len(lines)
 			}
-			lines = append(lines, agentGroupHeader(a.Group, counts[a.Group]))
-			lastGroup = a.Group
+			lines = append(lines, renderAgentRow(now, a, a.ID == l.cursorID, width))
 		}
-		if a.ID == l.cursorID {
-			cursorLine = len(lines)
-		}
-		lines = append(lines, renderAgentRow(now, a, a.ID == l.cursorID, width))
 	}
 
 	if len(list) == 0 {
@@ -272,19 +296,6 @@ func (l agentList) View(now time.Time, width, height int) string {
 	}
 
 	return strings.Join(windowLines(lines, cursorLine, height), "\n")
-}
-
-func agentGroupHeader(g agents.Group, count int) string {
-	return agentGroupStyles[g].Render(agentGroupTitles[g]) + dimStyle.Render(fmt.Sprintf(" · %d", count))
-}
-
-func agentGroupCounts(list []agents.Agent) map[agents.Group]int {
-	counts := make(map[agents.Group]int)
-	for _, a := range list {
-		counts[a.Group]++
-	}
-
-	return counts
 }
 
 func windowLines(lines []string, cursorLine, height int) []string {

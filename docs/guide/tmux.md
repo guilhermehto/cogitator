@@ -103,10 +103,12 @@ there is nothing to do it says so with a tmux message ("cogitator: nothing needs
 
 ## pick: popup list
 
-`prefix` + `a` opens a popup listing every agent, grouped needs you / done / working / idle /
-stopped with the same status icons as the TUI. On a popup at least 100 columns wide, the right
-half shows a live preview of the highlighted agent's pane: its status, harness, session title and
-the last lines of output, refreshed every second.
+`prefix` + `a` opens a popup listing every agent with the same status icons as the TUI: a
+"Needs you" section on top, then everyone else under "Agents", each oldest activity first so
+whoever has waited longest leads. The TUI's Agents tab and the zellij sidebar list them the same
+way. On a popup at least 100 columns wide, the right half shows a live preview of the highlighted
+agent's pane: its status, harness, session title and the last lines of output, refreshed every
+second.
 
 Rows lead with the name you gave the agent's window, e.g. `LEX-123 · ~/notes stray`, here, in the
 TUI's Agents tab and in the zellij sidebar. Names tmux or zellij generated (automatic rename,

@@ -87,7 +87,7 @@ func TestPickRendersFirstListReply(t *testing.T) {
 	m, _ = drive(t, m, pickListMsg{agents: agentsInEveryGroup()})
 
 	view := m.View()
-	for _, want := range []string{"Needs you", "Done", "Working", "Idle", "Stopped"} {
+	for _, want := range []string{"Needs you · 1", "Agents · 4"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view missing %q:\n%s", want, view)
 		}
@@ -233,11 +233,11 @@ func TestPreviewKeepsOneCaptureInFlightAndFinalSelectionWins(t *testing.T) {
 	}
 	m, _ = step(m, cmd())
 
-	if got := recorder.targets; len(got) != 2 || got[1] != "@/c" {
-		t.Fatalf("capture targets = %v, want second capture of @/c", got)
+	if got := recorder.targets; len(got) != 2 || got[1] != "@/e" {
+		t.Fatalf("capture targets = %v, want second capture of @/e", got)
 	}
-	if m.preview.agentID != "/c" {
-		t.Fatalf("preview agent = %q, want /c", m.preview.agentID)
+	if m.preview.agentID != "/e" {
+		t.Fatalf("preview agent = %q, want /e", m.preview.agentID)
 	}
 }
 

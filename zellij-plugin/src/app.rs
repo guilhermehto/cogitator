@@ -167,6 +167,7 @@ impl App {
     /// Agents that need the user come first, then the rest; each part runs
     /// oldest activity first, so whoever has waited longest sits on top.
     /// Agents without a timestamp close their part in cogitator's order.
+    /// The TUI's agentList.SetAgents (internal/ui/agentlist.go) mirrors this.
     fn set_agents(&mut self, mut agents: Vec<Agent>) {
         agents.sort_by_cached_key(|a| {
             let secs = a.last_activity_secs();
