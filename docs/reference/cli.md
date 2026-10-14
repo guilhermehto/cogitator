@@ -51,7 +51,8 @@ See [tmux integration](/guide/tmux#setup) for details. All `pick` and `next` fla
 
 ## Hook subcommands
 
-These are wired up during [agent setup](/guide/connect) and are not meant to be run by hand:
+The bare hook commands are wired up during [agent setup](/guide/connect) and are not meant to
+be run by hand; the `install` forms do that wiring:
 
 - `cogitator claude-hook`: receives Claude Code lifecycle events on stdin;
   `cogitator claude-hook install [--binary PATH] [--force]` merges the hooks into
@@ -61,14 +62,19 @@ These are wired up during [agent setup](/guide/connect) and are not meant to be 
   `~/.codex/hooks.json` (`$CODEX_HOME/hooks.json` when set). Trust them via `/hooks` in Codex.
 - `cogitator omp-hook`: receives omp lifecycle events; `cogitator omp-hook install [--force]`
   writes the omp extension to `~/.omp/agent/extensions/cogitator.ts`.
+- `cogitator hooks install [--binary PATH] [--force]`: runs the installers above for every
+  harness found on this machine, all with the same binary, and skips the rest without
+  creating their directories. It prints one line per harness (installed, updated, already
+  set up, yours and left alone, skipped, or the error), notes that opencode needs no hook,
+  and lists what to do next. It keeps going past a failing harness, then exits non-zero.
 
 All hook subcommands exit 0 silently when cogitator is not running. A closed monitor is the
 expected case, not a failure, so your agent is never blocked.
 
 Each hook also records the multiplexer pane it ran in (`$ZELLIJ_PANE_ID` or `$TMUX_PANE`).
 That is how several sessions in one directory each get their own Agents row on their own
-tab. A hook still pointing at an older cogitator binary cannot record its pane, so rebuild
-or reinstall after upgrading.
+tab. A hook still pointing at an older cogitator binary cannot record its pane, so re-run
+`cogitator hooks install` after upgrading.
 
 The Agents list shows only agents in the multiplexer cogitator runs in. A session whose
 recorded pane is in another multiplexer, or has closed, is left out. So is a session with no

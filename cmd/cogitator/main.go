@@ -17,6 +17,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/claudecode"
 	"github.com/guilhermehto/cogitator/internal/codex"
 	"github.com/guilhermehto/cogitator/internal/config"
+	"github.com/guilhermehto/cogitator/internal/hookinstall"
 	"github.com/guilhermehto/cogitator/internal/hookipc"
 	"github.com/guilhermehto/cogitator/internal/installkit"
 	"github.com/guilhermehto/cogitator/internal/logging"
@@ -279,8 +280,8 @@ func runZellijCommand(args []string) {
 }
 
 // runHookCommand routes the hook subcommands and reports whether name was
-// one. `<harness>-hook install` wires the harness; the bare form forwards a
-// hook event from stdin.
+// one. `<harness>-hook install` wires one harness and `hooks install` every
+// harness found; the bare `<harness>-hook` forwards a hook event from stdin.
 func runHookCommand(name string, args []string) bool {
 	switch name {
 	case "claude-hook":
@@ -289,6 +290,8 @@ func runHookCommand(name string, args []string) bool {
 		installOrForwardHook(args, runCodexHookInstall, codex.SendHook)
 	case "omp-hook":
 		installOrForwardHook(args, runOmpHookInstall, omp.SendHook)
+	case "hooks":
+		runHooksCommand(args)
 	default:
 		return false
 	}
@@ -353,6 +356,25 @@ func runCodexHookInstall(args []string) {
 	}
 	fmt.Printf("Installed Codex hooks: %s\n", found.Path)
 	fmt.Printf("Start codex, run /hooks, and trust `%s`.\n", installkit.HookCommand(bin, codex.HookSubcommand))
+}
+
+// runHooksCommand wires every harness found on this machine to one binary.
+func runHooksCommand(args []string) {
+	if len(args) == 0 || args[0] != "install" {
+		fmt.Fprintln(os.Stderr, "usage: cogitator hooks install [--binary PATH] [--force]")
+		os.Exit(2)
+	}
+
+	flags := flag.NewFlagSet("hooks install", flag.ExitOnError)
+	binary := flags.String("binary", "", "cogitator binary every hook runs (default: PATH lookup, then this executable)")
+	force := flags.Bool("force", false, "install even where cogitator is already wired by hand")
+	_ = flags.Parse(args[1:])
+
+	harnesses := hookinstall.Harnesses(config.Default())
+	if err := hookinstall.Install(harnesses, resolveHookBinary(*binary), *force, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 }
 
 // resolveHookBinary is the absolute cogitator binary hook commands run.

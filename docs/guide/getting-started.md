@@ -61,12 +61,23 @@ go run ./cmd/cogitator
 
 ## 3. Connect your coding agent
 
-Pick the harness you use; setup is a one-time step per machine:
+Wire every harness on this machine in one step:
+
+```sh
+cogitator hooks install
+```
+
+It finds Claude Code, Codex, and omp, points each one's hooks at the same cogitator binary,
+and skips the ones you don't have. It never sets anything up twice: a re-run changes no
+file, and hooks you already wired yourself are reported and left alone. Then follow the
+steps it prints: restart Claude Code and omp, and trust the hook via `/hooks` in Codex.
+
+To set up one harness at a time, or by hand:
 
 - [opencode](/guide/connect#opencode): launch with `--mdns`; discovered automatically.
-- [Claude Code](/guide/connect#claude-code): wire lifecycle hooks in `~/.claude/settings.json`.
-- [Codex](/guide/connect#codex): wire lifecycle hooks in `~/.codex/hooks.json`.
-- [omp](/guide/connect#omp): a single command, `cogitator omp-hook install`.
+- [Claude Code](/guide/connect#claude-code): `cogitator claude-hook install`.
+- [Codex](/guide/connect#codex): `cogitator codex-hook install`.
+- [omp](/guide/connect#omp): `cogitator omp-hook install`.
 
-Each harness offers an **automated** path (paste a prompt into the agent itself and let it do
-the setup) and a **manual** path (do it yourself, step by step).
+Each harness also offers an **automated** path (paste a prompt into the agent itself and let
+it do the setup) and a **manual** path (do it yourself, step by step).

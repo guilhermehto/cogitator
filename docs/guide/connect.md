@@ -3,6 +3,10 @@
 cogitator watches four harnesses. Each needs a one-time setup on the machine where the agent
 runs; after that, sessions appear in the dashboard automatically.
 
+`cogitator hooks install` does that setup for Claude Code, Codex, and omp in one step: it
+wires each harness it finds to the same cogitator binary and skips the rest. The sections
+below cover each harness on its own.
+
 Every harness has an **automated** path (paste a prompt into the agent itself and let it do
 the setup) and a **manual** path.
 
