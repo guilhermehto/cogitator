@@ -108,7 +108,9 @@ there is nothing to do it says so with a tmux message ("cogitator: nothing needs
 whoever has waited longest leads. The TUI's Agents tab and the zellij sidebar list them the same
 way. On a popup at least 100 columns wide, the right half shows a live preview of the highlighted
 agent's pane: its status, harness, session title and the last lines of output, refreshed every
-second.
+second. The output keeps the pane's text colours and attributes but drops background colours, so
+zellij's painted pane background does not turn the preview into a solid block. On zellij the
+colours come from `dump-screen --ansi`, which needs zellij 0.44.0 or later.
 
 Rows lead with the name you gave the agent's window, e.g. `LEX-123 · ~/notes stray`, here, in the
 TUI's Agents tab and in the zellij sidebar. Names tmux or zellij generated (automatic rename,
