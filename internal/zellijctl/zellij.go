@@ -15,10 +15,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/guilhermehto/cogitator/internal/harness"
 	"github.com/guilhermehto/cogitator/internal/mux"
@@ -262,7 +264,7 @@ func (b Backend) newTab(canonicalDir, name string, argv []string) (mux.Target, e
 // argv in dir: `attach -b` cannot take options and a command together, and
 // its shell starts in cogitator's cwd.
 func (b Backend) newSession(canonicalDir, name string, argv []string) (mux.Target, error) {
-	session, err := b.freeSessionName(strings.ReplaceAll(name, "/", "-"))
+	session, err := b.freeSessionName(strings.ReplaceAll(name, "/", "-"), b.socketDir())
 	if err != nil {
 		return "", err
 	}
@@ -286,8 +288,10 @@ func (b Backend) newSession(canonicalDir, name string, argv []string) (mux.Targe
 }
 
 // freeSessionName is base, else the first free base-2, base-3, …: `attach -b`
-// on a live or exited name attaches to or resurrects it instead.
-func (b Backend) freeSessionName(base string) (string, error) {
+// on a live or exited name attaches to or resurrects it instead. Each
+// candidate is cut so its socket path under socketDir fits sun_path, which
+// zellij otherwise rejects.
+func (b Backend) freeSessionName(base, socketDir string) (string, error) {
 	sessions, err := b.listSessions()
 	if err != nil {
 		return "", err
@@ -298,11 +302,64 @@ func (b Backend) freeSessionName(base string) (string, error) {
 		taken[s.name] = true
 	}
 
-	name := base
-	for n := 2; taken[name]; n++ {
-		name = base + "-" + strconv.Itoa(n)
+	maxLen := socketPathMax() - len(socketDir) - 2
+	for n := 1; ; n++ {
+		suffix := ""
+		if n > 1 {
+			suffix = "-" + strconv.Itoa(n)
+		}
+		stem := truncateName(base, maxLen-len(suffix))
+		if stem == "" {
+			return "", fmt.Errorf("zellijctl: no room for session %q under zellij socket dir %s; set ZELLIJ_SOCKET_DIR to a shorter path", base, socketDir)
+		}
+		if name := stem + suffix; !taken[name] {
+			return name, nil
+		}
 	}
-	return name, nil
+}
+
+// socketPathMax is sizeof(sockaddr_un.sun_path); zellij rejects a session
+// whose socket path is not shorter (zellij-utils consts.rs, cli.rs).
+func socketPathMax() int {
+	if runtime.GOOS == "darwin" {
+		return 104
+	}
+	return 108
+}
+
+// socketDir mirrors zellij-utils' ZELLIJ_SOCK_DIR for the environment the
+// spawned zellij inherits: $ZELLIJ_SOCKET_DIR, else $XDG_RUNTIME_DIR/zellij
+// on Linux, else $TMPDIR/zellij-<uid>, plus the contract version dir.
+func (b Backend) socketDir() string {
+	dir := b.getenv("ZELLIJ_SOCKET_DIR")
+	if dir == "" {
+		if xdg := b.getenv("XDG_RUNTIME_DIR"); runtime.GOOS == "linux" && filepath.IsAbs(xdg) {
+			dir = filepath.Join(xdg, "zellij")
+		} else {
+			tmp := b.getenv("TMPDIR")
+			if tmp == "" {
+				tmp = "/tmp"
+			}
+			dir = filepath.Join(tmp, "zellij-"+strconv.Itoa(os.Getuid()))
+		}
+	}
+	return filepath.Join(dir, "contract_version_1")
+}
+
+// truncateName cuts name to at most maxLen bytes on a rune boundary, without
+// a trailing separator.
+func truncateName(name string, maxLen int) string {
+	if len(name) <= maxLen {
+		return name
+	}
+	if maxLen <= 0 {
+		return ""
+	}
+	cut := maxLen
+	for cut > 0 && !utf8.RuneStart(name[cut]) {
+		cut--
+	}
+	return strings.TrimRight(name[:cut], "-_.")
 }
 
 // initialPane waits for a new session's shell, which materialises shortly

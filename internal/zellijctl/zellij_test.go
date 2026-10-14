@@ -503,6 +503,73 @@ func TestEnsureWindow_SessionModeCreatesFreeSessionAndSwapsInHarness(t *testing.
 	}
 }
 
+// withSocketBudget points the backend's ZELLIJ_SOCKET_DIR at a directory
+// that leaves room for session names of exactly budget bytes.
+func withSocketBudget(b Backend, budget int) Backend {
+	dir := "/" + strings.Repeat("d", socketPathMax()-len("/contract_version_1")-3-budget)
+	env := b.Getenv
+	b.Getenv = func(k string) string {
+		if k == "ZELLIJ_SOCKET_DIR" {
+			return dir
+		}
+		return env(k)
+	}
+	return b
+}
+
+func TestEnsureWindow_SessionModeFitsNameToSocketPath(t *testing.T) {
+	cases := []struct {
+		name     string
+		worktree string
+		sessions []string
+		want     string
+	}{
+		{"cut to budget", "cz-repo/feat/improve-setup", nil, "cz-repo-feat"},
+		{"suffix stays in budget", "cz-repo/feat/improve-setup", []string{"cz-repo-feat"}, "cz-repo-fe-2"},
+		{"no trailing separator", "cz-repo/fea/xyz", nil, "cz-repo-fea"},
+		{"short name untouched", "cz/x", nil, "cz-x"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			raw, _ := canonicalTempDir(t)
+			r := &fakeRunner{
+				responses: map[string]string{"list-sessions": sessionsList(c.sessions...), "list-panes": "[]"},
+				sessions: map[string]map[string]string{c.want: {"list-panes": panesJSON(t,
+					paneFixture{ID: 0, Tab: 0, Command: "/bin/zsh", Cwd: t.TempDir()},
+				)}},
+			}
+
+			got, err := withSocketBudget(newBackend(t, r), 12).EnsureWindow(raw, c.worktree, []string{"claude"}, mux.ModeSession)
+			if err != nil {
+				t.Fatalf("EnsureWindow: %v", err)
+			}
+			if want := mux.Target(c.want + ":0"); got != want {
+				t.Errorf("EnsureWindow = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestTruncateName_KeepsRunesWhole(t *testing.T) {
+	// é is two bytes: a 7-byte cut would split it.
+	if got := truncateName("ab-café", 7); got != "ab-caf" {
+		t.Errorf("truncateName = %q, want %q", got, "ab-caf")
+	}
+}
+
+func TestEnsureWindow_SessionModeFailsWithoutRoomForAName(t *testing.T) {
+	raw, _ := canonicalTempDir(t)
+	r := &fakeRunner{responses: map[string]string{"list-sessions": "", "list-panes": "[]"}}
+
+	_, err := withSocketBudget(newBackend(t, r), 0).EnsureWindow(raw, "repo/x", []string{"claude"}, mux.ModeSession)
+	if err == nil || !strings.Contains(err.Error(), "ZELLIJ_SOCKET_DIR") {
+		t.Fatalf("EnsureWindow error = %v, want a ZELLIJ_SOCKET_DIR hint", err)
+	}
+	if got := r.mutations(); len(got) != 0 {
+		t.Errorf("mutations = %v, want none", got)
+	}
+}
+
 func TestEnsureWindow_SessionModeDeletesSessionWhenSwapFails(t *testing.T) {
 	raw, _ := canonicalTempDir(t)
 	r := &fakeRunner{
