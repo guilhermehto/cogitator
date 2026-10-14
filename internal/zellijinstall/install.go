@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -52,6 +53,18 @@ var (
 	kdlProperty       = regexp.MustCompile(kdlPropertyPattern)
 	bindNode          = regexp.MustCompile(`^\s*bind((?:\s+` + kdlStringPattern + `)+)`)
 	quotedArg         = regexp.MustCompile(`"((?:[^"\\]|\\.)*)"`)
+	defaultLayoutArg  = regexp.MustCompile(`^\s*default_layout\s+(` + kdlStringPattern + `)`)
+)
+
+const (
+	cogitatorStringPattern = `"(?:[^"\\]|\\.)*cogitator(?:[^"\\]|\\.)*"`
+	cogitatorWasmPattern   = `"file:(?:[^"\\]|\\.)*cogitator(?:[^"\\]|\\.)*\.wasm"`
+)
+
+var (
+	foreignRunAction    = regexp.MustCompile(`\bRun\s+` + cogitatorStringPattern + `\s+"(?:pick|next|agents)"`)
+	foreignPluginAction = regexp.MustCompile(`\b(?:MessagePlugin|LaunchOrFocusPlugin|LaunchPlugin)\s+` + cogitatorWasmPattern)
+	cogitatorWasm       = regexp.MustCompile(cogitatorWasmPattern)
 )
 
 // bindMode is the zellij input mode the binds live in and the mode each
@@ -86,7 +99,8 @@ type keyChoice struct {
 	key  string
 }
 
-// Options are the user-facing flags shared by Install and Uninstall.
+// Options are the user-facing flags shared by Install, Check and Uninstall.
+// Force installs even when the user already wired cogitator by hand.
 type Options struct {
 	NextKey    string
 	PickKey    string
@@ -95,6 +109,7 @@ type Options struct {
 	ConfigPath string
 	Binary     string
 	DryRun     bool
+	Force      bool
 }
 
 // Installer holds the environment seams so tests never read the real home,
@@ -108,73 +123,193 @@ type Installer struct {
 	Out        io.Writer
 }
 
+// Report is how the config's cogitator wiring compares with what Install
+// would write for the same options.
+type Report struct {
+	Keybinds installkit.Status
+	Sidebar  installkit.Status
+}
+
+// target is what Install and Check derive from the options and the current
+// config before deciding anything.
+type target struct {
+	requested  Options
+	opts       Options
+	confPath   string
+	layoutsDir string
+	existing   string
+	mode       fs.FileMode
+	stripped   string
+	hadBlock   bool
+	spec       bindSpec
+}
+
+func (i Installer) load(opts Options) (target, error) {
+	t := target{requested: opts, opts: opts}
+	if err := normalizeKeys(&t.opts); err != nil {
+		return target{}, err
+	}
+
+	plugin, err := resolvePlugin(t.opts.Plugin)
+	if err != nil {
+		return target{}, err
+	}
+
+	binary, err := installkit.ResolveBinary(t.opts.Binary, i.LookPath, i.Executable)
+	if err != nil {
+		return target{}, err
+	}
+
+	t.confPath, err = installkit.ResolveSymlinks(i.configPath(opts.ConfigPath))
+	if err != nil {
+		return target{}, err
+	}
+
+	t.existing, t.mode, err = installkit.ReadConfig(t.confPath)
+	if err != nil {
+		return target{}, err
+	}
+
+	t.stripped, t.hadBlock, err = withoutOwnedBlock(t.existing)
+	if err != nil {
+		return target{}, fmt.Errorf("%s: %w", t.confPath, err)
+	}
+
+	layoutPath := i.layoutFile(opts.ConfigPath)
+	t.layoutsDir = filepath.Dir(layoutPath)
+	t.spec = bindSpec{binary: binary, nextKey: t.opts.NextKey, pickKey: t.opts.PickKey, plugin: plugin, sidebarKey: t.opts.SidebarKey}
+	if plugin != "" {
+		t.spec.layoutPath = layoutPath
+	}
+
+	return t, nil
+}
+
+// Check reports, without writing anything, whether the keybinds and the
+// sidebar are missing, current, stale, or wired by hand outside cogitator's
+// blocks.
+func (i Installer) Check(opts Options) (Report, error) {
+	t, err := i.load(opts)
+	if err != nil {
+		return Report{}, err
+	}
+
+	keybinds, err := t.keybindsStatus()
+	if err != nil {
+		return Report{}, fmt.Errorf("%s: %w", t.confPath, err)
+	}
+
+	return Report{Keybinds: keybinds, Sidebar: t.sidebarStatus()}, nil
+}
+
+func (t target) keybindsStatus() (installkit.Status, error) {
+	if status, ok := foreignKeybinds(t.confPath, t.existing); ok {
+		return status, nil
+	}
+
+	found, _ := ownedBlockTexts(t.existing)
+	if found == "" {
+		return installkit.Status{State: installkit.Missing, Path: t.confPath}, nil
+	}
+
+	spec := t.spec
+	_, want, err := withKeybindsBlock(t.stripped, &spec)
+	if err != nil {
+		return installkit.Status{}, err
+	}
+
+	return managedStatus(t.confPath, found == want), nil
+}
+
+func (t target) sidebarStatus() installkit.Status {
+	if t.spec.plugin == "" {
+		return installkit.Status{State: installkit.Unavailable, Detail: "no plugin requested"}
+	}
+
+	if status, ok := foreignSidebar(t.confPath, t.existing, t.layoutsDir); ok {
+		return status
+	}
+
+	_, found := ownedBlockTexts(t.existing)
+	if found == "" {
+		return installkit.Status{State: installkit.Missing, Path: t.confPath}
+	}
+
+	current := found == layoutBlock(t.spec.layoutPath) && fileHolds(t.spec.layoutPath, sidebarLayout(t.spec))
+
+	return managedStatus(t.confPath, current)
+}
+
+func managedStatus(path string, current bool) installkit.Status {
+	if current {
+		return installkit.Status{State: installkit.Current, Path: path}
+	}
+
+	return installkit.Status{State: installkit.Stale, Path: path}
+}
+
+// refuseForeign stops an install that would duplicate cogitator wiring the
+// user wrote by hand.
+func (t target) refuseForeign() error {
+	if status, ok := foreignKeybinds(t.confPath, t.existing); ok {
+		return &installkit.ForeignError{Status: status}
+	}
+
+	if t.spec.plugin == "" {
+		return nil
+	}
+
+	if status, ok := foreignSidebar(t.confPath, t.existing, t.layoutsDir); ok {
+		return &installkit.ForeignError{Status: status}
+	}
+
+	return nil
+}
+
 // Install writes (or replaces) the owned blocks in the user's config.kdl and,
 // with a plugin, the sidebar layout. zellij hot-reloads the file, so running
 // sessions pick up the keybinds; the layout applies to sessions created
 // afterwards.
 func (i Installer) Install(opts Options) error {
-	requested := opts
-	if err := normalizeKeys(&opts); err != nil {
-		return err
-	}
-
-	plugin, err := resolvePlugin(opts.Plugin)
+	t, err := i.load(opts)
 	if err != nil {
 		return err
 	}
 
-	binary, err := installkit.ResolveBinary(opts.Binary, i.LookPath, i.Executable)
+	if !opts.Force {
+		if err := t.refuseForeign(); err != nil {
+			return err
+		}
+	}
+
+	updated, block, err := withOwnedBlock(t.stripped, &t.spec)
 	if err != nil {
-		return err
+		return fmt.Errorf("%s: %w", t.confPath, err)
 	}
 
-	confPath, err := installkit.ResolveSymlinks(i.configPath(opts.ConfigPath))
-	if err != nil {
-		return err
+	if err := checkDefaultKeysFree(t.stripped, t.spec.mode.name, defaultedKeys(t.requested, t.opts)); err != nil {
+		return fmt.Errorf("%s: %w", t.confPath, err)
 	}
 
-	existing, mode, err := installkit.ReadConfig(confPath)
-	if err != nil {
-		return err
-	}
-
-	stripped, hadBlock, err := withoutOwnedBlock(existing)
-	if err != nil {
-		return fmt.Errorf("%s: %w", confPath, err)
-	}
-
-	spec := bindSpec{binary: binary, nextKey: opts.NextKey, pickKey: opts.PickKey, plugin: plugin, sidebarKey: opts.SidebarKey}
-	if plugin != "" {
-		spec.layoutPath = i.layoutFile(opts.ConfigPath)
-	}
-	updated, block, err := withOwnedBlock(stripped, &spec)
-	if err != nil {
-		return fmt.Errorf("%s: %w", confPath, err)
-	}
-
-	if err := checkDefaultKeysFree(stripped, spec.mode.name, defaultedKeys(requested, opts)); err != nil {
-		return fmt.Errorf("%s: %w", confPath, err)
-	}
-
-	layout := sidebarLayout(spec)
+	layout := sidebarLayout(t.spec)
 	if opts.DryRun {
-		i.printDryRun(confPath, block, spec.layoutPath, layout)
+		i.printDryRun(t.confPath, block, t.spec.layoutPath, layout)
 		return nil
 	}
 
-	if updated == existing && fileHolds(spec.layoutPath, layout) {
-		fmt.Fprintf(i.Out, "%s already has the cogitator keybinds\n", confPath)
+	if updated == t.existing && fileHolds(t.spec.layoutPath, layout) {
+		fmt.Fprintf(i.Out, "cogitator keybinds already set up in %s\n", t.confPath)
 		return nil
 	}
 
-	if err := writeLayout(spec.layoutPath, layout); err != nil {
+	if err := writeLayout(t.spec.layoutPath, layout); err != nil {
 		return err
 	}
 
-	if err := installkit.WriteFileAtomic(confPath, []byte(updated), mode); err != nil {
-		return fmt.Errorf("write %s: %w", confPath, err)
+	if err := installkit.WriteFileAtomic(t.confPath, []byte(updated), t.mode); err != nil {
+		return fmt.Errorf("write %s: %w", t.confPath, err)
 	}
-	fmt.Fprintln(i.Out, installSummary(confPath, hadBlock, spec))
+	fmt.Fprintln(i.Out, installSummary(t.confPath, t.hadBlock, t.spec))
 
 	return nil
 }
@@ -585,14 +720,143 @@ func withOwnedBlock(content string, spec *bindSpec) (string, string, error) {
 		return "", "", fmt.Errorf("line %d: default_layout is already set; remove it so cogitator can set its sidebar layout, or install without --plugin", line)
 	}
 
-	layoutBlock := beginLine + "\n" +
-		"default_layout " + kdlQuote(spec.layoutPath) + "\n" +
-		endMarker + "\n"
+	layout := layoutBlock(spec.layoutPath)
 	if !strings.HasSuffix(updated, "\n") {
 		updated += "\n"
 	}
 
-	return updated + layoutBlock, block + layoutBlock, nil
+	return updated + layout, block + layout, nil
+}
+
+func layoutBlock(layoutPath string) string {
+	return beginLine + "\n" +
+		"default_layout " + kdlQuote(layoutPath) + "\n" +
+		endMarker + "\n"
+}
+
+// ownedBlockTexts returns the first owned keybinds block and the first owned
+// default_layout block, each "" when absent. The layout block is the one
+// holding a default_layout line.
+func ownedBlockTexts(content string) (string, string) {
+	keybinds, layout := "", ""
+	for _, block := range ownedBlocks(content) {
+		switch {
+		case hasDefaultLayoutLine(block):
+			if layout == "" {
+				layout = block
+			}
+		case keybinds == "":
+			keybinds = block
+		}
+	}
+
+	return keybinds, layout
+}
+
+func hasDefaultLayoutLine(block string) bool {
+	for _, line := range strings.SplitAfter(block, "\n") {
+		if defaultLayoutNode.MatchString(line) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// ownedBlocks returns the full text of each marker-delimited block,
+// markers included.
+func ownedBlocks(content string) []string {
+	var blocks []string
+	var block strings.Builder
+	inBlock := false
+
+	for _, line := range strings.SplitAfter(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !inBlock && !strings.HasPrefix(trimmed, beginMarker) {
+			continue
+		}
+
+		inBlock = true
+		block.WriteString(line)
+		if trimmed == endMarker {
+			blocks = append(blocks, block.String())
+			block.Reset()
+			inBlock = false
+		}
+	}
+
+	return blocks
+}
+
+// foreignKeybinds finds a line outside cogitator's blocks and comments that
+// runs cogitator or messages its plugin.
+func foreignKeybinds(confPath, content string) (installkit.Status, bool) {
+	inBlock, inComment := false, false
+
+	for idx, line := range strings.SplitAfter(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		commented := inComment || strings.HasPrefix(trimmed, "//")
+		_, inComment = braceDelta(line, inComment)
+
+		switch {
+		case !inBlock && strings.HasPrefix(trimmed, beginMarker):
+			inBlock = true
+		case inBlock:
+			inBlock = trimmed != endMarker
+		case commented:
+		case foreignRunAction.MatchString(line) || foreignPluginAction.MatchString(line):
+			return installkit.Status{State: installkit.Foreign, Path: confPath, Line: idx + 1, Detail: trimmed}, true
+		}
+	}
+
+	return installkit.Status{}, false
+}
+
+// foreignSidebar finds a top-level default_layout outside cogitator's blocks
+// whose layout file loads a cogitator plugin.
+func foreignSidebar(confPath, content, layoutsDir string) (installkit.Status, bool) {
+	var found installkit.Status
+	inBlock := false
+
+	eachTopLevelLine(strings.SplitAfter(content, "\n"), func(idx int, line string) bool {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case !inBlock && strings.HasPrefix(trimmed, beginMarker):
+			inBlock = true
+		case inBlock:
+			inBlock = trimmed != endMarker
+		default:
+			if file, ok := cogitatorLayout(line, layoutsDir); ok {
+				detail := fmt.Sprintf("%s loads the cogitator plugin from %s", trimmed, file)
+				found = installkit.Status{State: installkit.Foreign, Path: confPath, Line: idx + 1, Detail: detail}
+				return false
+			}
+		}
+		return true
+	})
+
+	return found, found.State == installkit.Foreign
+}
+
+// cogitatorLayout resolves a default_layout line's value the way zellij does
+// and reports whether that layout file loads a cogitator plugin.
+func cogitatorLayout(line, layoutsDir string) (string, bool) {
+	match := defaultLayoutArg.FindStringSubmatch(line)
+	if match == nil {
+		return "", false
+	}
+
+	file := quotedArgs(match[1])[0]
+	if !filepath.IsAbs(file) {
+		if filepath.Ext(file) == "" {
+			file += ".kdl"
+		}
+		file = filepath.Join(layoutsDir, file)
+	}
+
+	content, err := os.ReadFile(file)
+
+	return file, err == nil && cogitatorWasm.Match(content)
 }
 
 // withKeybindsBlock inserts the block right after the opening line of the

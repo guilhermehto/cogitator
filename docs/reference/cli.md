@@ -30,10 +30,22 @@ These drive the [tmux integration](/guide/tmux) and talk to the running TUI:
   you. Always exits 0 and prints nothing, reporting through a tmux message; exits 2 only on
   usage errors.
 
-- `cogitator tmux install [--next-key KEY] [--pick-key KEY] [--config PATH] [--binary PATH] [--dry-run] [--no-reload]`:
+- `cogitator tmux install [--next-key KEY] [--pick-key KEY] [--config PATH] [--binary PATH] [--dry-run] [--no-reload] [--force]`:
   write the key bindings to a cogitator-owned file and add one `source-file -q` line to your
   tmux config. Defaults: `--next-key Space`, `--pick-key a`.
 - `cogitator tmux uninstall [--config PATH] [--dry-run] [--no-reload]`: undo the install.
+- `cogitator zellij install [--next-key KEY] [--pick-key KEY] [--plugin WASM] [--sidebar-key KEY] [--config PATH] [--binary PATH] [--dry-run] [--force]`:
+  add the next/pick keybinds to a cogitator-owned block in your zellij `config.kdl`. With
+  `--plugin`, also bind the sidebar key and dock the plugin in new sessions through a
+  cogitator-owned layout.
+- `cogitator zellij uninstall [--config PATH] [--dry-run]`: remove the owned blocks and layout.
+
+The installers never set anything up twice. If cogitator's own wiring is already current,
+a re-run prints `already set up` and writes nothing. If it points at an older binary,
+plugin, or keys, the re-run updates it in place. If you wired cogitator yourself (a
+hand-written bind, a layout that loads the plugin, an edited omp extension), the installer
+names the file and line, leaves it alone, and exits non-zero. Pass `--force` to install
+anyway.
 
 See [tmux integration](/guide/tmux#setup) for details. All `pick` and `next` flags are optional and fall back to tmux's current client, window, and session.
 
@@ -43,8 +55,8 @@ These are wired up during [agent setup](/guide/connect) and are not meant to be 
 
 - `cogitator claude-hook`: receives Claude Code lifecycle events on stdin.
 - `cogitator codex-hook`: receives Codex lifecycle events on stdin.
-- `cogitator omp-hook`: receives omp lifecycle events; `cogitator omp-hook install` writes
-  the omp extension to `~/.omp/agent/extensions/cogitator.ts`.
+- `cogitator omp-hook`: receives omp lifecycle events; `cogitator omp-hook install [--force]`
+  writes the omp extension to `~/.omp/agent/extensions/cogitator.ts`.
 
 All hook subcommands exit 0 silently when cogitator is not running. A closed monitor is the
 expected case, not a failure, so your agent is never blocked.

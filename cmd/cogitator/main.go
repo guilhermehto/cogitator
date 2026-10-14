@@ -18,6 +18,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/codex"
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/hookipc"
+	"github.com/guilhermehto/cogitator/internal/installkit"
 	"github.com/guilhermehto/cogitator/internal/logging"
 	"github.com/guilhermehto/cogitator/internal/omp"
 	"github.com/guilhermehto/cogitator/internal/settings"
@@ -76,20 +77,9 @@ func main() {
 
 	if len(os.Args) > 1 && os.Args[1] == "omp-hook" {
 		// `omp-hook install` writes the live-attention extension into the omp
-		// extensions directory, baking in this binary's absolute path; the bare
-		// form forwards a hook event from stdin.
+		// extensions directory; the bare form forwards a hook event from stdin.
 		if len(os.Args) > 2 && os.Args[2] == "install" {
-			exe, err := os.Executable()
-			if err != nil {
-				exe = "" // fall back to "cogitator" on PATH
-			}
-			path, err := omp.InstallExtension("", exe)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
-			}
-			fmt.Printf("Installed omp live-attention extension: %s\n", path)
-			fmt.Println("Restart any running omp sessions for it to take effect.")
+			runOmpHookInstall(os.Args[3:])
 			return
 		}
 		if err := omp.SendHook(context.Background(), hookStdin()); err != nil {
@@ -241,6 +231,7 @@ func runTmuxCommand(args []string) {
 		flags.StringVar(&opts.NextKey, "next-key", tmuxinstall.DefaultNextKey, "prefix key that jumps to the next agent needing attention")
 		flags.StringVar(&opts.PickKey, "pick-key", tmuxinstall.DefaultPickKey, "prefix key that opens the agent picker")
 		flags.StringVar(&opts.Binary, "binary", "", "cogitator binary to bind (default: PATH lookup, then this executable)")
+		flags.BoolVar(&opts.Force, "force", false, "install even when cogitator is already bound outside the owned file")
 	}
 	flags.Parse(args[1:])
 
@@ -298,6 +289,7 @@ func runZellijCommand(args []string) {
 		flags.StringVar(&opts.Binary, "binary", "", "cogitator binary to bind (default: PATH lookup, then this executable)")
 		flags.StringVar(&opts.Plugin, "plugin", "", "cogitator zellij plugin wasm to dock as a sidebar in new sessions (sets default_layout; default: no sidebar)")
 		flags.StringVar(&opts.SidebarKey, "sidebar-key", "", fmt.Sprintf("normal-mode key that focuses the cogitator sidebar (needs --plugin; default %q)", zellijinstall.DefaultSidebarKey))
+		flags.BoolVar(&opts.Force, "force", false, "install even when the config already wires cogitator outside the owned block")
 	}
 	_ = flags.Parse(args[1:])
 
@@ -325,6 +317,32 @@ func runZellijCommand(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// runOmpHookInstall writes the omp extension with this binary's absolute path
+// baked in, so omp does not need cogitator on its PATH.
+func runOmpHookInstall(args []string) {
+	flags := flag.NewFlagSet("omp-hook install", flag.ExitOnError)
+	force := flags.Bool("force", false, "install even when cogitator is already wired into omp by hand")
+	_ = flags.Parse(args)
+
+	exe, err := os.Executable()
+	if err != nil {
+		exe = ""
+	}
+
+	found, err := omp.InstallExtension("", exe, *force)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	if found.State == installkit.Current {
+		fmt.Printf("omp live-attention extension already set up: %s\n", found.Path)
+		return
+	}
+	fmt.Printf("Installed omp live-attention extension: %s\n", found.Path)
+	fmt.Println("Restart any running omp sessions for it to take effect.")
 }
 
 // runAgentsCommand exposes the running TUI's agent feed to callers that cannot

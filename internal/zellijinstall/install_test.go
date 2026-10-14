@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/guilhermehto/cogitator/internal/installkit"
 )
 
 const testBinary = "/opt/bin/cogitator"
@@ -142,7 +144,7 @@ func TestInstallTwiceKeepsSingleBlock(t *testing.T) {
 	if got := readFile(t, env.conf); got != first {
 		t.Fatalf("second install changed the file:\n%s", got)
 	}
-	if !strings.Contains(env.out.String(), "already has the cogitator keybinds") {
+	if !strings.Contains(env.out.String(), "already set up") {
 		t.Fatalf("unexpected output: %q", env.out.String())
 	}
 
@@ -965,5 +967,249 @@ func TestConfigLookupOrder(t *testing.T) {
 				t.Fatalf("configPath = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// handWiredPick binds cogitator's picker in normal mode outside any
+// cogitator block, as a user would before running the installer.
+const handWiredPick = `keybinds {
+    // bind "x" { Run "cogitator" "next"; }
+    normal {
+        bind "a" { Run "cogitator" "pick" { floating true; }; SwitchToMode "locked"; }
+    }
+}
+default_mode "locked"
+`
+
+const handWiredPickLine = 4
+
+// writeForeignSidebar points the user's own default_layout at a layout file
+// that loads a cogitator wasm, without cogitator's managed header.
+func writeForeignSidebar(t *testing.T, env testEnv) string {
+	t.Helper()
+
+	original := userShapedConfig + "default_layout \"cogitator\"\n"
+	writeFile(t, env.conf, original, 0o644)
+	layout := "layout {\n    pane size=40 {\n        plugin location=\"file:/x/cogitator-zellij.wasm\"\n    }\n    pane\n}\n"
+	writeFile(t, filepath.Join(filepath.Dir(env.conf), "layouts", "cogitator.kdl"), layout, 0o644)
+
+	return original
+}
+
+func TestCheckReportsKeybindsState(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, env testEnv)
+		want  installkit.State
+		line  int
+	}{
+		{"missing without a block", func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+		}, installkit.Missing, 0},
+		{"current after install", func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(Options{}); err != nil {
+				t.Fatal(err)
+			}
+		}, installkit.Current, 0},
+		{"stale after install with other keys", func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(Options{PickKey: "A"}); err != nil {
+				t.Fatal(err)
+			}
+		}, installkit.Stale, 0},
+		{"stale after install with another binary", func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(Options{Binary: "/old/cogitator"}); err != nil {
+				t.Fatal(err)
+			}
+		}, installkit.Stale, 0},
+		{"foreign hand-written bind", func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, handWiredPick, 0o644)
+		}, installkit.Foreign, handWiredPickLine},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			tc.setup(t, env)
+			before := readFile(t, env.conf)
+
+			report, err := env.installer.Check(Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			conf := resolvedPath(t, env.conf)
+			if report.Keybinds.State != tc.want || report.Keybinds.Line != tc.line || report.Keybinds.Path != conf {
+				t.Fatalf("keybinds = %+v, want %v at line %d of %s", report.Keybinds, tc.want, tc.line, conf)
+			}
+			if report.Sidebar.State != installkit.Unavailable {
+				t.Fatalf("sidebar without plugin = %+v, want unavailable", report.Sidebar)
+			}
+			if got := readFile(t, env.conf); got != before {
+				t.Fatalf("check changed the config:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestCheckReportsSidebarState(t *testing.T) {
+	wasm := writePlugin(t)
+	otherWasm := filepath.Join(t.TempDir(), "cogitator-zellij.wasm")
+	writeFile(t, otherWasm, "\x00asm", 0o644)
+
+	cases := []struct {
+		name   string
+		plugin string
+		setup  func(t *testing.T, env testEnv)
+		want   installkit.State
+	}{
+		{"unavailable without plugin", "", func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+		}, installkit.Unavailable},
+		{"missing without a layout block", wasm, func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(Options{}); err != nil {
+				t.Fatal(err)
+			}
+		}, installkit.Missing},
+		{"current after install", wasm, func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(Options{Plugin: wasm}); err != nil {
+				t.Fatal(err)
+			}
+		}, installkit.Current},
+		{"stale with another plugin", wasm, func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(Options{Plugin: otherWasm}); err != nil {
+				t.Fatal(err)
+			}
+		}, installkit.Stale},
+		{"stale with deleted layout", wasm, func(t *testing.T, env testEnv) {
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(Options{Plugin: wasm}); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(filepath.Dir(env.conf), "layouts", "cogitator.kdl")); err != nil {
+				t.Fatal(err)
+			}
+		}, installkit.Stale},
+		{"foreign user default_layout", wasm, func(t *testing.T, env testEnv) {
+			writeForeignSidebar(t, env)
+		}, installkit.Foreign},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			tc.setup(t, env)
+
+			report, err := env.installer.Check(Options{Plugin: tc.plugin})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if report.Sidebar.State != tc.want {
+				t.Fatalf("sidebar = %+v, want %v", report.Sidebar, tc.want)
+			}
+		})
+	}
+}
+
+func TestCheckSidebarForeignNamesDefaultLayoutLineAndFile(t *testing.T) {
+	env := newTestEnv(t)
+	writeForeignSidebar(t, env)
+
+	report, err := env.installer.Check(Options{Plugin: writePlugin(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantLine := strings.Count(userShapedConfig, "\n") + 1
+	layoutPath := filepath.Join(filepath.Dir(env.conf), "layouts", "cogitator.kdl")
+	if report.Sidebar.Path != resolvedPath(t, env.conf) || report.Sidebar.Line != wantLine || !strings.Contains(report.Sidebar.Detail, layoutPath) {
+		t.Fatalf("sidebar = %+v, want line %d naming %s", report.Sidebar, wantLine, layoutPath)
+	}
+}
+
+func resolvedPath(t *testing.T, path string) string {
+	t.Helper()
+
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return resolved
+}
+
+func TestCheckIgnoresUserDefaultLayoutWithoutCogitator(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, userShapedConfig+"default_layout \"compact\"\n", 0o644)
+	writeFile(t, filepath.Join(filepath.Dir(env.conf), "layouts", "compact.kdl"), "layout {\n    pane\n}\n", 0o644)
+
+	report, err := env.installer.Check(Options{Plugin: writePlugin(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.Sidebar.State != installkit.Missing {
+		t.Fatalf("sidebar = %+v, want missing", report.Sidebar)
+	}
+}
+
+func TestInstallRefusesHandWiredKeybindsWithoutWriting(t *testing.T) {
+	for _, dryRun := range []bool{false, true} {
+		env := newTestEnv(t)
+		writeFile(t, env.conf, handWiredPick, 0o644)
+
+		err := env.installer.Install(Options{DryRun: dryRun})
+		var foreign *installkit.ForeignError
+		if !errors.As(err, &foreign) {
+			t.Fatalf("dry run %v: err = %v, want a ForeignError", dryRun, err)
+		}
+		if foreign.Status.Line != handWiredPickLine || !strings.Contains(err.Error(), `Run "cogitator" "pick"`) {
+			t.Fatalf("error does not name the hand-written bind: %v", err)
+		}
+		if got := readFile(t, env.conf); got != handWiredPick {
+			t.Fatalf("config written despite the refusal:\n%s", got)
+		}
+		if env.out.Len() != 0 {
+			t.Fatalf("dry run %v printed despite the refusal: %q", dryRun, env.out.String())
+		}
+	}
+}
+
+func TestInstallForceProceedsPastHandWiredKeybinds(t *testing.T) {
+	env := newTestEnv(t)
+	writeFile(t, env.conf, handWiredPick, 0o644)
+
+	if err := env.installer.Install(Options{Force: true, PickKey: "a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	content := readFile(t, env.conf)
+	if !strings.Contains(content, beginMarker) || !strings.Contains(content, `bind "a" { Run "cogitator" "pick"`) {
+		t.Fatalf("forced install did not add its block beside the user's bind:\n%s", content)
+	}
+}
+
+func TestInstallWithPluginRefusesHandWiredSidebarWithoutWriting(t *testing.T) {
+	env := newTestEnv(t)
+	original := writeForeignSidebar(t, env)
+	layoutPath := filepath.Join(filepath.Dir(env.conf), "layouts", "cogitator.kdl")
+	layout := readFile(t, layoutPath)
+
+	err := env.installer.Install(Options{Plugin: writePlugin(t)})
+	var foreign *installkit.ForeignError
+	if !errors.As(err, &foreign) || foreign.Status.Line == 0 {
+		t.Fatalf("err = %v, want a ForeignError at the default_layout line", err)
+	}
+	if got := readFile(t, env.conf); got != original {
+		t.Fatalf("config written despite the refusal:\n%s", got)
+	}
+	if got := readFile(t, layoutPath); got != layout {
+		t.Fatalf("user layout changed:\n%s", got)
 	}
 }
