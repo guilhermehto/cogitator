@@ -286,7 +286,7 @@ func runHookCommand(name string, args []string) bool {
 	case "claude-hook":
 		installOrForwardHook(args, runClaudeHookInstall, claudecode.SendHook)
 	case "codex-hook":
-		installOrForwardHook(args, nil, codex.SendHook)
+		installOrForwardHook(args, runCodexHookInstall, codex.SendHook)
 	case "omp-hook":
 		installOrForwardHook(args, runOmpHookInstall, omp.SendHook)
 	default:
@@ -297,7 +297,7 @@ func runHookCommand(name string, args []string) bool {
 }
 
 func installOrForwardHook(args []string, install func([]string), send func(context.Context, io.Reader) error) {
-	if install != nil && len(args) > 0 && args[0] == "install" {
+	if len(args) > 0 && args[0] == "install" {
 		install(args[1:])
 		return
 	}
@@ -330,6 +330,29 @@ func runClaudeHookInstall(args []string) {
 	}
 	fmt.Printf("Installed Claude Code hooks: %s\n", found.Path)
 	fmt.Println("Restart Claude Code for the hooks to take effect.")
+}
+
+// runCodexHookInstall merges cogitator's hooks into Codex's hooks.json.
+// Codex skips untrusted hooks silently, so it ends with the trust step.
+func runCodexHookInstall(args []string) {
+	flags := flag.NewFlagSet("codex-hook install", flag.ExitOnError)
+	binary := flags.String("binary", "", "cogitator binary the hooks run (default: PATH lookup, then this executable)")
+	force := flags.Bool("force", false, "install even when cogitator is already wired into Codex by hand")
+	_ = flags.Parse(args)
+
+	bin := resolveHookBinary(*binary)
+	found, err := codex.InstallHooks(config.Default().CodexHome, bin, *force)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	if found.State == installkit.Current {
+		fmt.Printf("Codex hooks already set up: %s\n", found.Path)
+		return
+	}
+	fmt.Printf("Installed Codex hooks: %s\n", found.Path)
+	fmt.Printf("Start codex, run /hooks, and trust `%s`.\n", installkit.HookCommand(bin, codex.HookSubcommand))
 }
 
 // resolveHookBinary is the absolute cogitator binary hook commands run.

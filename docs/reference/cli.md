@@ -56,7 +56,9 @@ These are wired up during [agent setup](/guide/connect) and are not meant to be 
 - `cogitator claude-hook`: receives Claude Code lifecycle events on stdin;
   `cogitator claude-hook install [--binary PATH] [--force]` merges the hooks into
   `~/.claude/settings.json` (`$CLAUDE_HOME/settings.json` when set).
-- `cogitator codex-hook`: receives Codex lifecycle events on stdin.
+- `cogitator codex-hook`: receives Codex lifecycle events on stdin;
+  `cogitator codex-hook install [--binary PATH] [--force]` merges the hooks into
+  `~/.codex/hooks.json` (`$CODEX_HOME/hooks.json` when set). Trust them via `/hooks` in Codex.
 - `cogitator omp-hook`: receives omp lifecycle events; `cogitator omp-hook install [--force]`
   writes the omp extension to `~/.omp/agent/extensions/cogitator.ts`.
 

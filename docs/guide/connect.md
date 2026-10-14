@@ -100,36 +100,36 @@ cogitator displays live attention signals for [Codex](https://openai.com/codex) 
 Codex's lifecycle hooks. Monitoring **auto-enables** when `~/.codex` exists. No environment
 variable needed.
 
+Install the hooks with one command:
+
+```sh
+cogitator codex-hook install
+```
+
+This merges the hooks below into `~/.codex/hooks.json` (`$CODEX_HOME/hooks.json` when set)
+with the absolute cogitator binary path in each command, keeping your other hooks. A re-run
+changes nothing; if the binary moved, it updates the commands in place. If a hook already
+runs cogitator another way (a wrapper script, or inline hooks in `config.toml`), it names
+that entry and leaves it alone; pass `--force` to install anyway. Then start `codex`, run
+`/hooks`, and trust the cogitator hook — Codex skips untrusted hooks silently.
+
 **Automated.** Paste this to Codex:
 
 ```text
 Set up cogitator live-attention monitoring for Codex on this machine.
 
-1. Run `which cogitator` to find the absolute path to the cogitator binary. If it is not
-   found, stop and tell me to install cogitator first.
-2. Open ~/.codex/hooks.json, creating it if it does not exist. Preserve any existing keys.
-3. Merge the hooks below into the `hooks` object. Replace the bare command `cogitator`
-   with the absolute path you found in step 1:
-
-   {
-     "hooks": {
-       "SessionStart":      [ { "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
-       "UserPromptSubmit":  [ { "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
-       "PreToolUse":        [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
-       "PostToolUse":       [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
-       "PermissionRequest": [ { "matcher": "*", "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ],
-       "Stop":              [ { "hooks": [ { "type": "command", "command": "cogitator codex-hook" } ] } ]
-     }
-   }
-
-4. Save the file, then remind me to start `codex`, run `/hooks`, and confirm trust for
-   `cogitator codex-hook` — Codex skips untrusted hooks silently.
+1. Run `which cogitator` to confirm cogitator is installed. If it is not found, stop and
+   tell me to install cogitator first.
+2. Run `cogitator codex-hook install` — it merges the cogitator hooks into
+   ~/.codex/hooks.json with the cogitator binary path baked in.
+3. Remind me to start `codex`, run `/hooks`, and confirm trust for the cogitator
+   `codex-hook` command — Codex skips untrusted hooks silently.
 ```
 
 **Manual:**
 
 1. Confirm `~/.codex` exists (it does once Codex is installed).
-2. Wire the hooks in `~/.codex/hooks.json`:
+2. Merge this block into the `hooks` object of `~/.codex/hooks.json`:
 
    ```json
    {
