@@ -249,6 +249,8 @@ func tailLines(text string, n int) []string {
 // as a pen and written in full before the text it applies to, so each line
 // starts with the styling it inherits (tmux does not repeat it after a line
 // break) and stands alone when the preview resets it at the line end.
+// Background colours are dropped: zellij paints the pane background on every
+// cell, which would turn the preview into a solid block.
 func displayText(text string) string {
 	var out strings.Builder
 	parser := ansi.NewParser()
@@ -263,6 +265,7 @@ func displayText(text string) string {
 		switch {
 		case isSGR(seq, parser):
 			cellbuf.ReadStyle(parser.Params(), &pen)
+			pen.Bg = nil
 		case seq == "\n":
 			out.WriteString(seq)
 			written = cellbuf.Style{}

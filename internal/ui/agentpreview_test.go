@@ -124,6 +124,11 @@ func TestPreviewKeepsStylingAndDropsOtherControlSequences(t *testing.T) {
 			captured: "\x1b[1;31ma\x1b[22mb",
 			want:     []string{"\x1b[1;31ma" + ansi.ResetStyle + "\x1b[31mb" + ansi.ResetStyle},
 		},
+		{
+			name:     "pane background dropped, foreground kept",
+			captured: "\x1b[38;2;136;192;208m\x1b[48;2;46;52;64mtext\x1b[39m\x1b[48;2;46;52;64m pad\x1b[41m!",
+			want:     []string{"\x1b[38;2;136;192;208mtext" + ansi.ResetStyle + " pad!" + ansi.ResetStyle},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
