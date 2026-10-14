@@ -193,6 +193,34 @@ func TestLiveSessionMode(t *testing.T) {
 	t.Logf("after Kill; sessions:\n%s", mustRun(t, "zellij", "list-sessions", "-n"))
 }
 
+// TestLiveSessionModeHarnessExitLeavesShell quits the harness of a new
+// session and expects its tab to fall back to a live shell in the worktree,
+// not a held pane.
+func TestLiveSessionModeHarnessExitLeavesShell(t *testing.T) {
+	home := startScratchSession(t)
+	b := liveBackend(home)
+
+	want := home + "-exit"
+	t.Cleanup(func() { _, _ = run("zellij", "delete-session", "--force", want) })
+
+	dir := t.TempDir()
+	target, err := b.EnsureWindow(dir, home+"/exit", []string{"sh", "-c", "sleep 1; echo COGEXIT"}, mux.ModeSession)
+	if err != nil {
+		t.Fatalf("EnsureWindow: %v", err)
+	}
+
+	// Only the shell matches: the initial shell runs outside dir, the harness
+	// names COGEXIT, and a held harness pane is dead.
+	eventually(t, "tab back to one live shell in "+dir, func() (bool, error) {
+		inTab, err := b.tabPanes(target)
+		return err == nil && len(inTab) == 1 && !inTab[0].dead &&
+			inTab[0].cwd == canonical(dir) && !strings.Contains(inTab[0].command, "COGEXIT"), err
+	})
+	if alive, err := b.WindowProcessAlive(target); err != nil || !alive {
+		t.Fatalf("WindowProcessAlive = %v, %v; want true", alive, err)
+	}
+}
+
 // liveSwitch moves home's client into target's session with Select, then
 // back to home's first pane with SelectPane, checking list-clients each time.
 // A keypress precedes each move: zellij ignores outside switches until the

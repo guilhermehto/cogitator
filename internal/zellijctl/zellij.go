@@ -8,6 +8,7 @@
 package zellijctl
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -260,9 +261,11 @@ func (b Backend) newTab(canonicalDir, name string, argv []string) (mux.Target, e
 	return mux.Target(address(b.session(), tab)), nil
 }
 
-// newSession starts a client-less session and swaps its initial shell for
-// argv in dir: `attach -b` cannot take options and a command together, and
-// its shell starts in cogitator's cwd.
+// newSession starts a client-less session whose tab keeps a shell in dir and
+// runs argv in place over it, as tmux's session mode does: argv closes on
+// exit, so quitting the harness drops back to the shell instead of leaving a
+// held pane. `attach -b` cannot take options and a command together, and its
+// shell starts in cogitator's cwd.
 func (b Backend) newSession(canonicalDir, name string, argv []string) (mux.Target, error) {
 	session, err := b.freeSessionName(strings.ReplaceAll(name, "/", "-"), b.socketDir())
 	if err != nil {
@@ -275,8 +278,7 @@ func (b Backend) newSession(canonicalDir, name string, argv []string) (mux.Targe
 
 	shell, err := b.initialPane(session)
 	if err == nil {
-		args := []string{"new-pane", "--in-place", "--close-replaced-pane", "--pane-id", shell.localID(), "--cwd", canonicalDir, "--"}
-		_, err = b.in(session, append(args, argv...)...)
+		err = b.runOverShell(session, shell, canonicalDir, argv)
 	}
 	if err != nil {
 		_ = b.deleteSession(session)
@@ -285,6 +287,44 @@ func (b Backend) newSession(canonicalDir, name string, argv []string) (mux.Targe
 
 	tabDirs.set(session, shell.tab, canonicalDir)
 	return shell.target(), nil
+}
+
+// runOverShell swaps initial for $SHELL in dir, then suspends that shell under
+// argv until argv exits. The shell runs as a command because zellij ignores
+// --cwd for a bare shell pane.
+func (b Backend) runOverShell(session string, initial pane, dir string, argv []string) error {
+	if _, err := b.in(session, "new-pane", "--in-place", "--close-replaced-pane", "--pane-id", initial.localID(), "--cwd", dir, "--", cmp.Or(b.getenv("SHELL"), "/bin/sh")); err != nil {
+		return err
+	}
+
+	shell, err := b.replacement(session, initial)
+	if err != nil {
+		return err
+	}
+
+	args := []string{"new-pane", "--in-place", "--close-on-exit", "--pane-id", shell.localID(), "--cwd", dir, "--"}
+	_, err = b.in(session, append(args, argv...)...)
+	return err
+}
+
+// replacement waits for the pane that replaced old in its tab: zellij prints
+// no pane id for an in-place command pane that closes the pane it replaces.
+func (b Backend) replacement(session string, old pane) (pane, error) {
+	deadline := time.Now().Add(startupWait)
+	for {
+		panes, err := b.sessionPanes(session)
+		if err == nil {
+			for _, p := range panes {
+				if p.tab == old.tab && p.id != old.id {
+					return p, nil
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return pane{}, fmt.Errorf("zellijctl: session %s: no pane replaced %s after %s", session, old.localID(), startupWait)
+		}
+		time.Sleep(startupPoll)
+	}
 }
 
 // freeSessionName is base, else the first free base-2, base-3, …: `attach -b`
@@ -688,6 +728,7 @@ type paneJSON struct {
 	IsPlugin        bool   `json:"is_plugin"`
 	Exited          bool   `json:"exited"`
 	IsHeld          bool   `json:"is_held"`
+	IsSuppressed    bool   `json:"is_suppressed"`
 	TabID           int    `json:"tab_id"`
 	TabName         string `json:"tab_name"`
 	TabPosition     int    `json:"tab_position"`
@@ -698,14 +739,15 @@ type paneJSON struct {
 }
 
 type pane struct {
-	session   string
-	id        int
-	tab       string
-	tabName   string
-	tabNumber int
-	cwd       string
-	command   string
-	dead      bool
+	session    string
+	id         int
+	tab        string
+	tabName    string
+	tabNumber  int
+	cwd        string
+	command    string
+	dead       bool
+	suppressed bool
 }
 
 func (p pane) localID() string { return paneIDPrefix + strconv.Itoa(p.id) }
@@ -787,14 +829,15 @@ func toPanes(session string, raw []paneJSON) []pane {
 		}
 
 		p := pane{
-			session:   session,
-			id:        r.ID,
-			tab:       strconv.Itoa(r.TabID),
-			tabName:   chosenTabName(r.TabName),
-			tabNumber: r.TabPosition + 1,
-			cwd:       canonical(r.PaneCwd),
-			command:   paneCommand(r),
-			dead:      r.Exited || r.IsHeld,
+			session:    session,
+			id:         r.ID,
+			tab:        strconv.Itoa(r.TabID),
+			tabName:    chosenTabName(r.TabName),
+			tabNumber:  r.TabPosition + 1,
+			cwd:        canonical(r.PaneCwd),
+			command:    paneCommand(r),
+			dead:       r.Exited || r.IsHeld,
+			suppressed: r.IsSuppressed,
 		}
 		if p.cwd != "" {
 			tabDirs.learn(session, p.tab, p.cwd)
@@ -854,7 +897,8 @@ func (b Backend) tabPanes(t mux.Target) ([]pane, error) {
 	return inTab, nil
 }
 
-// choose prefers a live pane running a harness, then the lowest pane id.
+// choose prefers a live pane running a harness, then a visible pane over one
+// suspended under an in-place pane, then the lowest pane id.
 func choose(candidates []pane) (pane, bool) {
 	var best pane
 	found := false
@@ -870,6 +914,9 @@ func betterPane(p, best pane) bool {
 	pRuns, bestRuns := p.runsHarness(), best.runsHarness()
 	if pRuns != bestRuns {
 		return pRuns
+	}
+	if p.suppressed != best.suppressed {
+		return !p.suppressed
 	}
 	return p.id < best.id
 }
