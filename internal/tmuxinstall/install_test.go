@@ -571,3 +571,77 @@ func TestInstallUpdatesStaleOwnedFileInPlace(t *testing.T) {
 		t.Fatal("want exactly one source line")
 	}
 }
+
+func TestCheckStaleDetailNamesWhatChanged(t *testing.T) {
+	cases := map[string]struct {
+		installed  Options
+		wantDetail string
+	}{
+		"another binary shows old -> new": {
+			installed:  Options{Binary: "/old/bin/cogitator", NoReload: true},
+			wantDetail: "/old/bin/cogitator -> " + testBinary,
+		},
+		"other keys with the same binary": {
+			installed:  Options{NextKey: "n", NoReload: true},
+			wantDetail: "bindings differ from what install would write",
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := newTestEnv(t, nil)
+			if err := env.installer.Install(tc.installed); err != nil {
+				t.Fatal(err)
+			}
+
+			status, err := env.installer.Check(Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.State != installkit.Stale || status.Detail != tc.wantDetail {
+				t.Fatalf("status = %+v, want stale with detail %q", status, tc.wantDetail)
+			}
+		})
+	}
+}
+
+func TestWithManagedKeysKeepsInstalledKeys(t *testing.T) {
+	cases := map[string]struct {
+		installed *Options
+		requested Options
+		wantNext  string
+		wantPick  string
+	}{
+		"nothing installed leaves keys empty": {
+			requested: Options{},
+		},
+		"installed custom keys fill empty ones": {
+			installed: &Options{NextKey: "n", PickKey: "C-p", NoReload: true},
+			requested: Options{},
+			wantNext:  "n",
+			wantPick:  "C-p",
+		},
+		"explicit keys win over installed ones": {
+			installed: &Options{NextKey: "n", PickKey: "C-p", NoReload: true},
+			requested: Options{NextKey: "x"},
+			wantNext:  "x",
+			wantPick:  "C-p",
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := newTestEnv(t, nil)
+			if tc.installed != nil {
+				if err := env.installer.Install(*tc.installed); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got := env.installer.WithManagedKeys(tc.requested)
+			if got.NextKey != tc.wantNext || got.PickKey != tc.wantPick {
+				t.Fatalf("keys = %q/%q, want %q/%q", got.NextKey, got.PickKey, tc.wantNext, tc.wantPick)
+			}
+		})
+	}
+}

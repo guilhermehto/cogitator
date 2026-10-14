@@ -16,11 +16,14 @@ import (
 	"github.com/guilhermehto/cogitator/internal/omp"
 )
 
-// Harness is one agent harness Install can wire. FollowUp is what the user
-// still has to do after cogitator writes the harness's hooks.
+// Harness is one agent harness Install can wire. Check reports how its
+// wiring compares with what Install would write, without writing. FollowUp
+// is what the user still has to do after cogitator writes the harness's
+// hooks.
 type Harness struct {
 	Name     string
 	Detected func() bool
+	Check    func(binary string) (installkit.Status, error)
 	Install  func(binary string, force bool) (installkit.Status, error)
 	FollowUp func(binary string) string
 }
@@ -33,6 +36,9 @@ func Harnesses(cfg *config.Config) []Harness {
 		{
 			Name:     "Claude Code",
 			Detected: func() bool { return claudeHomeExists(cfg.ClaudeCodeHome) },
+			Check: func(binary string) (installkit.Status, error) {
+				return claudecode.CheckHooks(cfg.ClaudeCodeHome, binary)
+			},
 			Install: func(binary string, force bool) (installkit.Status, error) {
 				return claudecode.InstallHooks(cfg.ClaudeCodeHome, binary, force)
 			},
@@ -41,6 +47,9 @@ func Harnesses(cfg *config.Config) []Harness {
 		{
 			Name:     "Codex",
 			Detected: func() bool { return cfg.CodexEnabled },
+			Check: func(binary string) (installkit.Status, error) {
+				return codex.CheckHooks(cfg.CodexHome, binary)
+			},
 			Install: func(binary string, force bool) (installkit.Status, error) {
 				return codex.InstallHooks(cfg.CodexHome, binary, force)
 			},
@@ -51,6 +60,9 @@ func Harnesses(cfg *config.Config) []Harness {
 		{
 			Name:     "omp",
 			Detected: func() bool { return cfg.OmpEnabled },
+			Check: func(binary string) (installkit.Status, error) {
+				return omp.CheckExtension(cfg.OmpHome, binary)
+			},
 			Install: func(binary string, force bool) (installkit.Status, error) {
 				return omp.InstallExtension(cfg.OmpHome, binary, force)
 			},

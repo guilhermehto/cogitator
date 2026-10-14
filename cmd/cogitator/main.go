@@ -23,6 +23,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/logging"
 	"github.com/guilhermehto/cogitator/internal/omp"
 	"github.com/guilhermehto/cogitator/internal/settings"
+	"github.com/guilhermehto/cogitator/internal/setup"
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 	"github.com/guilhermehto/cogitator/internal/tmuxinstall"
 	"github.com/guilhermehto/cogitator/internal/ui"
@@ -51,32 +52,7 @@ func hookStdin() io.Reader {
 func main() {
 	// Route subcommands before flag.Parse() so bare subcommand names are not
 	// misinterpreted as unknown flags.
-	if len(os.Args) > 1 && runHookCommand(os.Args[1], os.Args[2:]) {
-		return
-	}
-
-	if len(os.Args) > 1 && os.Args[1] == "pick" {
-		runPickCommand(os.Args[2:])
-		return
-	}
-
-	if len(os.Args) > 1 && os.Args[1] == "next" {
-		runNextCommand(os.Args[2:])
-		return
-	}
-
-	if len(os.Args) > 1 && os.Args[1] == "tmux" {
-		runTmuxCommand(os.Args[2:])
-		return
-	}
-
-	if len(os.Args) > 1 && os.Args[1] == "zellij" {
-		runZellijCommand(os.Args[2:])
-		return
-	}
-
-	if len(os.Args) > 1 && os.Args[1] == "agents" {
-		runAgentsCommand(os.Args[2:])
+	if len(os.Args) > 1 && (runHookCommand(os.Args[1], os.Args[2:]) || runSubcommand(os.Args[1], os.Args[2:])) {
 		return
 	}
 
@@ -124,6 +100,29 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// runSubcommand runs the terminal subcommands and reports whether name was
+// one.
+func runSubcommand(name string, args []string) bool {
+	switch name {
+	case "pick":
+		runPickCommand(args)
+	case "next":
+		runNextCommand(args)
+	case "tmux":
+		runTmuxCommand(args)
+	case "zellij":
+		runZellijCommand(args)
+	case "setup":
+		runSetupCommand(args)
+	case "agents":
+		runAgentsCommand(args)
+	default:
+		return false
+	}
+
+	return true
 }
 
 // runPickCommand shows the agent picker. A missing --client is resolved from
@@ -264,20 +263,10 @@ func runZellijCommand(args []string) {
 		}
 	}
 
-	home, err := os.UserHomeDir()
+	installer, err := newZellijInstaller()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "resolve home directory: %v\n", err)
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
-	}
-
-	installer := zellijinstall.Installer{
-		Home:       home,
-		DataHome:   os.Getenv("XDG_DATA_HOME"),
-		ConfigFile: os.Getenv("ZELLIJ_CONFIG_FILE"),
-		ConfigDir:  os.Getenv("ZELLIJ_CONFIG_DIR"),
-		LookPath:   exec.LookPath,
-		Executable: os.Executable,
-		Out:        os.Stdout,
 	}
 
 	if action == "install" {
@@ -289,6 +278,88 @@ func runZellijCommand(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func newZellijInstaller() (zellijinstall.Installer, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return zellijinstall.Installer{}, fmt.Errorf("resolve home directory: %w", err)
+	}
+
+	return zellijinstall.Installer{
+		Home:       home,
+		DataHome:   os.Getenv("XDG_DATA_HOME"),
+		ConfigFile: os.Getenv("ZELLIJ_CONFIG_FILE"),
+		ConfigDir:  os.Getenv("ZELLIJ_CONFIG_DIR"),
+		LookPath:   exec.LookPath,
+		Executable: os.Executable,
+		Out:        os.Stdout,
+	}, nil
+}
+
+// runSetupCommand wires everything cogitator supports on this machine,
+// leaving wiring the user wrote by hand alone. Under tmux it reloads the
+// running server; elsewhere it never touches one.
+func runSetupCommand(args []string) {
+	flags := flag.NewFlagSet("setup", flag.ExitOnError)
+	binary := flags.String("binary", "", "cogitator binary every component runs (default: PATH lookup, then this executable)")
+	yes := flags.Bool("yes", false, "accept the plan with the default keys, without prompting")
+	dryRun := flags.Bool("dry-run", false, "print the plan without writing anything")
+	check := flags.Bool("check", false, "print the plan and exit non-zero if anything is missing or stale; writes nothing")
+	_ = flags.Parse(args)
+
+	wizard, err := newSetupWizard(resolveHookBinary(*binary))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	if err := wizard.Run(setup.ModeFor(*yes, *dryRun, *check)); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func newSetupWizard(binary string) (setup.Wizard, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return setup.Wizard{}, fmt.Errorf("resolve home directory: %w", err)
+	}
+
+	tmuxInstaller, err := newTmuxInstaller()
+	if err != nil {
+		return setup.Wizard{}, err
+	}
+
+	zellijInstaller, err := newZellijInstaller()
+	if err != nil {
+		return setup.Wizard{}, err
+	}
+
+	var bundled *zellijinstall.BundledPlugin
+	if wasm, ok := zellijplugin.Bundled(); ok {
+		bundled = &zellijinstall.BundledPlugin{Wasm: wasm, Version: version}
+	}
+
+	env := setup.Env{LookPath: exec.LookPath, Output: commandOutput}
+
+	return setup.Wizard{
+		Binary: binary,
+		Home:   home,
+		Groups: []setup.Group{
+			setup.TmuxGroup(env, tmuxInstaller, os.Getenv("TMUX") != ""),
+			setup.ZellijGroup(env, zellijInstaller, bundled),
+			setup.HooksGroup(env, hookinstall.Harnesses(config.Default()), os.Stdout),
+		},
+		In:  os.Stdin,
+		Out: os.Stdout,
+	}, nil
+}
+
+func commandOutput(name string, args ...string) (string, error) {
+	out, err := exec.Command(name, args...).Output()
+
+	return string(out), err
 }
 
 // runHookCommand routes the hook subcommands and reports whether name was

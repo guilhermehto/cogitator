@@ -244,3 +244,38 @@ func TestInstallGivesEveryHarnessTheSameBinaryAndForce(t *testing.T) {
 		t.Fatalf("installer calls = %+v, want %+v (detected harnesses only)", calls, want)
 	}
 }
+
+func TestCheckMatchesWhatInstallWrites(t *testing.T) {
+	m := newMachine(t)
+	harnesses := hookinstall.Harnesses(m.cfg)
+	before := m.checksums(t)
+
+	for _, harness := range harnesses {
+		if !harness.Detected() {
+			continue
+		}
+		status, err := harness.Check("/opt/cog")
+		if err != nil || status.State != installkit.Missing {
+			t.Fatalf("%s check before install = %+v, %v; want missing", harness.Name, status, err)
+		}
+	}
+	if after := m.checksums(t); len(after) != len(before) {
+		t.Fatalf("check wrote files: %v", after)
+	}
+
+	if err := hookinstall.Install(harnesses, "/opt/cog", false, &bytes.Buffer{}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	for _, harness := range harnesses {
+		if !harness.Detected() {
+			continue
+		}
+		if status, err := harness.Check("/opt/cog"); err != nil || status.State != installkit.Current {
+			t.Errorf("%s check after install = %+v, %v; want current", harness.Name, status, err)
+		}
+		if status, err := harness.Check("/new/cog"); err != nil || status.State != installkit.Stale || status.Detail != "/opt/cog -> /new/cog" {
+			t.Errorf("%s check for another binary = %+v, %v; want stale /opt/cog -> /new/cog", harness.Name, status, err)
+		}
+	}
+}

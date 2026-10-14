@@ -99,8 +99,9 @@ func TestCheckExtension_States(t *testing.T) {
 			setup: func(t *testing.T, agentDir string) {
 				install(t, agentDir, "/old/cogitator")
 			},
-			wantState: installkit.Stale,
-			wantFile:  "cogitator.ts",
+			wantState:  installkit.Stale,
+			wantFile:   "cogitator.ts",
+			wantDetail: "/old/cogitator -> /opt/tools/cogitator",
 		},
 		{
 			name: "legacy unstamped extension differing only in binary is stale",
@@ -109,8 +110,9 @@ func TestCheckExtension_States(t *testing.T) {
 				_, body, _ := strings.Cut(readFile(t, path), "\n")
 				writeFile(t, path, body)
 			},
-			wantState: installkit.Stale,
-			wantFile:  "cogitator.ts",
+			wantState:  installkit.Stale,
+			wantFile:   "cogitator.ts",
+			wantDetail: "/old/cogitator -> /opt/tools/cogitator",
 		},
 		{
 			name: "hand-edited extension is foreign",

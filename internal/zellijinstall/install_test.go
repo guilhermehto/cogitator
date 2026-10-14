@@ -1497,3 +1497,107 @@ func TestBundledWasmFileName(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckStaleDetailNamesWhatChanged(t *testing.T) {
+	cases := []struct {
+		name      string
+		installed Options
+		tamper    func(t *testing.T, env testEnv)
+		keybinds  func(env testEnv) string
+		sidebar   func(env testEnv) string
+	}{
+		{
+			name:      "another binary shows old -> new binary",
+			installed: Options{Binary: "/old/cogitator", Bundled: bundled()},
+			keybinds:  func(testEnv) string { return "/old/cogitator -> " + testBinary },
+			sidebar:   func(testEnv) string { return "/old/cogitator -> " + testBinary },
+		},
+		{
+			name:      "older bundled plugin shows old -> new plugin path",
+			installed: Options{Bundled: &BundledPlugin{Wasm: []byte("\x00asm old"), Version: "0.9.0"}},
+			keybinds:  func(testEnv) string { return "keybinds differ from what install would write" },
+			sidebar: func(env testEnv) string {
+				return dataWasm(env, "cogitator-zellij-0.9.0.wasm") + " -> " + dataWasm(env, testWasmName)
+			},
+		},
+		{
+			name:      "overwritten plugin copy names the copy",
+			installed: Options{Bundled: bundled()},
+			tamper: func(t *testing.T, env testEnv) {
+				writeFile(t, dataWasm(env, testWasmName), "\x00asm older", 0o644)
+			},
+			sidebar: func(env testEnv) string {
+				return dataWasm(env, testWasmName) + " differs from the plugin in this build"
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if err := env.installer.Install(tc.installed); err != nil {
+				t.Fatal(err)
+			}
+			if tc.tamper != nil {
+				tc.tamper(t, env)
+			}
+
+			report, err := env.installer.Check(Options{Bundled: bundled()})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if tc.keybinds != nil && (report.Keybinds.State != installkit.Stale || report.Keybinds.Detail != tc.keybinds(env)) {
+				t.Fatalf("keybinds = %+v, want stale with %q", report.Keybinds, tc.keybinds(env))
+			}
+			if report.Sidebar.State != installkit.Stale || report.Sidebar.Detail != tc.sidebar(env) {
+				t.Fatalf("sidebar = %+v, want stale with %q", report.Sidebar, tc.sidebar(env))
+			}
+		})
+	}
+}
+
+func TestWithManagedKeysKeepsInstalledKeys(t *testing.T) {
+	cases := []struct {
+		name      string
+		installed *Options
+		requested Options
+		want      Options
+	}{
+		{
+			name: "nothing installed leaves keys empty",
+		},
+		{
+			name:      "installed custom keys fill empty ones",
+			installed: &Options{NextKey: "n", PickKey: "Ctrl p", SidebarKey: "s", Bundled: bundled()},
+			want:      Options{NextKey: "n", PickKey: "Ctrl p", SidebarKey: "s"},
+		},
+		{
+			name:      "explicit keys win over installed ones",
+			installed: &Options{NextKey: "n", PickKey: "Ctrl p"},
+			requested: Options{PickKey: "x"},
+			want:      Options{NextKey: "n", PickKey: "x"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			writeFile(t, env.conf, userShapedConfig, 0o644)
+			if tc.installed != nil {
+				if err := env.installer.Install(*tc.installed); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got, err := env.installer.WithManagedKeys(tc.requested)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.NextKey != tc.want.NextKey || got.PickKey != tc.want.PickKey || got.SidebarKey != tc.want.SidebarKey {
+				t.Fatalf("keys = %q/%q/%q, want %q/%q/%q", got.NextKey, got.PickKey, got.SidebarKey, tc.want.NextKey, tc.want.PickKey, tc.want.SidebarKey)
+			}
+		})
+	}
+}

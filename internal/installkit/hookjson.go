@@ -195,6 +195,7 @@ func (s HookSpec) classify(doc hookDoc, content, command string) (Status, map[st
 	status := Status{Path: s.Path}
 	var foreign []string
 	current, missing := 0, 0
+	staleFrom := ""
 
 	for _, event := range s.Events {
 		parsed, err := doc.event(event.Name)
@@ -214,6 +215,8 @@ func (s HookSpec) classify(doc hookDoc, content, command string) (Status, map[st
 			}
 		case Current:
 			current++
+		case Stale:
+			staleFrom = firstNonEmpty(staleFrom, s.staleBinary(found))
 		case Missing:
 			missing++
 		}
@@ -231,9 +234,37 @@ func (s HookSpec) classify(doc hookDoc, content, command string) (Status, map[st
 		status.State = Missing
 	default:
 		status.State = Stale
+		status.Detail = staleDetail(staleFrom, command, s.Subcommand)
 	}
 
 	return status, refs, nil
+}
+
+// staleBinary is the binary the first out-of-date cogitator hook runs, or "".
+func (s HookSpec) staleBinary(refs []hookRef) string {
+	for _, ref := range refs {
+		if ref.kind == staleHook {
+			return strings.TrimSuffix(ref.command, " "+s.Subcommand)
+		}
+	}
+
+	return ""
+}
+
+func staleDetail(from, command, subcommand string) string {
+	if from == "" {
+		return "hooks differ from what install would write"
+	}
+
+	return from + " -> " + strings.TrimSuffix(command, " "+subcommand)
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+
+	return b
 }
 
 func eventState(refs []hookRef) State {

@@ -47,7 +47,25 @@ xattr -d com.apple.quarantine cogitator
 
 :::
 
-## 2. Run cogitator
+## 2. Set up
+
+```sh
+cogitator setup
+```
+
+It finds tmux, zellij, and your coding agents (Claude Code, Codex, omp; opencode needs no
+hook), prints what it found and what it would do, and asks once per multiplexer and once for
+the hooks. Everything points at the same cogitator binary. It never sets anything up twice:
+wiring you wrote by hand is reported with its file and line and left alone, and a re-run on
+a set-up machine prints `everything is already set up` and changes no file. Then follow the
+steps it prints: start a new zellij session for the sidebar, restart Claude Code and omp,
+and trust the hook via `/hooks` in Codex.
+
+`cogitator setup --check` prints the same plan and exits non-zero when something is
+missing or outdated; `--yes` accepts the plan without prompting. See the
+[CLI reference](/reference/cli#setup) for every flag.
+
+## 3. Run cogitator
 
 ```sh
 cogitator
@@ -59,21 +77,16 @@ or from source:
 go run ./cmd/cogitator
 ```
 
-## 3. Connect your coding agent
+Keep it running: the picker, the next-agent key, and the zellij sidebar read agent state
+from it.
 
-Wire every harness on this machine in one step:
+## Set up one piece at a time
 
-```sh
-cogitator hooks install
-```
+`cogitator setup` runs these installers; each also works on its own:
 
-It finds Claude Code, Codex, and omp, points each one's hooks at the same cogitator binary,
-and skips the ones you don't have. It never sets anything up twice: a re-run changes no
-file, and hooks you already wired yourself are reported and left alone. Then follow the
-steps it prints: restart Claude Code and omp, and trust the hook via `/hooks` in Codex.
-
-To set up one harness at a time, or by hand:
-
+- `cogitator hooks install`: the hooks of every harness found on this machine.
+- [tmux](/guide/tmux#setup): `cogitator tmux install`.
+- zellij: `cogitator zellij install` (see the [CLI reference](/reference/cli#subcommands)).
 - [opencode](/guide/connect#opencode): launch with `--mdns`; discovered automatically.
 - [Claude Code](/guide/connect#claude-code): `cogitator claude-hook install`.
 - [Codex](/guide/connect#codex): `cogitator codex-hook install`.

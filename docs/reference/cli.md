@@ -21,6 +21,43 @@ line. It exits when either:
 When the cogitator TUI is running, `--status` reads its live feed instead of running
 discovery itself; otherwise it falls back to mDNS discovery as above.
 
+## Setup
+
+`cogitator setup [--yes] [--dry-run] [--check] [--binary PATH]` wires everything cogitator
+supports on this machine with one binary: tmux keybinds, zellij keybinds and sidebar, and
+the Claude Code, Codex, and omp hooks. It finds tmux and zellij on your `PATH` (warning when
+zellij is not 0.45.x, the version the sidebar plugin is built for) and the harnesses you
+have, then prints one plan:
+
+| Found                         | Action                                            |
+| ----------------------------- | ------------------------------------------------- |
+| cogitator's wiring, current   | `already set up, skip`                            |
+| cogitator's wiring, outdated  | `update: OLD -> NEW` (binary or plugin path)      |
+| wiring you wrote by hand      | `yours, left alone`, with the `file:line`         |
+| nothing                       | `install`                                         |
+| the tool is not installed     | `not installed, skip`                             |
+
+opencode is listed too, but needs no hook. It then asks once for tmux, once for zellij, and
+once for the hooks (`y/N`, default no), only for the groups with something to install or
+update, and offers each key with a default: the key cogitator's wiring already binds, else
+the installer's default. A re-run therefore never reverts keys you chose. Hand-written
+wiring is never touched: zellij keeps everything in one `config.kdl`, so a hand-written
+zellij bind or sidebar skips the whole zellij install, while hooks skip only that
+harness. It ends with the follow-ups that apply (start a new zellij session for the
+sidebar, restart Claude Code and omp, trust the hook via `/hooks` in Codex, keep the TUI
+running). On a machine that is already set up it prints `everything is already set up`
+and writes nothing. It reloads the tmux server only when run inside tmux.
+
+- `--yes`: accept the plan with the default keys, without prompting.
+- `--dry-run`: print the plan and write nothing.
+- `--check`: print the plan, write nothing, and exit non-zero if anything is missing or
+  outdated. Use it as a health check.
+- `--binary PATH`: the cogitator binary every component runs (default: `cogitator` on
+  `PATH`, then the running executable).
+
+A build without the bundled plugin (`go install`) lists the sidebar as `plugin not
+bundled in this build` and sets up the keybinds alone.
+
 ## Subcommands
 
 These drive the [tmux integration](/guide/tmux) and talk to the running TUI:

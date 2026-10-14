@@ -72,6 +72,8 @@ var (
 	foreignRunAction    = regexp.MustCompile(`\bRun\s+` + cogitatorStringPattern + `\s+"(?:pick|next|agents)"`)
 	foreignPluginAction = regexp.MustCompile(`\b(?:MessagePlugin|LaunchOrFocusPlugin|LaunchPlugin)\s+` + cogitatorWasmPattern)
 	cogitatorWasm       = regexp.MustCompile(cogitatorWasmPattern)
+	ownedNextRun        = regexp.MustCompile(`\bRun\s+(` + kdlStringPattern + `)\s+"next"`)
+	layoutBinary        = regexp.MustCompile(`(?m)^\s*cogitator\s+(` + kdlStringPattern + `)\s*$`)
 )
 
 // bindMode is the zellij input mode the binds live in and the mode each
@@ -256,7 +258,7 @@ func (t target) keybindsStatus() (installkit.Status, error) {
 		return installkit.Status{}, err
 	}
 
-	return managedStatus(t.confPath, found == want), nil
+	return managedStatus(t.confPath, found == want, func() string { return keybindsChange(found, t.spec.binary) }), nil
 }
 
 func (t target) sidebarStatus() installkit.Status {
@@ -275,15 +277,109 @@ func (t target) sidebarStatus() installkit.Status {
 
 	current := found == layoutBlock(t.spec.layoutPath) && fileHolds(t.spec.layoutPath, sidebarLayout(t.spec)) && t.wasmCurrent()
 
-	return managedStatus(t.confPath, current)
+	return managedStatus(t.confPath, current, func() string { return t.sidebarChange(found) })
 }
 
-func managedStatus(path string, current bool) installkit.Status {
+func managedStatus(path string, current bool, detail func() string) installkit.Status {
 	if current {
 		return installkit.Status{State: installkit.Current, Path: path}
 	}
 
-	return installkit.Status{State: installkit.Stale, Path: path}
+	return installkit.Status{State: installkit.Stale, Path: path, Detail: detail()}
+}
+
+// keybindsChange names the binary change when the owned block runs another
+// binary; otherwise the keys or template changed.
+func keybindsChange(block, binary string) string {
+	match := ownedNextRun.FindStringSubmatch(block)
+	if match == nil || quotedArgs(match[1])[0] == binary {
+		return "keybinds differ from what install would write"
+	}
+
+	return quotedArgs(match[1])[0] + " -> " + binary
+}
+
+// sidebarChange names the plugin or binary change when the owned layout
+// docks another wasm or runs another binary, else what made it stale.
+func (t target) sidebarChange(layoutBlockText string) string {
+	layout := ownedLayoutContent(layoutBlockText)
+
+	if wasm := cogitatorWasm.FindString(layout); wasm != "" {
+		if old := strings.TrimPrefix(quotedArgs(wasm)[0], "file:"); old != t.spec.plugin {
+			return old + " -> " + t.spec.plugin
+		}
+	}
+
+	if match := layoutBinary.FindStringSubmatch(layout); match != nil && quotedArgs(match[1])[0] != t.spec.binary {
+		return quotedArgs(match[1])[0] + " -> " + t.spec.binary
+	}
+
+	if !t.wasmCurrent() {
+		return t.spec.plugin + " differs from the plugin in this build"
+	}
+
+	return "sidebar layout differs from what install would write"
+}
+
+// ownedLayoutContent is the layout file an owned default_layout block names,
+// or "" when it cannot be read.
+func ownedLayoutContent(layoutBlockText string) string {
+	for _, line := range strings.SplitAfter(layoutBlockText, "\n") {
+		match := defaultLayoutArg.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+
+		content, err := os.ReadFile(quotedArgs(match[1])[0])
+		if err != nil {
+			return ""
+		}
+
+		return string(content)
+	}
+
+	return ""
+}
+
+// WithManagedKeys fills opts' empty keys with the ones cogitator's owned
+// keybinds block binds, so re-running install keeps keys the user chose
+// earlier.
+func (i Installer) WithManagedKeys(opts Options) (Options, error) {
+	confPath, err := installkit.ResolveSymlinks(i.configPath(opts.ConfigPath))
+	if err != nil {
+		return opts, err
+	}
+
+	content, _, err := installkit.ReadConfig(confPath)
+	if err != nil {
+		return opts, err
+	}
+
+	block, _ := ownedBlockTexts(content)
+	for _, line := range strings.SplitAfter(block, "\n") {
+		match := bindNode.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+
+		key := quotedArgs(match[1])[0]
+		switch {
+		case strings.Contains(line, `"next" {`):
+			fillKey(&opts.NextKey, key)
+		case strings.Contains(line, `"pick" {`):
+			fillKey(&opts.PickKey, key)
+		case strings.Contains(line, "MessagePlugin"):
+			fillKey(&opts.SidebarKey, key)
+		}
+	}
+
+	return opts, nil
+}
+
+func fillKey(dst *string, key string) {
+	if *dst == "" {
+		*dst = key
+	}
 }
 
 // refuseForeign stops an install that would duplicate cogitator wiring the

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/guilhermehto/cogitator/internal/installkit"
@@ -31,8 +32,9 @@ const ExtensionFilename = "cogitator.ts"
 // the installed copy does not depend on the omp process PATH.
 const binDecl = `const COGITATOR_BIN = "cogitator";`
 
-// binDeclPattern matches any baked COGITATOR_BIN declaration line.
-var binDeclPattern = regexp.MustCompile(`(?m)^const COGITATOR_BIN = "(?:[^"\\]|\\.)*";$`)
+// binDeclPattern matches any baked COGITATOR_BIN declaration line, capturing
+// the JS-escaped binary.
+var binDeclPattern = regexp.MustCompile(`(?m)^const COGITATOR_BIN = "((?:[^"\\]|\\.)*)";$`)
 
 // stampPrefix opens the header line that marks a file cogitator wrote.
 const stampPrefix = "// managed by cogitator (sha256:"
@@ -133,12 +135,34 @@ func classifyExtension(path, existing, cogitatorBin string) installkit.Status {
 		status.State = installkit.Current
 	case hasValidStamp(existing), isLegacyExtension(existing):
 		status.State = installkit.Stale
+		status.Detail = staleDetail(existing, cogitatorBin)
 	default:
 		status.State = installkit.Foreign
 		status.Detail = "hand-edited extension"
 	}
 
 	return status
+}
+
+// staleDetail names the binary change, or the template change when the
+// binary is the same.
+func staleDetail(existing, cogitatorBin string) string {
+	want := cogitatorBin
+	if want == "" {
+		want = "cogitator"
+	}
+
+	match := binDeclPattern.FindStringSubmatch(existing)
+	if match == nil {
+		return "extension template changed"
+	}
+
+	old, err := strconv.Unquote(`"` + match[1] + `"`)
+	if err != nil || old == want {
+		return "extension template changed"
+	}
+
+	return old + " -> " + want
 }
 
 // findForeignExtension returns a Foreign status for the first regular file in

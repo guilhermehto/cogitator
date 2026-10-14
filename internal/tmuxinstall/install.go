@@ -33,6 +33,7 @@ var (
 	bindCommandLine  = regexp.MustCompile(`^bind(?:-key)?\s`)
 	sourceCommand    = regexp.MustCompile(`^source(?:-file)?\s+(.*)$`)
 	cogitatorCommand = regexp.MustCompile(`cogitator\S*\s+(?:pick|next)\b`)
+	ownedNextBinary  = regexp.MustCompile(`run-shell -b "'([^']*)' next --client`)
 )
 
 // Options are the user-facing flags shared by Install and Uninstall.
@@ -63,6 +64,7 @@ type Installer struct {
 // the same binary, config path, and status.
 type plan struct {
 	opts       Options
+	binary     string
 	owned      string
 	confPath   string
 	existing   string
@@ -149,6 +151,7 @@ func (i Installer) plan(opts Options) (plan, error) {
 
 	p := plan{
 		opts:       opts,
+		binary:     binary,
 		owned:      ownedFileContent(binary, opts.NextKey, opts.PickKey),
 		confPath:   confPath,
 		existing:   existing,
@@ -190,12 +193,50 @@ func (i Installer) managedStatus(p plan) (installkit.Status, error) {
 		status.Detail = p.confPath + " does not source it"
 	case string(current) != p.owned:
 		status.State = installkit.Stale
-		status.Detail = "bindings differ from what install would write"
+		status.Detail = staleDetail(string(current), p.binary)
 	default:
 		status.State = installkit.Current
 	}
 
 	return status, nil
+}
+
+// staleDetail names the binary change when the owned file binds another
+// binary; otherwise the keys or template changed.
+func staleDetail(owned, binary string) string {
+	match := ownedNextBinary.FindStringSubmatch(owned)
+	if match == nil {
+		return "bindings differ from what install would write"
+	}
+
+	old := strings.NewReplacer("##", "#", `\\`, `\`, `\"`, `"`, `\$`, `$`).Replace(match[1])
+	if old == binary {
+		return "bindings differ from what install would write"
+	}
+
+	return old + " -> " + binary
+}
+
+// WithManagedKeys fills opts' empty next/pick keys with the ones the owned
+// file binds, so re-running install keeps keys the user chose earlier.
+func (i Installer) WithManagedKeys(opts Options) Options {
+	content, err := os.ReadFile(i.OwnedPath)
+	if err != nil {
+		return opts
+	}
+
+	for _, line := range strings.Split(string(content), "\n") {
+		match := boundKeyLine.FindStringSubmatch(line)
+		switch {
+		case match == nil:
+		case strings.Contains(line, " next --client") && opts.NextKey == "":
+			opts.NextKey = match[1]
+		case strings.Contains(line, " pick --client") && opts.PickKey == "":
+			opts.PickKey = match[1]
+		}
+	}
+
+	return opts
 }
 
 // findForeignBinding walks the user's tmux.conf and every file it sources

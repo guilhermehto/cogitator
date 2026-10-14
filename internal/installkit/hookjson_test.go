@@ -324,18 +324,32 @@ func TestCheckHooksStates(t *testing.T) {
 		"Stop":[{"hooks":[{"type":"command","command":"/opt/cog claude-hook"}]}]}}`
 
 	cases := map[string]struct {
-		content string
-		want    State
+		content    string
+		want       State
+		wantDetail string
 	}{
-		"no file":             {"", Missing},
-		"no cogitator hooks":  {`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo hi"}]}]}}`, Missing},
-		"every event wired":   {full, Current},
-		"some events missing": {`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/opt/cog claude-hook"}]}]}}`, Stale},
-		"other binary":        {strings.ReplaceAll(full, "/opt/cog", "/old/cog"), Stale},
-		"unrelated subcommand lookalike": {
-			`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"tool my-claude-hook-x"}]}]}}`, Missing,
+		"no file":            {content: "", want: Missing},
+		"no cogitator hooks": {content: `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo hi"}]}]}}`, want: Missing},
+		"every event wired":  {content: full, want: Current},
+		"some events missing": {
+			content:    `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/opt/cog claude-hook"}]}]}}`,
+			want:       Stale,
+			wantDetail: "hooks differ from what install would write",
 		},
-		"inline wrapper": {strings.Replace(full, "/opt/cog claude-hook", "sh -c 'cogitator claude-hook'", 1), Foreign},
+		"other binary": {
+			content:    strings.ReplaceAll(full, "/opt/cog", "/old/cog"),
+			want:       Stale,
+			wantDetail: "/old/cog -> /opt/cog",
+		},
+		"unrelated subcommand lookalike": {
+			content: `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"tool my-claude-hook-x"}]}]}}`,
+			want:    Missing,
+		},
+		"inline wrapper": {
+			content:    strings.Replace(full, "/opt/cog claude-hook", "sh -c 'cogitator claude-hook'", 1),
+			want:       Foreign,
+			wantDetail: `SessionStart hook "sh -c 'cogitator claude-hook'" runs claude-hook`,
+		},
 	}
 
 	for name, tc := range cases {
@@ -346,8 +360,8 @@ func TestCheckHooksStates(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CheckHooks: %v", err)
 			}
-			if status.State != tc.want || status.Path != spec.Path {
-				t.Fatalf("status = %+v, want %v at %s", status, tc.want, spec.Path)
+			if status.State != tc.want || status.Path != spec.Path || status.Detail != tc.wantDetail {
+				t.Fatalf("status = %+v, want %v at %s (%q)", status, tc.want, spec.Path, tc.wantDetail)
 			}
 		})
 	}
