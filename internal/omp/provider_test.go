@@ -249,3 +249,19 @@ func TestPollOnce_PreservesHookSeededSession(t *testing.T) {
 		t.Errorf("hook-seeded session early1 was pruned by a poll that missed it: %+v", batch)
 	}
 }
+
+func TestPollOnce_KeepsPaneFromEarlierHook(t *testing.T) {
+	p := omp.NewProvider("", 5*time.Second, 30*time.Minute, nil)
+	sink := &fakeSink{}
+	sessions := []omp.Session{{ID: "s1", Dir: "/tmp/wt", LastActivity: time.Now()}}
+	p.PollOnceForTest(sink, sessions)
+
+	p.HandleHookFrameForTest([]byte(`{"hook_event_name":"turn_start","session_id":"s1","cogitator_pane_id":"dev:terminal_3"}`), sink)
+	p.HandleHookFrameForTest([]byte(`{"hook_event_name":"turn_end","session_id":"s1"}`), sink)
+	p.PollOnceForTest(sink, sessions)
+
+	batch := sink.lastReplace()
+	if len(batch) != 1 || batch[0].PaneID != "dev:terminal_3" {
+		t.Errorf("PaneID after unstamped hook and poll = %+v, want dev:terminal_3", batch)
+	}
+}

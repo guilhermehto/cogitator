@@ -1,9 +1,11 @@
 package agents
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/workspace"
@@ -116,8 +118,8 @@ func TestBuildLivenessOfRecentOnlySessions(t *testing.T) {
 
 		return views
 	}
-	windowAt := func(dir string) []Pane {
-		return []Pane{{PaneID: "%1", WindowID: "@1", SessionID: "$1", CogDir: dir}}
+	windowAt := func(dir string) []mux.Pane {
+		return []mux.Pane{{PaneID: "%1", WindowID: "@1", SessionID: "$1", CogDir: dir}}
 	}
 	rowAt := func(attn state.Attention, age time.Duration) []settings.Row {
 		return []settings.Row{row("/w/a", settings.StateRunning, attn, age)}
@@ -167,7 +169,7 @@ func TestBuildLivenessOfRecentOnlySessions(t *testing.T) {
 
 func TestBuildHidesDismissedAgentUntilItRunsAgain(t *testing.T) {
 	dismissedAt := now.Add(-time.Minute)
-	windowAt := []Pane{{PaneID: "%1", WindowID: "@1", SessionID: "$1", CogDir: "/w/a"}}
+	windowAt := []mux.Pane{{PaneID: "%1", WindowID: "@1", SessionID: "$1", CogDir: "/w/a"}}
 	rowsActiveAgo := func(age time.Duration) []settings.Row {
 		return []settings.Row{row("/w/a", settings.StateStopped, state.AttnFinished, age)}
 	}
@@ -219,12 +221,12 @@ func TestBuildSkipsPlaceholdersMissingAndPendingSessions(t *testing.T) {
 
 func TestBuildManagedAgentLocatesWindowByCogDir(t *testing.T) {
 	rows := []settings.Row{row("/w/a", settings.StateRunning, state.AttnFinished, time.Minute)}
-	panes := []Pane{
+	panes := []mux.Pane{
 		{PaneID: "%3", WindowID: "@3", SessionID: "$1", Cwd: "/elsewhere", CogDir: "/w/a"},
 	}
 
 	got := build(Input{Rows: rows, Panes: panes, Live: liveViews("/w/a")})
-	if got[0].WindowID != "@3" || got[0].PaneID != "%3" || got[0].TmuxSessionID != "$1" || !got[0].SessionOwned {
+	if got[0].WindowID != "@3" || got[0].PaneID != "%3" || got[0].MuxSessionID != "$1" || !got[0].SessionOwned {
 		t.Fatalf("tmux location not joined: %+v", got[0])
 	}
 }
@@ -236,19 +238,19 @@ func TestBuildStrays(t *testing.T) {
 			Attention: state.AttnPermissionPending, LastActivity: ago(time.Minute),
 		}
 	}
-	pane := Pane{PaneID: "%7", WindowID: "@7", SessionID: "$2", Cwd: "/stray"}
+	pane := mux.Pane{PaneID: "%7", WindowID: "@7", SessionID: "$2", Cwd: "/stray"}
 
 	tests := []struct {
 		name  string
 		live  []state.SessionView
-		panes []Pane
+		panes []mux.Pane
 		root  string
 		want  []string
 	}{
-		{"includes live session matching a pane cwd", []state.SessionView{live("/stray", state.SourceLive)}, []Pane{pane}, "", []string{"/stray"}},
+		{"includes live session matching a pane cwd", []state.SessionView{live("/stray", state.SourceLive)}, []mux.Pane{pane}, "", []string{"/stray"}},
 		{"drops stray without a matching pane", []state.SessionView{live("/stray", state.SourceLive)}, nil, "", nil},
-		{"drops recent-history sessions", []state.SessionView{live("/stray", state.SourceRecent)}, []Pane{pane}, "", nil},
-		{"drops sessions under the workspace root", []state.SessionView{live("/stray", state.SourceLive)}, []Pane{pane}, "/", nil},
+		{"drops recent-history sessions", []state.SessionView{live("/stray", state.SourceRecent)}, []mux.Pane{pane}, "", nil},
+		{"drops sessions under the workspace root", []state.SessionView{live("/stray", state.SourceLive)}, []mux.Pane{pane}, "/", nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -266,7 +268,7 @@ func TestBuildStrays(t *testing.T) {
 func TestBuildStrayExcludesManagedDirs(t *testing.T) {
 	rows := []settings.Row{row("/w/a", settings.StateStopped, "", 90*time.Minute)}
 	live := []state.SessionView{{SessionID: "x", Directory: "/w/a", Source: state.SourceLive, LastActivity: ago(time.Minute)}}
-	panes := []Pane{{PaneID: "%1", WindowID: "@1", SessionID: "$1", Cwd: "/w/a"}}
+	panes := []mux.Pane{{PaneID: "%1", WindowID: "@1", SessionID: "$1", Cwd: "/w/a"}}
 
 	if got := build(Input{Rows: rows, Live: live, Panes: panes}); len(got) != 0 {
 		t.Fatalf("managed dir leaked as stray: %+v", got)
@@ -275,7 +277,7 @@ func TestBuildStrayExcludesManagedDirs(t *testing.T) {
 
 func TestBuildStrayPrefersPaneRunningTheHarness(t *testing.T) {
 	live := []state.SessionView{{SessionID: "x", Directory: "/stray", Source: state.SourceLive, Provider: "opencode", LastActivity: ago(time.Minute)}}
-	panes := []Pane{
+	panes := []mux.Pane{
 		{PaneID: "%1", WindowID: "@1", SessionID: "$1", Cwd: "/stray", Command: "zsh"},
 		{PaneID: "%2", WindowID: "@2", SessionID: "$1", Cwd: "/stray", Command: "opencode"},
 	}
@@ -286,9 +288,26 @@ func TestBuildStrayPrefersPaneRunningTheHarness(t *testing.T) {
 	}
 }
 
+// The panes are zellijctl.ListPanes output for a zellij session with a shell
+// and a claude pane in the stray dir; the claude-code harness launches "claude".
+func TestBuildStrayPrefersClaudePaneOverShellInZellij(t *testing.T) {
+	live := []state.SessionView{{SessionID: "x", Directory: "/stray", Source: state.SourceLive, Provider: "claude-code", LastActivity: ago(time.Minute)}}
+	for _, command := range []string{"claude --resume abc", "sleep 100000 claude"} {
+		panes := []mux.Pane{
+			{PaneID: "cogtest-agent:terminal_0", WindowID: "cogtest-agent:0", SessionID: "cogtest-agent", Cwd: "/stray", Command: "/bin/zsh", CogDir: "/stray"},
+			{PaneID: "cogtest-agent:terminal_1", WindowID: "cogtest-agent:0", SessionID: "cogtest-agent", Cwd: "/stray", Command: command, CogDir: "/stray"},
+		}
+
+		got := build(Input{Live: live, Panes: panes})
+		if got[0].PaneID != "cogtest-agent:terminal_1" {
+			t.Errorf("command %q: pane = %s, want cogtest-agent:terminal_1", command, got[0].PaneID)
+		}
+	}
+}
+
 func TestBuildStrayFallsBackToLowestPaneID(t *testing.T) {
 	live := []state.SessionView{{SessionID: "x", Directory: "/stray", Source: state.SourceLive, LastActivity: ago(time.Minute)}}
-	panes := []Pane{
+	panes := []mux.Pane{
 		{PaneID: "%10", WindowID: "@10", SessionID: "$1", Cwd: "/stray", Command: "zsh"},
 		{PaneID: "%9", WindowID: "@9", SessionID: "$1", Cwd: "/stray", Command: "vim"},
 	}
@@ -296,6 +315,131 @@ func TestBuildStrayFallsBackToLowestPaneID(t *testing.T) {
 	got := build(Input{Live: live, Panes: panes})
 	if got[0].PaneID != "%9" {
 		t.Fatalf("pane = %s, want %%9", got[0].PaneID)
+	}
+}
+
+// The zellij session "dev" has two omp tabs in the worktree /w/a.
+func siblingPanes() []mux.Pane {
+	return []mux.Pane{
+		{PaneID: "dev:terminal_1", WindowID: "dev:0", SessionID: "dev", Cwd: "/w/a", Command: "omp", CogDir: "/w/a"},
+		{PaneID: "dev:terminal_2", WindowID: "dev:1", SessionID: "dev", Cwd: "/w/a", Command: "omp", CogDir: "/w/a"},
+	}
+}
+
+func siblingView(id string, created time.Duration, attn state.Attention, paneID string) state.SessionView {
+	return state.SessionView{
+		SessionID: id, Directory: "/w/a", Source: state.SourceLive, Provider: "omp",
+		Attention: attn, Created: ago(created), LastActivity: ago(time.Minute), PaneID: paneID,
+	}
+}
+
+func TestBuildSplitsSessionsSharingAManagedDirOntoTheirHookPanes(t *testing.T) {
+	rows := []settings.Row{row("/w/a", settings.StateRunning, state.AttnActive, time.Minute)}
+	live := []state.SessionView{
+		siblingView("old", 2*time.Hour, state.AttnQuestionPending, "dev:terminal_2"),
+		siblingView("new", time.Hour, state.AttnActive, "dev:terminal_1"),
+	}
+
+	got := build(Input{Rows: rows, Live: live, Panes: siblingPanes()})
+	byID := map[string]Agent{}
+	for _, a := range got {
+		byID[a.ID] = a
+	}
+	old, okOld := byID["/w/a#old"]
+	fresh, okNew := byID["/w/a#new"]
+	if len(got) != 2 || !okOld || !okNew {
+		t.Fatalf("agents = %v, want /w/a#old and /w/a#new", ids(got))
+	}
+	if old.WindowID != "dev:1" || old.Group != GroupNeedsYou || old.Kind != KindWorktree || old.Dir != "/w/a" {
+		t.Errorf("old = %+v, want its question on tab dev:1", old)
+	}
+	if fresh.WindowID != "dev:0" || fresh.Group != GroupWorking || !fresh.Sibling() {
+		t.Errorf("new = %+v, want working on tab dev:0", fresh)
+	}
+}
+
+func TestBuildGivesUnreportedSiblingsDistinctPanes(t *testing.T) {
+	live := []state.SessionView{
+		siblingView("a", 2*time.Hour, state.AttnActive, ""),
+		siblingView("b", time.Hour, state.AttnActive, ""),
+	}
+
+	got := build(Input{Live: live, Panes: siblingPanes()})
+	if len(got) != 2 || got[0].PaneID == got[1].PaneID || got[0].Kind != KindStray {
+		t.Fatalf("agents = %+v, want two strays on different panes", got)
+	}
+}
+
+func TestBuildKeepsOneAgentPerDirForASingleSession(t *testing.T) {
+	live := []state.SessionView{siblingView("only", time.Hour, state.AttnActive, "dev:terminal_2")}
+
+	got := build(Input{Live: live, Panes: siblingPanes()})
+	if !equal(ids(got), []string{"/w/a"}) || got[0].Sibling() {
+		t.Fatalf("agents = %+v, want the directory agent /w/a", got)
+	}
+}
+
+// omp started from a shell in ~ runs in /tmp; zellij reports the shell's cwd.
+func TestBuildPlacesALoneSessionOnTheHookPaneWhateverItsShellCwd(t *testing.T) {
+	panes := []mux.Pane{{PaneID: "bb:terminal_2", WindowID: "bb:1", SessionID: "bb", Cwd: "/home/me", Command: "omp"}}
+	reported := state.SessionView{SessionID: "s", Directory: "/tmp", Source: state.SourceLive, Provider: "omp", LastActivity: ago(time.Minute), PaneID: "bb:terminal_2"}
+	gone := reported
+	gone.PaneID = "bb:terminal_9"
+
+	got := build(Input{Live: []state.SessionView{reported}, Panes: panes})
+	if len(got) != 1 || got[0].WindowID != "bb:1" || got[0].Kind != KindStray {
+		t.Fatalf("agents = %+v, want the /tmp stray on tab bb:1", got)
+	}
+
+	if got := build(Input{Live: []state.SessionView{gone}, Panes: panes}); len(got) != 0 {
+		t.Fatalf("agents = %+v, want none once the reported pane is gone and no pane sits in /tmp", got)
+	}
+}
+
+func TestBuildLabelsSiblingsByTabNameThenTitleThenTabNumber(t *testing.T) {
+	panes := []mux.Pane{
+		{PaneID: "dev:terminal_1", WindowID: "dev:0", SessionID: "dev", Cwd: "/w/a", Command: "omp", TabName: "LEX-123", TabNumber: 1},
+		{PaneID: "dev:terminal_2", WindowID: "dev:1", SessionID: "dev", Cwd: "/w/a", Command: "omp", TabNumber: 2},
+		{PaneID: "dev:terminal_3", WindowID: "dev:2", SessionID: "dev", Cwd: "/w/a", Command: "omp", TabNumber: 3},
+	}
+	named := siblingView("named", 3*time.Hour, state.AttnActive, "dev:terminal_1")
+	named.Title = "Fix login"
+	titled := siblingView("titled", 2*time.Hour, state.AttnActive, "dev:terminal_2")
+	titled.Title = "Tidy sidebar"
+	fresh := siblingView("fresh", time.Hour, state.AttnActive, "dev:terminal_3")
+
+	got := build(Input{Live: []state.SessionView{named, titled, fresh}, Panes: panes})
+	tabs := map[string]string{}
+	for _, a := range got {
+		tabs[a.ID] = a.Tab
+	}
+	want := map[string]string{"/w/a#named": "LEX-123", "/w/a#titled": "Tidy sidebar", "/w/a#fresh": "tab 3"}
+	if !reflect.DeepEqual(tabs, want) {
+		t.Errorf("tabs = %v, want %v", tabs, want)
+	}
+}
+
+func TestBuildShowsTabNamesOnlyWhenTheyAddSomething(t *testing.T) {
+	cases := map[string]struct {
+		tabName string
+		want    string
+	}{
+		"name the user chose":              {"LEX-9", "LEX-9"},
+		"name cogitator gave the tab":      {"repo/main", ""},
+		"unnamed tab of a lone agent":      {"", ""},
+		"tab named after the worktree dir": {"a", ""},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := row("/w/a", settings.StateRunning, state.AttnActive, time.Minute)
+			r.Branch = "main"
+			panes := []mux.Pane{{PaneID: "%1", WindowID: "@1", SessionID: "$1", Cwd: "/w/a", Command: "opencode", CogDir: "/w/a", TabName: tc.tabName, TabNumber: 2}}
+
+			got := build(Input{Rows: []settings.Row{r}, Panes: panes})
+			if len(got) != 1 || got[0].Tab != tc.want {
+				t.Fatalf("agents = %+v, want tab %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -348,10 +492,10 @@ func TestNextReturnsFalseWithoutOtherActionableAgents(t *testing.T) {
 }
 
 func TestAgentAt(t *testing.T) {
-	owned := []Agent{{ID: "A", WindowID: "@1", TmuxSessionID: "$1", SessionOwned: true}}
+	owned := []Agent{{ID: "A", WindowID: "@1", MuxSessionID: "$1", SessionOwned: true}}
 	shared := []Agent{
-		{ID: "A", WindowID: "@1", TmuxSessionID: "$1"},
-		{ID: "B", WindowID: "@2", TmuxSessionID: "$1"},
+		{ID: "A", WindowID: "@1", MuxSessionID: "$1"},
+		{ID: "B", WindowID: "@2", MuxSessionID: "$1"},
 	}
 	tests := []struct {
 		name      string
@@ -381,7 +525,7 @@ func TestBuildSessionOwnedFalseWhenSessionHoldsTwoTaggedWindows(t *testing.T) {
 		row("/w/a", settings.StateRunning, state.AttnFinished, time.Minute),
 		row("/w/b", settings.StateRunning, state.AttnFinished, 2*time.Minute),
 	}
-	panes := []Pane{
+	panes := []mux.Pane{
 		{PaneID: "%1", WindowID: "@1", SessionID: "$1", CogDir: "/w/a"},
 		{PaneID: "%2", WindowID: "@2", SessionID: "$1", CogDir: "/w/b"},
 	}

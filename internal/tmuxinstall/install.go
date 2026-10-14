@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/guilhermehto/cogitator/internal/installkit"
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 )
 
@@ -68,7 +69,7 @@ func (i Installer) Install(opts Options) error {
 		}
 	}
 
-	binary, err := i.resolveBinary(opts.Binary)
+	binary, err := installkit.ResolveBinary(opts.Binary, i.LookPath, i.Executable)
 	if err != nil {
 		return err
 	}
@@ -81,7 +82,7 @@ func (i Installer) Install(opts Options) error {
 		return err
 	}
 
-	existing, mode, err := readConfig(confPath)
+	existing, mode, err := installkit.ReadConfig(confPath)
 	if err != nil {
 		return err
 	}
@@ -98,13 +99,13 @@ func (i Installer) Install(opts Options) error {
 		return nil
 	}
 
-	if err := writeFileAtomic(i.OwnedPath, []byte(owned), 0o644); err != nil {
+	if err := installkit.WriteFileAtomic(i.OwnedPath, []byte(owned), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", i.OwnedPath, err)
 	}
 	fmt.Fprintf(i.Out, "wrote %s (next: prefix+%s, pick: prefix+%s)\n", i.OwnedPath, opts.NextKey, opts.PickKey)
 
 	if linked {
-		if err := writeFileAtomic(confPath, []byte(updated), mode); err != nil {
+		if err := installkit.WriteFileAtomic(confPath, []byte(updated), mode); err != nil {
 			return fmt.Errorf("write %s: %w", confPath, err)
 		}
 		fmt.Fprintf(i.Out, "added %q to %s\n", sourceLine, confPath)
@@ -127,7 +128,7 @@ func (i Installer) Uninstall(opts Options) error {
 		return err
 	}
 
-	existing, mode, err := readConfig(confPath)
+	existing, mode, err := installkit.ReadConfig(confPath)
 	if err != nil {
 		return err
 	}
@@ -142,7 +143,7 @@ func (i Installer) Uninstall(opts Options) error {
 	}
 
 	if removedLines > 0 {
-		if err := writeFileAtomic(confPath, []byte(stripped), mode); err != nil {
+		if err := installkit.WriteFileAtomic(confPath, []byte(stripped), mode); err != nil {
 			return fmt.Errorf("write %s: %w", confPath, err)
 		}
 		fmt.Fprintf(i.Out, "removed %d source line(s) from %s\n", removedLines, confPath)
@@ -252,45 +253,6 @@ func validateKey(key string) error {
 	return nil
 }
 
-func (i Installer) resolveBinary(flagValue string) (string, error) {
-	path := flagValue
-
-	if path == "" {
-		if found, err := i.LookPath("cogitator"); err == nil {
-			path = found
-		}
-	}
-
-	if path == "" {
-		exe, err := i.Executable()
-		if err != nil {
-			return "", fmt.Errorf("locate cogitator binary: %w", err)
-		}
-		path = exe
-	}
-
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", fmt.Errorf("resolve binary path %q: %w", path, err)
-	}
-
-	if isGoRunBinary(abs) {
-		return "", fmt.Errorf("%s is a temporary `go run` binary; install cogitator first or pass --binary", abs)
-	}
-
-	return abs, nil
-}
-
-func isGoRunBinary(path string) bool {
-	for _, part := range strings.Split(path, string(filepath.Separator)) {
-		if strings.HasPrefix(part, "go-build") {
-			return true
-		}
-	}
-
-	return false
-}
-
 // resolveUserConfig follows tmux's own lookup order and resolves symlinks so
 // the atomic write replaces the dotfiles target, not the link.
 func (i Installer) resolveUserConfig(explicit string) (string, error) {
@@ -300,15 +262,7 @@ func (i Installer) resolveUserConfig(explicit string) (string, error) {
 		path = i.firstExistingDefaultConfig()
 	}
 
-	resolved, err := filepath.EvalSymlinks(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return path, nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("resolve %s: %w", path, err)
-	}
-
-	return resolved, nil
+	return installkit.ResolveSymlinks(path)
 }
 
 func (i Installer) firstExistingDefaultConfig() string {
@@ -327,23 +281,6 @@ func (i Installer) firstExistingDefaultConfig() string {
 	}
 
 	return homeConf
-}
-
-func readConfig(path string) (content string, mode fs.FileMode, err error) {
-	info, err := os.Stat(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return "", 0o644, nil
-	}
-	if err != nil {
-		return "", 0, fmt.Errorf("stat %s: %w", path, err)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", 0, fmt.Errorf("read %s: %w", path, err)
-	}
-
-	return string(data), info.Mode().Perm(), nil
 }
 
 // withSourceLine appends the source line unless a line already references the
@@ -431,30 +368,4 @@ func tmuxQuote(s string) string {
 	escaped := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`).Replace(s)
 
 	return `"` + escaped + `"`
-}
-
-func writeFileAtomic(path string, data []byte, mode fs.FileMode) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp.Name(), mode); err != nil {
-		return err
-	}
-
-	return os.Rename(tmp.Name(), path)
 }

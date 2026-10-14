@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 )
 
 const (
@@ -42,17 +42,13 @@ func (b windowBadge) value(option string) string {
 	}
 }
 
-func paneValue(p Pane, option string) string {
-	return windowBadge{status: p.CogStatus, reason: p.CogReason, since: p.CogSince}.value(option)
-}
-
 // DiffOptions returns the writes that bring tmux's @cog_* options in line with
 // the agent list, given what tmux currently holds (panes and globals).
-func DiffOptions(list []Agent, panes []Pane, globals map[string]string) []tmuxctl.OptionWrite {
+func DiffOptions(list []Agent, panes []mux.Pane, globals map[string]string) []mux.OptionWrite {
 	current := currentWindowOptions(panes)
 	desired := desiredBadges(list, current)
 
-	var writes []tmuxctl.OptionWrite
+	var writes []mux.OptionWrite
 	for _, windowID := range sortedKeys(current) {
 		for _, option := range windowOptions {
 			want := desired[windowID].value(option)
@@ -66,20 +62,20 @@ func DiffOptions(list []Agent, panes []Pane, globals map[string]string) []tmuxct
 }
 
 // ClearAll returns the writes that remove every @cog_* option cogitator owns.
-func ClearAll(panes []Pane, globals map[string]string) []tmuxctl.OptionWrite {
-	var writes []tmuxctl.OptionWrite
+func ClearAll(panes []mux.Pane, globals map[string]string) []mux.OptionWrite {
+	var writes []mux.OptionWrite
 
 	current := currentWindowOptions(panes)
 	for _, windowID := range sortedKeys(current) {
 		for _, option := range windowOptions {
 			if current[windowID].value(option) != "" {
-				writes = append(writes, tmuxctl.OptionWrite{Target: windowID, Name: option, Unset: true})
+				writes = append(writes, mux.OptionWrite{Target: windowID, Name: option, Unset: true})
 			}
 		}
 	}
 
 	for _, option := range globalOptions {
-		writes = append(writes, tmuxctl.OptionWrite{Global: true, Name: option, Unset: true})
+		writes = append(writes, mux.OptionWrite{Global: true, Name: option, Unset: true})
 	}
 	return writes
 }
@@ -95,7 +91,7 @@ type Visit struct {
 // agents whose visitor has switched away or detached while the agent stayed
 // on the same finished turn. visits is keyed by client name and the returned
 // map replaces it on every poll.
-func SeenOnLeave(list []Agent, clients []tmuxctl.ClientFocus, visits map[string]Visit) (map[string]Visit, []Agent) {
+func SeenOnLeave(list []Agent, clients []mux.ClientFocus, visits map[string]Visit) (map[string]Visit, []Agent) {
 	done := map[string]Agent{}
 	for _, a := range list {
 		if a.Group == GroupDone {
@@ -134,7 +130,7 @@ func SeenOnLeave(list []Agent, clients []tmuxctl.ClientFocus, visits map[string]
 	return next, out
 }
 
-func currentWindowOptions(panes []Pane) map[string]windowBadge {
+func currentWindowOptions(panes []mux.Pane) map[string]windowBadge {
 	current := map[string]windowBadge{}
 	for _, p := range panes {
 		if _, ok := current[p.WindowID]; !ok {
@@ -214,18 +210,18 @@ func needsYouReason(attention state.Attention) string {
 	}
 }
 
-func diffOption(target, option, have, want string) (tmuxctl.OptionWrite, bool) {
+func diffOption(target, option, have, want string) (mux.OptionWrite, bool) {
 	switch {
 	case want == have:
-		return tmuxctl.OptionWrite{}, false
+		return mux.OptionWrite{}, false
 	case want == "":
-		return tmuxctl.OptionWrite{Target: target, Name: option, Unset: true}, true
+		return mux.OptionWrite{Target: target, Name: option, Unset: true}, true
 	default:
-		return tmuxctl.OptionWrite{Target: target, Name: option, Value: want}, true
+		return mux.OptionWrite{Target: target, Name: option, Value: want}, true
 	}
 }
 
-func diffGlobals(list []Agent, globals map[string]string) []tmuxctl.OptionWrite {
+func diffGlobals(list []Agent, globals map[string]string) []mux.OptionWrite {
 	byGroup := Counts(list).ByGroup
 	counts := map[string]int{
 		OptNeeds:   byGroup[GroupNeedsYou],
@@ -233,7 +229,7 @@ func diffGlobals(list []Agent, globals map[string]string) []tmuxctl.OptionWrite 
 		OptWorking: byGroup[GroupWorking],
 	}
 
-	var writes []tmuxctl.OptionWrite
+	var writes []mux.OptionWrite
 	for _, option := range globalOptions {
 		want := ""
 		if counts[option] > 0 {

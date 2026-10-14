@@ -5,39 +5,39 @@ import (
 	"testing"
 	"time"
 
+	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 )
 
 func agentOn(id, windowID string, group Group, attn state.Attention, age int) Agent {
 	return Agent{
-		ID: id, WindowID: windowID, TmuxSessionID: "$1", Group: group,
+		ID: id, WindowID: windowID, MuxSessionID: "$1", Group: group,
 		Attention: attn, LastActivity: now.Add(-durationSecs(age)),
 	}
 }
 
 func durationSecs(n int) time.Duration { return time.Duration(n) * time.Second }
 
-func winSet(target, name, value string) tmuxctl.OptionWrite {
-	return tmuxctl.OptionWrite{Target: target, Name: name, Value: value}
+func winSet(target, name, value string) mux.OptionWrite {
+	return mux.OptionWrite{Target: target, Name: name, Value: value}
 }
 
-func winUnset(target, name string) tmuxctl.OptionWrite {
-	return tmuxctl.OptionWrite{Target: target, Name: name, Unset: true}
+func winUnset(target, name string) mux.OptionWrite {
+	return mux.OptionWrite{Target: target, Name: name, Unset: true}
 }
 
-func globalSet(name, value string) tmuxctl.OptionWrite {
-	return tmuxctl.OptionWrite{Global: true, Name: name, Value: value}
+func globalSet(name, value string) mux.OptionWrite {
+	return mux.OptionWrite{Global: true, Name: name, Value: value}
 }
 
-func globalUnset(name string) tmuxctl.OptionWrite {
-	return tmuxctl.OptionWrite{Global: true, Name: name, Unset: true}
+func globalUnset(name string) mux.OptionWrite {
+	return mux.OptionWrite{Global: true, Name: name, Unset: true}
 }
 
 func TestDiffOptionsIsEmptyWhenTmuxHoldsDesiredState(t *testing.T) {
 	a := agentOn("/a", "@1", GroupNeedsYou, state.AttnPermissionPending, 10)
 	since := "1767268790"
-	panes := []Pane{{WindowID: "@1", CogStatus: "needs-you", CogReason: "permission", CogSince: since}}
+	panes := []mux.Pane{{WindowID: "@1", CogStatus: "needs-you", CogReason: "permission", CogSince: since}}
 	globals := map[string]string{OptNeeds: "1"}
 
 	if got := DiffOptions([]Agent{a}, panes, globals); len(got) != 0 {
@@ -47,12 +47,12 @@ func TestDiffOptionsIsEmptyWhenTmuxHoldsDesiredState(t *testing.T) {
 
 func TestDiffOptionsMovesPermissionToWorking(t *testing.T) {
 	a := agentOn("/a", "@1", GroupWorking, state.AttnActive, 5)
-	panes := []Pane{{WindowID: "@1", CogStatus: "needs-you", CogReason: "permission", CogSince: "100"}}
+	panes := []mux.Pane{{WindowID: "@1", CogStatus: "needs-you", CogReason: "permission", CogSince: "100"}}
 	globals := map[string]string{OptNeeds: "1"}
 
 	got := DiffOptions([]Agent{a}, panes, globals)
 
-	want := []tmuxctl.OptionWrite{
+	want := []mux.OptionWrite{
 		winSet("@1", OptStatus, "working"),
 		winUnset("@1", OptReason),
 		winSet("@1", OptSince, "1767268795"),
@@ -66,7 +66,7 @@ func TestDiffOptionsMovesPermissionToWorking(t *testing.T) {
 
 func TestDiffOptionsIgnoresActivityWithoutStatusChange(t *testing.T) {
 	a := agentOn("/a", "@1", GroupWorking, state.AttnActive, 1)
-	panes := []Pane{{WindowID: "@1", CogStatus: "working", CogSince: "100"}}
+	panes := []mux.Pane{{WindowID: "@1", CogStatus: "working", CogSince: "100"}}
 	globals := map[string]string{OptWorking: "1"}
 
 	if got := DiffOptions([]Agent{a}, panes, globals); len(got) != 0 {
@@ -75,11 +75,11 @@ func TestDiffOptionsIgnoresActivityWithoutStatusChange(t *testing.T) {
 }
 
 func TestDiffOptionsUnsetsOrphanedWindowOptions(t *testing.T) {
-	panes := []Pane{{WindowID: "@2", CogStatus: "done", CogReason: "finished", CogSince: "100"}}
+	panes := []mux.Pane{{WindowID: "@2", CogStatus: "done", CogReason: "finished", CogSince: "100"}}
 
 	got := DiffOptions(nil, panes, nil)
 
-	want := []tmuxctl.OptionWrite{
+	want := []mux.OptionWrite{
 		winUnset("@2", OptStatus), winUnset("@2", OptReason), winUnset("@2", OptSince),
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -90,7 +90,7 @@ func TestDiffOptionsUnsetsOrphanedWindowOptions(t *testing.T) {
 func TestDiffOptionsSkipsWindowsMissingFromPanes(t *testing.T) {
 	a := agentOn("/a", "@9", GroupNeedsYou, state.AttnQuestionPending, 5)
 
-	for _, w := range DiffOptions([]Agent{a}, []Pane{{WindowID: "@1"}}, nil) {
+	for _, w := range DiffOptions([]Agent{a}, []mux.Pane{{WindowID: "@1"}}, nil) {
 		if !w.Global {
 			t.Fatalf("want no window writes, got %v", w)
 		}
@@ -101,7 +101,7 @@ func TestDiffOptionsShowsNeedsYouOverStrayInSharedWindow(t *testing.T) {
 	stray := agentOn("/a-stray", "@1", GroupWorking, state.AttnActive, 5)
 	needs := agentOn("/z-managed", "@1", GroupNeedsYou, state.AttnErrored, 5)
 
-	got := DiffOptions([]Agent{stray, needs}, []Pane{{WindowID: "@1"}}, nil)
+	got := DiffOptions([]Agent{stray, needs}, []mux.Pane{{WindowID: "@1"}}, nil)
 
 	if len(got) == 0 || got[0] != winSet("@1", OptStatus, "needs-you") {
 		t.Fatalf("want needs-you first, got %v", got)
@@ -110,25 +110,25 @@ func TestDiffOptionsShowsNeedsYouOverStrayInSharedWindow(t *testing.T) {
 
 func TestDiffOptionsUnsetsStoppedAgentWindow(t *testing.T) {
 	a := agentOn("/a", "@1", GroupStopped, state.AttnInactive, 5)
-	panes := []Pane{{WindowID: "@1", CogStatus: "idle", CogSince: "100"}}
+	panes := []mux.Pane{{WindowID: "@1", CogStatus: "idle", CogSince: "100"}}
 
 	got := DiffOptions([]Agent{a}, panes, nil)
 
-	want := []tmuxctl.OptionWrite{winUnset("@1", OptStatus), winUnset("@1", OptSince)}
+	want := []mux.OptionWrite{winUnset("@1", OptStatus), winUnset("@1", OptSince)}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v\nwant %v", got, want)
 	}
 }
 
 func TestClearAllUnsetsPresentWindowOptionsAndGlobals(t *testing.T) {
-	panes := []Pane{
+	panes := []mux.Pane{
 		{WindowID: "@1", CogStatus: "done", CogReason: "finished", CogSince: "1"},
 		{WindowID: "@2"},
 	}
 
 	got := ClearAll(panes, map[string]string{OptDone: "1"})
 
-	want := []tmuxctl.OptionWrite{
+	want := []mux.OptionWrite{
 		winUnset("@1", OptStatus), winUnset("@1", OptReason), winUnset("@1", OptSince),
 		globalUnset(OptNeeds), globalUnset(OptDone), globalUnset(OptWorking),
 	}
@@ -144,15 +144,15 @@ func TestSeenOnLeave(t *testing.T) {
 	prompted.Group, prompted.Attention, prompted.LastActivity = GroupWorking, state.AttnActive, now
 	refinished := done
 	refinished.LastActivity = now
-	on := func(window string) []tmuxctl.ClientFocus {
-		return []tmuxctl.ClientFocus{{Client: "c1", SessionID: "$1", WindowID: window}}
+	on := func(window string) []mux.ClientFocus {
+		return []mux.ClientFocus{{Client: "c1", SessionID: "$1", WindowID: window}}
 	}
 	visiting := map[string]Visit{"c1": {AgentID: "/done", LastActivity: done.LastActivity}}
 
 	cases := []struct {
 		name       string
 		list       []Agent
-		clients    []tmuxctl.ClientFocus
+		clients    []mux.ClientFocus
 		visits     map[string]Visit
 		wantSeen   []string
 		wantVisits map[string]Visit
@@ -188,8 +188,8 @@ func TestSeenOnLeave(t *testing.T) {
 func TestSeenOnLeaveHonoursSessionOwnership(t *testing.T) {
 	owned := agentOn("/owned", "@1", GroupDone, state.AttnFinished, 60)
 	owned.SessionOwned = true
-	sibling := []tmuxctl.ClientFocus{{Client: "c1", SessionID: "$1", WindowID: "@7"}}
-	elsewhere := []tmuxctl.ClientFocus{{Client: "c1", SessionID: "$9", WindowID: "@9"}}
+	sibling := []mux.ClientFocus{{Client: "c1", SessionID: "$1", WindowID: "@7"}}
+	elsewhere := []mux.ClientFocus{{Client: "c1", SessionID: "$9", WindowID: "@9"}}
 
 	visits, seen := SeenOnLeave([]Agent{owned}, sibling, nil)
 	if len(seen) != 0 || visits["c1"].AgentID != "/owned" {
@@ -207,9 +207,9 @@ func TestDiffOptionsCountsGlobalsPerAgent(t *testing.T) {
 	sharedB := agentOn("/b", "@1", GroupNeedsYou, state.AttnQuestionPending, 5)
 	windowless := agentOn("/c", "", GroupWorking, state.AttnActive, 5)
 
-	got := DiffOptions([]Agent{sharedA, sharedB, windowless}, []Pane{{WindowID: "@1"}}, nil)
+	got := DiffOptions([]Agent{sharedA, sharedB, windowless}, []mux.Pane{{WindowID: "@1"}}, nil)
 
-	want := []tmuxctl.OptionWrite{globalSet(OptNeeds, "2"), globalSet(OptWorking, "1")}
+	want := []mux.OptionWrite{globalSet(OptNeeds, "2"), globalSet(OptWorking, "1")}
 	if !reflect.DeepEqual(got[len(got)-2:], want) {
 		t.Fatalf("got %v\nwant globals %v", got, want)
 	}

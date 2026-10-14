@@ -32,7 +32,7 @@ func newFakeTmuxServer(dir string) *fakeTmuxServer {
 func (s *fakeTmuxServer) Run(args ...string) (string, error) {
 	switch args[0] {
 	case "list-panes":
-		return fmt.Sprintf("%%1\t@1\t$1\tmain\t%s\tnode\t%s\t%s\t%s\t%s\n",
+		return fmt.Sprintf("%%1\t@1\t$1\tmain\t%s\tnode\t%s\t%s\t%s\t%s\t1\tnode\t1\n",
 			s.dir, s.dir, s.window["@cog_status"], s.window["@cog_reason"], s.window["@cog_since"]), nil
 	case "list-clients":
 		return fmt.Sprintf("/dev/ttys001\t%s\t%d\n", s.clientAt, s.clientActivity), nil
@@ -112,9 +112,9 @@ func badgeTestModel(t *testing.T, attn state.Attention, server *fakeTmuxServer) 
 	t.Setenv("TMUX", "/tmp/tmux-test,1,0")
 
 	marker := &recordingViewMarker{}
-	m := feedTestModel(&fakeTmuxOps{available: true}, nil)
+	m := feedTestModel(&fakeMux{available: true}, nil)
 	m.viewMarker = marker
-	m.attachBadges(server)
+	m.attachBadges(tmuxctl.Backend{Runner: server})
 
 	return rebuildAgents(t, m, []settings.Row{worktreeRow(server.dir, settings.StateRunning, attn)}), marker
 }
@@ -263,7 +263,7 @@ func TestClearBadgesRemovesWindowAndGlobalOptions(t *testing.T) {
 	server.globals["@cog_done"] = "1"
 	server.globals["@cog_needs"] = "2"
 
-	clearBadges(server, time.Second)
+	clearBadges(tmuxctl.Backend{Runner: server}, time.Second)
 
 	if len(server.window) != 0 || len(server.globals) != 0 {
 		t.Fatalf("leftover options: window=%v globals=%v", server.window, server.globals)
@@ -281,7 +281,7 @@ func TestClearBadgesGivesUpWhenTmuxHangs(t *testing.T) {
 	})
 
 	start := time.Now()
-	clearBadges(hung, 20*time.Millisecond)
+	clearBadges(tmuxctl.Backend{Runner: hung}, 20*time.Millisecond)
 
 	if time.Since(start) > time.Second {
 		t.Fatal("clearBadges did not honour its timeout")

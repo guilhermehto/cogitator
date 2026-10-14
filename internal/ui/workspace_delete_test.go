@@ -31,7 +31,7 @@ import (
 	"github.com/muesli/termenv"
 
 	"github.com/guilhermehto/cogitator/internal/git"
-	"github.com/guilhermehto/cogitator/internal/tmuxctl"
+	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
@@ -394,9 +394,9 @@ func TestWorkspaceDelete_DeleteWsSessionCmd_SuccessRemovesSessionFromStore(t *te
 	store := &fakeDeleteStoreOps{workspaces: []workspace.Workspace{
 		{Name: "payments", Sessions: []workspace.Session{session}},
 	}}
-	tmuxFake := &fakeTmuxOps{available: true, findWindowErr: errors.New("no window")}
+	tmuxFake := &fakeMux{available: true, findWindowErr: errors.New("no window")}
 
-	msg := runCmd(deleteWsSessionCmd(store, tmuxFake, "payments", "Feature X", tmuxctl.ModeWindow))
+	msg := runCmd(deleteWsSessionCmd(store, tmuxFake, "payments", "Feature X", mux.ModeWindow))
 	result, ok := msg.(wsSessionDeletedMsg)
 	if !ok {
 		t.Fatalf("expected wsSessionDeletedMsg, got %T", msg)
@@ -427,9 +427,9 @@ func TestWorkspaceDelete_DeleteWsSessionCmd_TeardownFailureKeepsSessionInStore(t
 	store := &fakeDeleteStoreOps{workspaces: []workspace.Workspace{
 		{Name: "payments", Sessions: []workspace.Session{session}},
 	}}
-	tmuxFake := &fakeTmuxOps{available: true}
+	tmuxFake := &fakeMux{available: true}
 
-	msg := runCmd(deleteWsSessionCmd(store, tmuxFake, "payments", "Feature X", tmuxctl.ModeWindow))
+	msg := runCmd(deleteWsSessionCmd(store, tmuxFake, "payments", "Feature X", mux.ModeWindow))
 	result, ok := msg.(wsSessionDeletedMsg)
 	if !ok {
 		t.Fatalf("expected wsSessionDeletedMsg, got %T", msg)
@@ -465,9 +465,9 @@ func TestWorkspaceDelete_DeleteWorkspaceCmd_SuccessRemovesWorkspace(t *testing.T
 			{Name: "Feature Y", Dir: dirY, Branch: "feature-y"},
 		},
 	}}}
-	tmuxFake := &fakeTmuxOps{available: true, findWindowErr: errors.New("no window")}
+	tmuxFake := &fakeMux{available: true, findWindowErr: errors.New("no window")}
 
-	msg := runCmd(deleteWorkspaceCmd(store, tmuxFake, "payments", tmuxctl.ModeSession))
+	msg := runCmd(deleteWorkspaceCmd(store, tmuxFake, "payments", mux.ModeSession))
 	result, ok := msg.(wsWorkspaceDeletedMsg)
 	if !ok {
 		t.Fatalf("expected wsWorkspaceDeletedMsg, got %T", msg)
@@ -502,9 +502,9 @@ func TestWorkspaceDelete_DeleteWorkspaceCmd_PartialFailureKeepsWorkspaceAndAllSe
 		Name:     "payments",
 		Sessions: []workspace.Session{goodSession, badSession},
 	}}}
-	tmuxFake := &fakeTmuxOps{available: true}
+	tmuxFake := &fakeMux{available: true}
 
-	msg := runCmd(deleteWorkspaceCmd(store, tmuxFake, "payments", tmuxctl.ModeWindow))
+	msg := runCmd(deleteWorkspaceCmd(store, tmuxFake, "payments", mux.ModeWindow))
 	result, ok := msg.(wsWorkspaceDeletedMsg)
 	if !ok {
 		t.Fatalf("expected wsWorkspaceDeletedMsg, got %T", msg)

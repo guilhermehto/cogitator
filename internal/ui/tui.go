@@ -3,7 +3,6 @@ package ui
 import (
 	"context"
 	"log/slog"
-	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -17,7 +16,6 @@ import (
 	"github.com/guilhermehto/cogitator/internal/singleinstance"
 	"github.com/guilhermehto/cogitator/internal/state"
 	"github.com/guilhermehto/cogitator/internal/supervisor"
-	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 	"github.com/guilhermehto/cogitator/internal/workspace"
 )
 
@@ -104,23 +102,24 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 	m.viewMarker = store
 	// Wire the workspace store so the Workspaces view can load workspaces.json.
 	m.store = wsStore
-	m.selfPaneID = os.Getenv("TMUX_PANE")
+	m.selfPaneID = m.mux.SelfPaneID()
 	feedHolder, feedActions, stopFeed := startAgentFeed(ctx, agentfeed.SocketPath(), logger)
 	defer stopFeed()
 	if feedHolder != nil {
-		m.attachFeed(feedHolder, feedActions, func() ([]tmuxctl.Pane, error) {
-			return tmuxctl.ListPanes(tmuxctl.DefaultRunner)
-		})
-		m.attachBadges(tmuxctl.DefaultRunner)
+		m.attachFeed(feedHolder, feedActions, m.mux.ListPanes)
+		m.attachBadges(m.mux)
 	}
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
-	stopHangupWatch := quitOnHangup(p)
-	defer stopHangupWatch()
+	badges, hasBadges := m.mux.(badgeBackend)
+	if hasBadges {
+		stopHangupWatch := quitOnHangup(p)
+		defer stopHangupWatch()
+	}
 
 	_, err := p.Run()
-	if feedHolder != nil {
-		clearBadges(tmuxctl.DefaultRunner, shutdownClearTimeout)
+	if feedHolder != nil && hasBadges {
+		clearBadges(badges, shutdownClearTimeout)
 	}
 
 	return err

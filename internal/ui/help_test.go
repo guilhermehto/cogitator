@@ -15,7 +15,7 @@ import (
 )
 
 func TestQuestionMark_OpensHelpOverlay(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, nil)
+	m := makeTestModel(&fakeMux{available: true}, nil, &fakeHarnessOps{}, nil)
 
 	updated, _ := m.Update(keyMsg("?"))
 	if got := updated.(model).prompt; got != promptHelp {
@@ -24,7 +24,7 @@ func TestQuestionMark_OpensHelpOverlay(t *testing.T) {
 }
 
 func TestHelpOverlay_DismissedByAnyKey(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, nil)
+	m := makeTestModel(&fakeMux{available: true}, nil, &fakeHarnessOps{}, nil)
 	m.prompt = promptHelp
 
 	updated, _ := m.Update(keyMsg("j"))
@@ -34,7 +34,7 @@ func TestHelpOverlay_DismissedByAnyKey(t *testing.T) {
 }
 
 func TestView_HelpOverlaysBoxOverSessions(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []settings.Row{
+	m := makeTestModel(&fakeMux{available: true}, nil, &fakeHarnessOps{}, []settings.Row{
 		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 	m.width, m.height = 100, 30
@@ -53,7 +53,7 @@ func TestView_HelpOverlaysBoxOverSessions(t *testing.T) {
 }
 
 func TestView_HintBarKeepsHelpWhenContextHintsOverflow(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, []settings.Row{
+	m := makeTestModel(&fakeMux{available: true}, nil, &fakeHarnessOps{}, []settings.Row{
 		makeRow("/home/me/alpha", "/home/me/alpha", "main", "a", settings.StateStopped, state.AttnInactive, fixedNow),
 	})
 	m.width, m.height = 60, 20
@@ -69,7 +69,7 @@ func TestView_HintBarKeepsHelpWhenContextHintsOverflow(t *testing.T) {
 }
 
 func TestView_HelpOverlayAt80x24_FitsWithoutTruncatingKeys(t *testing.T) {
-	m := makeTestModel(&fakeTmuxOps{available: true}, nil, &fakeHarnessOps{}, nil)
+	m := makeTestModel(&fakeMux{available: true}, nil, &fakeHarnessOps{}, nil)
 	m.width, m.height = 80, 24
 	m.prompt = promptHelp
 

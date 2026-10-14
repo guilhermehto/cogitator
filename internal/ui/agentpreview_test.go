@@ -9,6 +9,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/agents"
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
+	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 )
 
 func previewAgent(id string) agents.Agent {
@@ -21,7 +22,7 @@ func previewAgent(id string) agents.Agent {
 func TestPreviewRefreshRecapturesRestingCursor(t *testing.T) {
 	t.Setenv("TMUX", "/tmp/tmux-test,1,0")
 	recorder := &captureRecorder{}
-	p := agentPreview{runner: recorder}
+	p := agentPreview{backend: tmuxctl.Backend{Runner: recorder}}
 	a := previewAgent("/a")
 
 	p.Follow(a, true)
@@ -82,8 +83,8 @@ func agentsPreviewModel(t *testing.T, width int) (model, *captureRecorder) {
 	t.Setenv("TMUX", "/tmp/tmux-test,1,0")
 
 	recorder := &captureRecorder{}
-	m := feedTestModel(&fakeTmuxOps{available: true}, nil)
-	m.attachBadges(recorder)
+	m := feedTestModel(&fakeMux{available: true}, nil)
+	m.attachBadges(tmuxctl.Backend{Runner: recorder})
 	m.width, m.height = width, 30
 	m.agents = []agents.Agent{previewAgent("/a"), previewAgent("/b")}
 	m.view = viewSessions

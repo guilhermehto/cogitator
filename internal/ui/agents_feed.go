@@ -10,9 +10,9 @@ import (
 	"github.com/guilhermehto/cogitator/internal/agentfeed"
 	"github.com/guilhermehto/cogitator/internal/agents"
 	"github.com/guilhermehto/cogitator/internal/harness"
+	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
 	"github.com/guilhermehto/cogitator/internal/state"
-	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 )
 
 const feedActionQueueSize = 16
@@ -22,7 +22,7 @@ type feedActionMsg agentfeed.Action
 
 // panesMsg carries the latest tmux pane listing; ok is false when it failed.
 type panesMsg struct {
-	panes []agents.Pane
+	panes []mux.Pane
 	ok    bool
 }
 
@@ -42,9 +42,9 @@ func startAgentFeed(ctx context.Context, sockPath string, logger *slog.Logger) (
 	return feedHolder, queue, stop
 }
 
-// attachFeed wires the model to a running feed. listPanes is the tmux seam
+// attachFeed wires the model to a running feed. listPanes is the backend seam
 // for the pane refresh the agent projection joins against.
-func (m *model) attachFeed(holder *agentfeed.Holder, actions <-chan agentfeed.Action, listPanes func() ([]tmuxctl.Pane, error)) {
+func (m *model) attachFeed(holder *agentfeed.Holder, actions <-chan agentfeed.Action, listPanes func() ([]mux.Pane, error)) {
 	m.feed = holder
 	m.feedActions = actions
 	m.listPanes = listPanes
@@ -66,7 +66,7 @@ func waitFeedAction(ch <-chan agentfeed.Action) tea.Cmd {
 	}
 }
 
-func listPanesCmd(listPanes func() ([]tmuxctl.Pane, error)) tea.Cmd {
+func listPanesCmd(listPanes func() ([]mux.Pane, error)) tea.Cmd {
 	if listPanes == nil {
 		return nil
 	}
@@ -77,28 +77,8 @@ func listPanesCmd(listPanes func() ([]tmuxctl.Pane, error)) tea.Cmd {
 			return panesMsg{}
 		}
 
-		return panesMsg{panes: toAgentPanes(panes), ok: true}
+		return panesMsg{panes: panes, ok: true}
 	}
-}
-
-func toAgentPanes(panes []tmuxctl.Pane) []agents.Pane {
-	out := make([]agents.Pane, 0, len(panes))
-	for _, p := range panes {
-		out = append(out, agents.Pane{
-			PaneID:      p.PaneID,
-			WindowID:    p.WindowID,
-			SessionID:   p.SessionID,
-			SessionName: p.SessionName,
-			Cwd:         p.Path,
-			Command:     p.Command,
-			CogDir:      p.CogDir,
-			CogStatus:   p.CogStatus,
-			CogReason:   p.CogReason,
-			CogSince:    p.CogSince,
-		})
-	}
-
-	return out
 }
 
 // requestPanes starts a pane refresh, coalescing with one already in flight
@@ -200,10 +180,10 @@ func (m model) markAgentSeen(agent agents.Agent) {
 }
 
 func (m *model) focusAgent(agent agents.Agent, client string) tea.Cmd {
-	if agent.Kind == agents.KindStray {
+	if focusesPane(agent) {
 		m.recordSessionSwitch(agent.ID)
 
-		return focusStrayCmd(m.tmux, agent, client)
+		return focusPaneCmd(m.mux, agent, client)
 	}
 
 	target, ok := m.managedLaunchTarget(agent)
@@ -215,19 +195,26 @@ func (m *model) focusAgent(agent agents.Agent, client string) tea.Cmd {
 
 	m.recordSessionSwitch(target.dir)
 
-	return launchForClientCmd(m.tmux, target, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp), client)
+	return launchForClientCmd(m.mux, target, m.harnOp, m.launchMode, resolvedDefaultHarness(m.harnOp), client)
+}
+
+// focusesPane reports whether focusing a selects its own pane rather than
+// launching its directory: strays have no launch target, and a sibling shares
+// its directory's window with other sessions.
+func focusesPane(a agents.Agent) bool {
+	return a.Kind == agents.KindStray || (a.Sibling() && a.PaneID != "")
 }
 
 func (m model) managedLaunchTarget(agent agents.Agent) (launchTarget, bool) {
 	for _, row := range m.workspaceRows {
-		if sameDir(row.Worktree, agent.ID) {
+		if sameDir(row.Worktree, agent.Dir) {
 			return rowLaunchTarget(row), true
 		}
 	}
 
 	for _, ws := range m.wsStatuses {
 		for _, sess := range ws.Sessions {
-			if sameDir(sess.Session.Dir, agent.ID) {
+			if sameDir(sess.Session.Dir, agent.Dir) {
 				return wsSessionLaunchTarget(ws.Workspace.Name, sess), true
 			}
 		}
@@ -236,7 +223,7 @@ func (m model) managedLaunchTarget(agent agents.Agent) (launchTarget, bool) {
 	return launchTarget{}, false
 }
 
-func sameDir(dir, canonicalID string) bool {
+func sameDir(dir, canonicalDir string) bool {
 	if dir == "" {
 		return false
 	}
@@ -246,36 +233,37 @@ func sameDir(dir, canonicalID string) bool {
 		canonical = dir
 	}
 
-	return canonical == canonicalID
+	return canonical == canonicalDir
 }
 
-func focusStrayCmd(ops tmuxOps, agent agents.Agent, client string) tea.Cmd {
+// focusPaneCmd selects the agent's own pane.
+func focusPaneCmd(ops mux.Backend, agent agents.Agent, client string) tea.Cmd {
 	return func() tea.Msg {
 		res := launchResultMsg{
-			dir:       agent.ID,
+			dir:       agent.Dir,
 			client:    client,
 			provider:  fallbackProvider(agent.Provider, agent.Harness),
 			sessionID: agent.SessionID,
 		}
 		if ops == nil || !ops.Available() {
-			res.err = tmuxctl.ErrNotAvailable
+			res.err = mux.ErrNotAvailable
 
 			return res
 		}
 
-		res.err = ops.SelectPaneForClient(agent.PaneID, client)
+		res.err = ops.SelectPane(agent.PaneID, client)
 
 		return res
 	}
 }
 
-func displayMessageCmd(ops tmuxOps, client, text string) tea.Cmd {
+func displayMessageCmd(ops mux.Backend, client, text string) tea.Cmd {
 	if ops == nil {
 		return nil
 	}
 
 	return func() tea.Msg {
-		_ = ops.DisplayMessage(client, text)
+		_ = ops.Message(client, text)
 
 		return nil
 	}

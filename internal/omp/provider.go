@@ -1,6 +1,7 @@
 package omp
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"log/slog"
@@ -38,6 +39,9 @@ type hookOverlay struct {
 
 	// endedAt is the time of the latest session_shutdown hook; zero when none.
 	endedAt time.Time
+
+	// paneID is the multiplexer pane the latest stamped hook ran in.
+	paneID string
 }
 
 // Provider polls the omp agent directory on a configurable interval and emits
@@ -208,6 +212,7 @@ func (p *Provider) handleHookFrame(raw []byte, sink provider.Sink) {
 
 	p.mu.Lock()
 	ov := p.overlays[sessionID]
+	ov.paneID = cmp.Or(ev.PaneID, ov.paneID)
 	if ev.EventName == "session_shutdown" {
 		ov.endedAt = now
 	} else {
@@ -311,6 +316,7 @@ func (p *Provider) mergeToUpdate(s Session, ov hookOverlay, now time.Time) provi
 		LastActivity: lastActivity,
 		Created:      s.Created,
 		Source:       src,
+		PaneID:       ov.paneID,
 	}
 }
 

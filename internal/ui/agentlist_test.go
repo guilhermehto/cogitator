@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/guilhermehto/cogitator/internal/agents"
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
@@ -14,7 +16,7 @@ var agentListNow = time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 
 func worktreeAgent(id, repo, branch string, group agents.Group, attn state.Attention, st settings.RowState) agents.Agent {
 	return agents.Agent{
-		ID: id, Kind: agents.KindWorktree, Repo: repo, Branch: branch,
+		ID: id, Dir: id, Kind: agents.KindWorktree, Repo: repo, Branch: branch,
 		Harness: "opencode", Group: group, Attention: attn, State: st,
 		LastActivity: agentListNow.Add(-5 * time.Minute),
 	}
@@ -24,8 +26,8 @@ func agentsInEveryGroup() []agents.Agent {
 	return []agents.Agent{
 		worktreeAgent("/a", "api", "fix-auth", agents.GroupNeedsYou, state.AttnPermissionPending, settings.StateRunning),
 		worktreeAgent("/b", "web", "ui", agents.GroupDone, state.AttnFinished, settings.StateRunning),
-		{ID: "/c", Kind: agents.KindWorkspace, Workspace: "shop", SessionName: "checkout", Harness: "claude", Group: agents.GroupWorking, Attention: state.AttnActive, State: settings.StateRunning},
-		{ID: "/tmp/scratch", Kind: agents.KindStray, Harness: "opencode", Group: agents.GroupIdle, Attention: state.AttnInactive, State: settings.StateRunning},
+		{ID: "/c", Dir: "/c", Kind: agents.KindWorkspace, Workspace: "shop", SessionName: "checkout", Harness: "claude", Group: agents.GroupWorking, Attention: state.AttnActive, State: settings.StateRunning},
+		{ID: "/tmp/scratch", Dir: "/tmp/scratch", Kind: agents.KindStray, Harness: "opencode", Group: agents.GroupIdle, Attention: state.AttnInactive, State: settings.StateRunning},
 		worktreeAgent("/e", "docs", "main", agents.GroupStopped, state.AttnInactive, settings.StateStopped),
 	}
 }
@@ -39,17 +41,32 @@ func typeKeys(l *agentList, keys ...string) agentListResult {
 	return result
 }
 
-func TestAgentListShowsGroupHeadersInOrder(t *testing.T) {
+func TestAgentListMatchesSidebarSectionsAndOldestFirstOrder(t *testing.T) {
+	at := func(branch string, group agents.Group, age time.Duration) agents.Agent {
+		a := worktreeAgent("/"+branch, "r", branch, group, state.AttnInactive, settings.StateRunning)
+		a.LastActivity = agentListNow.Add(-age)
+		if age == 0 {
+			a.LastActivity = time.Time{}
+		}
+		return a
+	}
 	l := newAgentList()
-	l.SetAgents(agentsInEveryGroup())
+	l.SetAgents([]agents.Agent{
+		at("ask-new", agents.GroupNeedsYou, time.Minute),
+		at("ask-old", agents.GroupNeedsYou, 10*time.Minute),
+		at("done", agents.GroupDone, 3*time.Minute),
+		at("unknown", agents.GroupWorking, 0),
+		at("idle", agents.GroupIdle, 8*time.Minute),
+		at("stopped", agents.GroupStopped, 20*time.Minute),
+	})
 
-	view := l.View(agentListNow, 100, 40)
+	view := ansi.Strip(l.View(agentListNow, 60, 40))
 
 	last := -1
-	for _, title := range []string{"Needs you · 1", "Done · 1", "Working · 1", "Idle · 1", "Stopped · 1"} {
-		idx := strings.Index(view, title)
+	for _, want := range []string{"Needs you · 2", "r·ask-old", "r·ask-new", "Agents · 4", "r·stopped", "r·idle", "r·done", "r·unknown"} {
+		idx := strings.Index(view, want)
 		if idx < 0 || idx < last {
-			t.Fatalf("header %q missing or out of order in:\n%s", title, view)
+			t.Fatalf("%q missing or out of order in:\n%s", want, view)
 		}
 		last = idx
 	}
@@ -81,7 +98,8 @@ func TestAgentListLabelsWorktreesByRepoNameOrHomeRelativeDir(t *testing.T) {
 		{"uses repo basename and branch", worktreeAgent("/Users/x/src/pi-platform", "/Users/x/src/pi-platform", "main", agents.GroupIdle, state.AttnInactive, settings.StateRunning), "pi-platform·main"},
 		{"falls back to the home-relative dir without a branch", worktreeAgent("/Users/x/src/pi-platform/svc/api", "/Users/x/src/pi-platform", "", agents.GroupIdle, state.AttnInactive, settings.StateRunning), "~/src/pi-platform/svc/api"},
 		{"keeps dirs outside home absolute", worktreeAgent("/opt/svc", "/opt/svc", "", agents.GroupIdle, state.AttnInactive, settings.StateRunning), "/opt/svc"},
-		{"abbreviates stray dirs and marks them", agents.Agent{ID: "/Users/x/scratch", Kind: agents.KindStray}, "~/scratch stray"},
+		{"abbreviates stray dirs and marks them", agents.Agent{ID: "/Users/x/scratch", Dir: "/Users/x/scratch", Kind: agents.KindStray}, "~/scratch stray"},
+		{"leads with the tab label", agents.Agent{ID: "/Users/x/.lexicanum#s1", Dir: "/Users/x/.lexicanum", Kind: agents.KindStray, Tab: "LEX-123"}, "LEX-123 · ~/.lexicanum stray"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -121,6 +139,21 @@ func TestAgentListShowsTitleAndHarnessOnWideRowsOnly(t *testing.T) {
 	}
 	if !strings.Contains(narrow, "api·main") || !strings.Contains(narrow, "5m") {
 		t.Fatalf("narrow row missing name or age:\n%s", narrow)
+	}
+}
+
+func TestAgentListShowsTabLabelOnNarrowRowsWithoutRepeatingItAsTitle(t *testing.T) {
+	a := agents.Agent{ID: "/l#s1", Dir: "/l", Kind: agents.KindStray, Harness: "omp", Title: "Fix login", Tab: "Fix login", State: settings.StateRunning}
+	l := newAgentList()
+	l.SetAgents([]agents.Agent{a})
+
+	narrow, wide := l.View(agentListNow, 50, 40), l.View(agentListNow, 100, 40)
+
+	if !strings.Contains(narrow, "Fix login") {
+		t.Fatalf("narrow row missing tab label:\n%s", narrow)
+	}
+	if got := strings.Count(wide, "Fix login"); got != 1 {
+		t.Fatalf("wide row shows the label %d times:\n%s", got, wide)
 	}
 }
 
@@ -172,8 +205,8 @@ func TestAgentListNavigationKeys(t *testing.T) {
 	l.SetAgents(agentsInEveryGroup())
 
 	typeKeys(&l, "G")
-	if l.cursorID != "/e" {
-		t.Fatalf("G cursor = %q, want /e", l.cursorID)
+	if l.cursorID != "/tmp/scratch" {
+		t.Fatalf("G cursor = %q, want /tmp/scratch", l.cursorID)
 	}
 
 	typeKeys(&l, "g", "g")

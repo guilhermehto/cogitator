@@ -22,7 +22,7 @@ const (
 
 	// protocolVersion is bumped on any incompatible wire change; a mismatch is
 	// reported explicitly rather than guessed around.
-	protocolVersion = 1
+	protocolVersion = 2
 
 	// callTimeout keeps pick and next feeling instant when the TUI is wedged.
 	callTimeout = 1500 * time.Millisecond
