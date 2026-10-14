@@ -1,10 +1,12 @@
 package ui
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/guilhermehto/cogitator/internal/agents"
 	"github.com/guilhermehto/cogitator/internal/settings"
@@ -75,6 +77,73 @@ func TestPreviewExplainsAgentWithoutTmuxWindow(t *testing.T) {
 
 	if !strings.Contains(view, "enter resumes it") {
 		t.Fatalf("preview should say enter resumes a windowless agent:\n%s", view)
+	}
+}
+
+// previewBody renders a's preview of captured and returns the lines below
+// the separator rule.
+func previewBody(t *testing.T, captured string, width int) []string {
+	t.Helper()
+	a := previewAgent("/a")
+	p := agentPreview{agentID: a.ID, text: captured}
+
+	lines := strings.Split(p.View(a, agentListNow, width, 20), "\n")
+	for i, line := range lines {
+		if strings.Contains(line, "───") {
+			return lines[i+1:]
+		}
+	}
+
+	t.Fatalf("preview has no separator:\n%s", strings.Join(lines, "\n"))
+	return nil
+}
+
+func TestPreviewKeepsStylingAndDropsOtherControlSequences(t *testing.T) {
+	tests := []struct {
+		name     string
+		captured string
+		want     []string
+	}{
+		{
+			name:     "SGR kept, screen clear and hyperlink dropped, styled blank tail trimmed",
+			captured: "\x1b[31mred\x1b[0m\n\x1b[2Jx\x1b]8;;http://a\x07l\x1b]8;;\x07\n\x1b[44m   \n",
+			want:     []string{"\x1b[31mred" + ansi.ResetStyle, "xl" + ansi.ResetStyle},
+		},
+		{
+			name:     "private CSI m, cursor moves and bare control bytes dropped",
+			captured: "\x1b[>4;1ma\x1b[5;1Hb\r\tc\x07\x1b[1md",
+			want:     []string{"abc\x1b[1md" + ansi.ResetStyle},
+		},
+		{
+			name:     "styling carried across a line break is repeated on the next line",
+			captured: "\x1b[31m-one\n-two\x1b[0m",
+			want:     []string{"\x1b[31m-one" + ansi.ResetStyle, "\x1b[31m-two" + ansi.ResetStyle},
+		},
+		{
+			name:     "turning bold off keeps the colour",
+			captured: "\x1b[1;31ma\x1b[22mb",
+			want:     []string{"\x1b[1;31ma" + ansi.ResetStyle + "\x1b[31mb" + ansi.ResetStyle},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := previewBody(t, tt.captured, 60); !slices.Equal(got, tt.want) {
+				t.Errorf("body = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPreviewResetsStylingAtEndOfTruncatedLine(t *testing.T) {
+	body := previewBody(t, "\x1b[32m"+strings.Repeat("g", 80)+"\nnext", 20)
+
+	if len(body) != 2 {
+		t.Fatalf("body = %q, want 2 lines", body)
+	}
+	for _, line := range body {
+		if ansi.StringWidth(line) > 20 || !strings.HasSuffix(line, ansi.ResetStyle) {
+			t.Errorf("line %q must fit 20 cells and end with a reset", line)
+		}
 	}
 }
 

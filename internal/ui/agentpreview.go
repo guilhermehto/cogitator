@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/cellbuf"
 
 	"github.com/guilhermehto/cogitator/internal/agents"
 	"github.com/guilhermehto/cogitator/internal/mux"
@@ -158,7 +159,7 @@ func (p agentPreview) View(a agents.Agent, now time.Time, width, height int) str
 	}
 
 	for i, line := range lines {
-		lines[i] = ansi.Truncate(line, width, "…")
+		lines[i] = ansi.Truncate(line, width, "…") + ansi.ResetStyle
 	}
 	if height > 0 && len(lines) > height {
 		lines = lines[:height]
@@ -224,18 +225,71 @@ func paneTarget(a agents.Agent) string {
 	return a.PaneID
 }
 
-// tailLines returns the last n non-trailing-blank lines of captured text with
-// control sequences stripped; the text is display-only.
+// tailLines returns the last n non-trailing-blank lines of captured text,
+// sanitized by displayText.
 func tailLines(text string, n int) []string {
-	lines := strings.Split(strings.TrimRight(ansi.Strip(text), " \n"), "\n")
 	if n <= 0 {
 		return nil
+	}
+
+	lines := strings.Split(displayText(text), "\n")
+	for len(lines) > 0 && strings.TrimSpace(ansi.Strip(lines[len(lines)-1])) == "" {
+		lines = lines[:len(lines)-1]
 	}
 	if len(lines) > n {
 		lines = lines[len(lines)-n:]
 	}
 
 	return lines
+}
+
+// displayText keeps the printable text, newlines and SGR styling of captured
+// pane text and drops every other control sequence: the text is display-only
+// and must not move the cursor or change terminal state. Styling is tracked
+// as a pen and written in full before the text it applies to, so each line
+// starts with the styling it inherits (tmux does not repeat it after a line
+// break) and stands alone when the preview resets it at the line end.
+func displayText(text string) string {
+	var out strings.Builder
+	parser := ansi.NewParser()
+	var state byte
+	var pen, written cellbuf.Style
+
+	for len(text) > 0 {
+		seq, width, n, newState := ansi.DecodeSequence(text, state, parser)
+		state = newState
+		text = text[n:]
+
+		switch {
+		case isSGR(seq, parser):
+			cellbuf.ReadStyle(parser.Params(), &pen)
+		case seq == "\n":
+			out.WriteString(seq)
+			written = cellbuf.Style{}
+		case width > 0:
+			if !pen.Equal(&written) {
+				out.WriteString(styleChange(written, pen))
+				written = pen
+			}
+			out.WriteString(seq)
+		}
+	}
+
+	return out.String()
+}
+
+// styleChange returns the SGR that turns the written styling into pen.
+func styleChange(written, pen cellbuf.Style) string {
+	if written.Empty() || pen.Empty() {
+		return pen.Sequence()
+	}
+	return ansi.ResetStyle + pen.Sequence()
+}
+
+// isSGR reports whether seq, just decoded by parser, is a plain CSI … m.
+// Private variants such as CSI > 4 m set terminal modes and are not styling.
+func isSGR(seq string, parser *ansi.Parser) bool {
+	return ansi.HasCsiPrefix(seq) && ansi.Cmd(parser.Command()) == 'm'
 }
 
 // renderAgentSplit lays the list beside the cursor agent's preview, or the
