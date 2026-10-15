@@ -101,7 +101,8 @@ impl ZellijPlugin for State {
             }
             Event::TabUpdate(tabs) => {
                 self.tab_ids = tabs.iter().map(|t| (t.position, t.tab_id)).collect();
-                self.sync_location()
+                let moved = self.sync_location();
+                self.sync_focus() || moved
             }
             Event::PaneUpdate(manifest) => {
                 self.start();
@@ -117,7 +118,8 @@ impl ZellijPlugin for State {
                     self.take_focus_if_viewed();
                 }
                 let moved = self.sync_location();
-                self.app.floating() != was_floating || moved
+                let refocused = self.sync_focus();
+                self.app.floating() != was_floating || moved || refocused
             }
             Event::Key(key) => match map_key(&key) {
                 Some(key) => {
@@ -195,6 +197,17 @@ impl State {
             .and_then(|position| self.tab_ids.get(&position))
             .map(|tab_id| format!("{session}:{tab_id}"));
         self.app.set_location(Location { session, window })
+    }
+
+    /// PaneInfo's is_focused covers only the pane's own layer, so a docked
+    /// sidebar under a focused floating pane would still claim focus; ask
+    /// which pane the user's keys go to instead.
+    fn sync_focus(&mut self) -> bool {
+        let focused = matches!(
+            get_focused_pane_info(),
+            Ok((_, PaneId::Plugin(id))) if id == self.plugin_id
+        );
+        self.app.set_focused(focused)
     }
 
     fn list(&mut self) {

@@ -10,11 +10,13 @@ const GLYPH_PERMISSION: &str = "\u{f033e}";
 const GLYPH_ERROR: &str = "\u{f0026}";
 const GLYPH_FINISHED: &str = "\u{f012c}";
 const GLYPH_MISSING: &str = "\u{f0e7a}";
-const GLYPH_HERE: &str = "▸";
+const GLYPH_HERE: &str = "▌";
 
 const HARNESS_WIDTH: usize = 11;
 const DETAIL_MIN_WIDTH: usize = 80;
-const SELECTED_BG: u8 = 237;
+const BAND_BG: u8 = 237;
+/// An agent row is its name, then its tab label and session title.
+const ROW_LINES: usize = 2;
 
 const HARNESS_PALETTE: [u8; 22] = [
     33, 39, 45, 51, 75, 81, 99, 105, 111, 117, 135, 141, 147, 153, 165, 171, 177, 183, 203, 207,
@@ -72,7 +74,7 @@ const INACTIVE: Style = Style::fg(244);
 const ACTIVE: Style = Style::fg(82);
 const MISSING: Style = Style::fg(196).italic();
 const UNKNOWN: Style = Style::fg(226);
-const HERE: Style = Style::fg(111).bold();
+const HERE: Style = Style::fg(111);
 
 struct Span {
     text: String,
@@ -158,6 +160,9 @@ fn render_list(app: &App, rows: usize, cols: usize, now: i64) -> Vec<String> {
 
     let selected = app.selected_index();
     let here = app.here_index();
+    // The band shows where keys act while the plugin has focus, and where the
+    // user is otherwise; App keeps the cursor on that agent while unfocused.
+    let band = if app.focused() { selected } else { here };
     // App keeps agents that need the user at the front of the list.
     let split = agents.iter().take_while(|a| a.needs_you()).count();
     let sections = [
@@ -178,15 +183,14 @@ fn render_list(app: &App, rows: usize, cols: usize, now: i64) -> Vec<String> {
         let header = vec![span(title, style), span(format!(" · {}", range.len()), DIM)];
         lines.push(paint(&truncate(header, cols), None));
         for i in range {
-            let is_selected = selected == Some(i);
-            if is_selected {
+            if selected == Some(i) {
                 selected_line = lines.len();
             }
             let mark = RowMark {
-                selected: is_selected,
+                band: band == Some(i),
                 here: here == Some(i),
             };
-            lines.push(agent_row(&agents[i], mark, cols, now, app.home()));
+            lines.extend(agent_row(&agents[i], mark, cols, now, app.home()));
         }
     }
 
@@ -196,59 +200,75 @@ fn render_list(app: &App, rows: usize, cols: usize, now: i64) -> Vec<String> {
     lines.into_iter().skip(offset).take(rows).collect()
 }
 
+// scroll_offset scrolls no further than it takes to show the selected row,
+// which starts at selected_line, whole, or its first line when rows is short.
 fn scroll_offset(current: usize, selected_line: usize, rows: usize, total: usize) -> usize {
     let mut offset = current.min(total.saturating_sub(rows));
     if selected_line < offset {
         offset = selected_line.saturating_sub(1);
     }
-    if selected_line >= offset + rows {
-        offset = selected_line + 1 - rows;
+    let selected_end = selected_line + ROW_LINES;
+    if selected_end > offset + rows {
+        offset = (selected_end - rows).min(selected_line);
     }
     offset
 }
 
 struct RowMark {
-    selected: bool,
+    band: bool,
     here: bool,
 }
 
-// agent_row lays out status, name and (when wide enough) the muted session
-// title on the left, harness and age on the right, as the TUI does. The
-// agent the user is sitting at gets a marker that survives the selection band.
-fn agent_row(agent: &Agent, mark: RowMark, cols: usize, now: i64, home: &str) -> String {
+// agent_row lays out an agent on ROW_LINES lines, as the TUI does: status and
+// name with (when wide enough) harness and age on the right, then the tab
+// label and muted session title under the name. A gutter bar marks the agent
+// the user is sitting at on both lines, whichever row carries the band.
+fn agent_row(
+    agent: &Agent,
+    mark: RowMark,
+    cols: usize,
+    now: i64,
+    home: &str,
+) -> [String; ROW_LINES] {
     let age = agent
         .last_activity_secs()
         .map(|ts| relative_time(now - ts))
         .unwrap_or_default();
 
-    let mut left = vec![status_cell(agent)];
-    if mark.here {
-        left.push(span(format!("{GLYPH_HERE} "), HERE));
-    }
-    left.extend(styled_name(agent, home));
+    let status = status_cell(agent);
+    let mut detail = vec![
+        gutter(mark.here),
+        span(" ".repeat(status.text.chars().count()), PLAIN),
+    ];
+    let mut left = vec![gutter(mark.here), status];
+    left.extend(styled_target(agent, home));
+    detail.extend(styled_detail(agent));
     let mut right = vec![span(age.clone(), DIM)];
 
     if cols >= DETAIL_MIN_WIDTH {
-        if !agent.title.is_empty() && agent.title != agent.tab {
-            left.push(span("  ", PLAIN));
-            left.push(span(agent.title.clone(), PATH));
-        }
         let harness = vec![span(agent.harness.clone(), harness_style(&agent.harness))];
         right = pad(truncate(harness, HARNESS_WIDTH), HARNESS_WIDTH);
         right.push(span(format!(" {age:>4}"), DIM));
     }
 
     let gap = cols.saturating_sub(width(&right) + 2);
-    let mut row = pad(truncate(left, gap), gap);
-    row.push(span("  ", PLAIN));
-    row.extend(right);
+    let mut name = pad(truncate(left, gap), gap);
+    name.push(span("  ", PLAIN));
+    name.extend(right);
 
-    let bg = if mark.selected {
-        Some(SELECTED_BG)
+    let bg = mark.band.then_some(BAND_BG);
+    [
+        paint(&truncate(name, cols), bg),
+        paint(&pad(truncate(detail, cols), cols), bg),
+    ]
+}
+
+fn gutter(here: bool) -> Span {
+    if here {
+        span(GLYPH_HERE, HERE)
     } else {
-        None
-    };
-    paint(&truncate(row, cols), bg)
+        span(" ", PLAIN)
+    }
 }
 
 fn status_cell(agent: &Agent) -> Span {
@@ -273,13 +293,12 @@ fn attention_glyph(attention: &str) -> (&'static str, Style) {
     }
 }
 
-// styled_name mutes the repo or workspace so the branch or session reads
-// first, led by the agent's tab label when it has one; stopped agents are
-// dimmed.
-fn styled_name(agent: &Agent, home: &str) -> Line {
-    let lead = if agent.state == "stopped" { DIM } else { PLAIN };
+// styled_target names what the agent works in, with the repo or workspace
+// muted so the branch or session reads first.
+fn styled_target(agent: &Agent, home: &str) -> Line {
+    let lead = lead_style(agent);
 
-    let name = match agent.kind.as_str() {
+    match agent.kind.as_str() {
         "workspace" => vec![
             span(agent.workspace.clone(), REPO),
             span("/", DIM),
@@ -296,14 +315,32 @@ fn styled_name(agent: &Agent, home: &str) -> Line {
             span("·", DIM),
             span(agent.branch.clone(), lead),
         ],
-    };
-
-    if agent.tab.is_empty() {
-        return name;
     }
-    let mut labelled = vec![span(agent.tab.clone(), lead), span(" · ", DIM)];
-    labelled.extend(name);
-    labelled
+}
+
+// styled_detail is the line under an agent's name: its tab label, then its
+// session title muted unless the label already is the title.
+fn styled_detail(agent: &Agent) -> Line {
+    let mut line = Vec::new();
+    if !agent.tab.is_empty() {
+        line.push(span(agent.tab.clone(), lead_style(agent)));
+    }
+    if !agent.title.is_empty() && agent.title != agent.tab {
+        if !line.is_empty() {
+            line.push(span("  ", PLAIN));
+        }
+        line.push(span(agent.title.clone(), PATH));
+    }
+    line
+}
+
+// lead_style dims a stopped agent's own text.
+fn lead_style(agent: &Agent) -> Style {
+    if agent.state == "stopped" {
+        DIM
+    } else {
+        PLAIN
+    }
 }
 
 fn base_name(path: &str) -> String {
@@ -445,6 +482,17 @@ mod tests {
         app_from(&crate::app::tests::feed_json(ids))
     }
 
+    fn tabbed_app(tabs: &[&str]) -> App {
+        let items: Vec<String> = tabs
+            .iter()
+            .map(|t| format!(r#"{{"id":"/{t}","dir":"/{t}","tab":"{t}"}}"#))
+            .collect();
+        app_from(&format!(
+            r#"{{"version":1,"agents":[{}]}}"#,
+            items.join(",")
+        ))
+    }
+
     fn one_agent(fields: &str) -> App {
         app_from(&format!(
             r#"{{"version":1,"home":"/Users/me","agents":[{{"id":"/Users/me/p","dir":"/Users/me/p",{fields}}}]}}"#
@@ -476,7 +524,14 @@ mod tests {
     }
 
     fn row_colours(app: &App, cols: usize) -> String {
-        render(app, 5, cols, NOW)[1].replace(";48;5;237", "")
+        render(app, 5, cols, NOW)[1].clone()
+    }
+
+    fn sits_at(app: &mut App, window: &str) {
+        app.set_location(crate::app::Location {
+            session: "s".into(),
+            window: Some(window.into()),
+        });
     }
 
     #[test]
@@ -493,14 +548,17 @@ mod tests {
             .map(|l| l.split("  ").next().unwrap_or_default().to_string())
             .collect();
         assert_eq!(
-            lines[..6],
+            lines[..9],
             [
                 "Needs you · 1",
-                "· /x/ask",
+                " · /x/ask",
+                "",
                 "",
                 "Agents · 2",
-                "· /x/older",
-                "· /x/newer"
+                " · /x/older",
+                "",
+                " · /x/newer",
+                ""
             ]
         );
     }
@@ -510,7 +568,7 @@ mod tests {
         let app = simple_app(&["/a"]);
         assert_eq!(
             plain_lines(&render(&app, 4, 40, NOW))[..2],
-            ["Agents · 1", "· /a"]
+            ["Agents · 1", " · /a"]
         );
     }
 
@@ -519,20 +577,20 @@ mod tests {
         let app = one_agent(r#""kind":"worktree","repo":"/Users/me/.dotfiles","branch":"main""#);
         assert_eq!(
             plain_lines(&render(&app, 5, 40, NOW))[1],
-            "· .dotfiles·main"
+            " · .dotfiles·main"
         );
     }
 
     #[test]
     fn workspace_row_shows_workspace_and_session() {
         let app = one_agent(r#""kind":"workspace","workspace":"w","session_name":"s""#);
-        assert_eq!(plain_lines(&render(&app, 5, 40, NOW))[1], "· w/s");
+        assert_eq!(plain_lines(&render(&app, 5, 40, NOW))[1], " · w/s");
     }
 
     #[test]
     fn stray_row_abbreviates_home_and_tags_stray() {
         let app = one_agent(r#""kind":"stray""#);
-        assert_eq!(plain_lines(&render(&app, 5, 40, NOW))[1], "· ~/p stray");
+        assert_eq!(plain_lines(&render(&app, 5, 40, NOW))[1], " · ~/p stray");
     }
 
     #[test]
@@ -545,7 +603,7 @@ mod tests {
         );
 
         let app = one_agent(r#""kind":"stray","state":"running","attention":"inactive""#);
-        assert!(plain(&render(&app, 5, 40, NOW)[1]).starts_with(GLYPH_INACTIVE));
+        assert!(plain(&render(&app, 5, 40, NOW)[1]).starts_with(&format!(" {GLYPH_INACTIVE}")));
     }
 
     #[test]
@@ -571,61 +629,100 @@ mod tests {
     }
 
     #[test]
-    fn wide_row_adds_title_and_harness_column() {
+    fn wide_row_adds_harness_column() {
         let app = one_agent(
-            r#""kind":"worktree","repo":"r","branch":"b","harness":"omp","title":"fix it","last_activity":"2025-12-31T20:00:00Z""#,
+            r#""kind":"worktree","repo":"r","branch":"b","harness":"omp","last_activity":"2025-12-31T20:00:00Z""#,
         );
         let row = &row_colours(&app, 90);
         assert!(plain(row).ends_with("omp           4h"), "{:?}", plain(row));
-        assert!(plain(row).contains("r·b  fix it"));
         assert!(row.contains("3;38;5;81momp"), "{row:?}");
     }
 
     #[test]
-    fn tab_label_leads_the_row_and_is_not_repeated_as_title() {
-        let named = one_agent(
-            r#""kind":"stray","harness":"omp","tab":"LEX-123","title":"fix it","last_activity":"2025-12-31T20:00:00Z""#,
+    fn tab_label_and_title_sit_under_the_name() {
+        let app = one_agent(
+            r#""kind":"worktree","repo":"r","branch":"b","tab":"LEX-123","title":"fix it","last_activity":"2025-12-31T23:55:00Z""#,
         );
-        assert!(
-            plain(&row_colours(&named, 90)).starts_with("· LEX-123 · ~/p stray  fix it"),
-            "{:?}",
-            plain(&row_colours(&named, 90))
-        );
-
-        let titled = one_agent(
-            r#""kind":"stray","harness":"omp","tab":"fix it","title":"fix it","last_activity":"2025-12-31T20:00:00Z""#,
-        );
-        let row = plain(&row_colours(&titled, 90));
-        assert_eq!(row.matches("fix it").count(), 1, "{row:?}");
+        let lines = plain_lines(&render(&app, 5, 40, NOW));
+        assert!(lines[1].starts_with(" · r·b "), "{:?}", lines[1]);
+        assert!(lines[1].ends_with(" 5m"), "{:?}", lines[1]);
+        assert_eq!(lines[2], "   LEX-123  fix it");
     }
 
     #[test]
-    fn selected_row_paints_background_across_full_width() {
-        let app = simple_app(&["/a", "/b"]);
-        let lines = render(&app, 5, 30, NOW);
-        assert!(lines[1].contains("48;5;237"));
-        assert_eq!(plain(&lines[1]).chars().count(), 30);
-        assert!(!lines[2].contains("48;5;237"));
+    fn title_shows_alone_and_is_not_repeated_as_tab() {
+        let untabbed = one_agent(r#""kind":"stray","title":"fix it""#);
+        assert_eq!(plain_lines(&render(&untabbed, 5, 40, NOW))[2], "   fix it");
+
+        let titled = one_agent(r#""kind":"stray","tab":"fix it","title":"fix it""#);
+        let lines = plain_lines(&render(&titled, 5, 90, NOW));
+        assert_eq!(lines.join("\n").matches("fix it").count(), 1, "{lines:?}");
     }
 
-    #[test]
-    fn row_the_user_sits_at_is_marked_even_when_selected() {
+    fn two_tabs_at_second() -> App {
         let mut app = app_from(
             r#"{"version":1,"agents":[{"id":"/a","dir":"/a","window_id":"s:1"},{"id":"/b","dir":"/b","window_id":"s:2"}]}"#,
         );
-        app.set_location(crate::app::Location {
-            session: "s".into(),
-            window: Some("s:2".into()),
-        });
-        assert_eq!(
-            plain_lines(&render(&app, 4, 30, NOW))[1..3],
-            ["· /a", "· ▸ /b"]
-        );
+        sits_at(&mut app, "s:2");
+        app
+    }
 
-        app.handle_key(Key::Down);
-        let row = &render(&app, 4, 30, NOW)[2];
-        assert!(row.contains("48;5;237"), "{row:?}");
-        assert!(plain(row).starts_with("· ▸ /b"), "{row:?}");
+    fn banded(lines: &[String]) -> Vec<usize> {
+        (0..lines.len())
+            .filter(|&i| lines[i].contains("48;5;237"))
+            .collect()
+    }
+
+    fn marked_here(lines: &[String]) -> Vec<usize> {
+        (0..lines.len())
+            .filter(|&i| plain(&lines[i]).starts_with(GLYPH_HERE))
+            .collect()
+    }
+
+    #[test]
+    fn unfocused_band_and_bar_mark_both_lines_of_the_row_the_user_sits_at() {
+        let lines = render(&two_tabs_at_second(), 6, 30, NOW);
+        assert_eq!(banded(&lines), [3, 4]);
+        assert_eq!(marked_here(&lines), [3, 4]);
+        for line in &lines[3..5] {
+            assert_eq!(plain(line).chars().count(), 30, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn focused_band_follows_the_cursor_and_the_bar_stays_put() {
+        let mut app = two_tabs_at_second();
+        app.set_focused(true);
+        assert_eq!(banded(&render(&app, 6, 30, NOW)), [3, 4]);
+
+        app.handle_key(Key::Up);
+        let lines = render(&app, 6, 30, NOW);
+        assert_eq!(banded(&lines), [1, 2]);
+        assert_eq!(marked_here(&lines), [3, 4]);
+    }
+
+    #[test]
+    fn unfocused_list_without_an_agent_here_has_no_band() {
+        let app = simple_app(&["/a", "/b"]);
+        assert!(banded(&render(&app, 6, 30, NOW)).is_empty());
+    }
+
+    #[test]
+    fn unfocused_list_scrolls_to_the_row_the_user_sits_at() {
+        let mut app = app_from(
+            r#"{"version":1,"agents":[
+                {"id":"/a","dir":"/a","window_id":"s:1"},
+                {"id":"/b","dir":"/b","window_id":"s:2"},
+                {"id":"/c","dir":"/c","window_id":"s:3"},
+                {"id":"/d","dir":"/d","window_id":"s:4"}
+            ]}"#,
+        );
+        sits_at(&mut app, "s:4");
+        let lines = plain_lines(&render(&app, 4, 40, NOW));
+        assert_eq!(
+            lines[1..3],
+            [format!("{GLYPH_HERE}· /d"), GLYPH_HERE.to_string()]
+        );
     }
 
     #[test]
@@ -635,7 +732,7 @@ mod tests {
         );
         let row = plain(&render(&app, 5, 16, NOW)[1]);
         assert_eq!(row.chars().count(), 16);
-        assert!(row.starts_with("· ñandú/日本語日本…"), "{row:?}");
+        assert!(row.starts_with(" · ñandú/日本語日…"), "{row:?}");
     }
 
     #[test]
@@ -651,19 +748,27 @@ mod tests {
     }
 
     #[test]
-    fn scrolling_keeps_selection_visible() {
-        let mut app = simple_app(&["/a", "/b", "/c", "/d", "/e"]);
+    fn scrolling_keeps_the_whole_selected_row_visible() {
+        let mut app = tabbed_app(&["a", "b", "c", "d", "e"]);
         for _ in 0..4 {
             app.handle_key(Key::Down);
         }
         let lines = plain_lines(&render(&app, 4, 40, NOW));
-        assert_eq!(lines[..3], ["· /c", "· /d", "· /e"]);
+        assert_eq!(lines[..3], ["   d", " · /e", "   e"]);
 
         for _ in 0..4 {
             app.handle_key(Key::Up);
         }
         let lines = plain_lines(&render(&app, 4, 40, NOW));
-        assert_eq!(lines[..3], ["Agents · 5", "· /a", "· /b"]);
+        assert_eq!(lines[..3], ["Agents · 5", " · /a", "   a"]);
+    }
+
+    #[test]
+    fn single_line_view_keeps_the_selected_name() {
+        let mut app = tabbed_app(&["a", "b", "c"]);
+        app.handle_key(Key::Down);
+        app.handle_key(Key::Down);
+        assert_eq!(plain_lines(&render(&app, 1, 40, NOW)), [" · /c"]);
     }
 
     #[test]
@@ -719,11 +824,11 @@ mod tests {
         app.set_notice("focus failed");
         assert_eq!(
             plain_lines(&render(&app, 4, 40, NOW)),
-            ["Agents · 3", "· /a", "· /b", "focus failed"]
+            ["Agents · 3", " · /a", "", "focus failed"]
         );
         assert_eq!(
             plain_lines(&render(&app, 6, 40, NOW)),
-            ["Agents · 3", "· /a", "· /b", "· /c", "", "focus failed"]
+            ["Agents · 3", " · /a", "", " · /b", "", "focus failed"]
         );
     }
 

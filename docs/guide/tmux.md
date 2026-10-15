@@ -117,11 +117,14 @@ so theme colours are muted from your theme's own values; if the terminal does no
 theme colours are only drawn faint. On zellij the colours come from `dump-screen --ansi`, which
 needs zellij 0.44.0 or later.
 
-Rows lead with the name you gave the agent's window, e.g. `LEX-123 · ~/notes stray`, here, in the
-TUI's Agents tab and in the zellij sidebar. Names tmux or zellij generated (automatic rename,
+Each row takes two lines, here, in the TUI's Agents tab and in the zellij sidebar: the repo and
+branch (or workspace and session, or directory) on top, and under it the name you gave the
+agent's window, then the session title. Names tmux or zellij generated (automatic rename,
 `Tab #N`) and the names cogitator gives windows it launches are skipped. Several agents sharing a
 directory always get a label: the window name, else the session title, else the window number
-(`tab 3`). Renames show up within a couple of seconds.
+(`tab 3`). Renames show up within a couple of seconds. In the zellij sidebar, a `▌` bar marks the
+agent of the tab you are on. While the sidebar has focus, the highlight follows the cursor; when
+you leave it, the highlight and the cursor go back to the agent of your tab.
 
 | Key               | Action                                                              |
 | ----------------- | ------------------------------------------------------------------- |

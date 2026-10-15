@@ -43,6 +43,7 @@ pub struct App {
     status: Status,
     notice: Option<String>,
     floating: bool,
+    focused: bool,
     here: Option<Location>,
     pub(crate) scroll: Cell<usize>,
 }
@@ -56,6 +57,7 @@ impl Default for App {
             status: Status::Loading,
             notice: None,
             floating: false,
+            focused: false,
             here: None,
             scroll: Cell::new(0),
         }
@@ -100,6 +102,21 @@ impl App {
         self.floating = floating;
     }
 
+    pub fn focused(&self) -> bool {
+        self.focused
+    }
+
+    /// Reports whether focus changed, so the caller knows to redraw.
+    pub fn set_focused(&mut self, focused: bool) -> bool {
+        if self.focused == focused {
+            return false;
+        }
+
+        self.focused = focused;
+        self.rest_cursor();
+        true
+    }
+
     /// Reports whether the location changed, so the caller knows to redraw.
     pub fn set_location(&mut self, here: Location) -> bool {
         if self.here.as_ref() == Some(&here) {
@@ -107,7 +124,20 @@ impl App {
         }
 
         self.here = Some(here);
+        self.rest_cursor();
         true
+    }
+
+    /// While the plugin is unfocused the cursor rests on the agent the user
+    /// sits at, so focusing the plugin starts from there whatever the user
+    /// moved to last time.
+    fn rest_cursor(&mut self) {
+        if self.focused {
+            return;
+        }
+        if let Some(i) = self.here_index() {
+            self.selected = Some(self.agents[i].id.clone());
+        }
     }
 
     /// Mirrors cogitator's agents.AgentAt: the agent on this tab, else the
@@ -186,20 +216,18 @@ impl App {
 
         self.agents = agents;
 
-        if still_present {
-            return;
+        if !still_present {
+            let idx = prev_index
+                .unwrap_or(0)
+                .min(self.agents.len().saturating_sub(1));
+            self.selected = self.agents.get(idx).map(|a| a.id.clone());
         }
-
-        if self.agents.is_empty() {
-            self.selected = None;
-            return;
-        }
-
-        let idx = prev_index.unwrap_or(0).min(self.agents.len() - 1);
-        self.selected = Some(self.agents[idx].id.clone());
+        self.rest_cursor();
     }
 
     pub fn handle_key(&mut self, key: Key) -> Option<Effect> {
+        // Keys reach the plugin only while it has focus.
+        self.set_focused(true);
         self.notice = None;
         match key {
             Key::Down | Key::Char('j') => {
@@ -459,14 +487,17 @@ pub(crate) mod tests {
         assert_eq!(app.notice(), None);
     }
 
-    fn located_app() -> App {
-        let mut app = App::new();
-        let json = r#"{"version":1,"agents":[
+    fn located_feed() -> &'static str {
+        r#"{"version":1,"agents":[
             {"id":"/shared-a","mux_session":"main","window_id":"main:1","session_owned":false},
             {"id":"/shared-b","mux_session":"main","window_id":"main:2","session_owned":false},
             {"id":"/own","mux_session":"wt","window_id":"wt:0","session_owned":true}
-        ]}"#;
-        app.apply_list_result(Some(0), json.as_bytes(), b"");
+        ]}"#
+    }
+
+    fn located_app() -> App {
+        let mut app = App::new();
+        app.apply_list_result(Some(0), located_feed().as_bytes(), b"");
         app
     }
 
@@ -512,5 +543,57 @@ pub(crate) mod tests {
         assert!(app.set_location(at("s", None)));
         assert!(!app.set_location(at("s", None)));
         assert!(app.set_location(at("s", Some("s:1"))));
+    }
+
+    #[test]
+    fn set_focused_reports_only_changes() {
+        let mut app = App::new();
+        assert!(!app.set_focused(false));
+        assert!(app.set_focused(true));
+        assert!(!app.set_focused(true));
+    }
+
+    #[test]
+    fn unfocused_cursor_rests_on_the_agent_here_as_the_user_moves() {
+        let mut app = located_app();
+        app.set_location(at("main", Some("main:2")));
+        assert_eq!(selected(&app), Some("/shared-b"));
+
+        app.set_location(at("wt", Some("wt:0")));
+        assert_eq!(selected(&app), Some("/own"));
+    }
+
+    #[test]
+    fn unfocused_cursor_stays_put_when_no_agent_is_here() {
+        let mut app = located_app();
+        app.set_location(at("main", Some("main:2")));
+        app.set_location(at("main", Some("main:9")));
+        assert_eq!(selected(&app), Some("/shared-b"));
+    }
+
+    #[test]
+    fn leaving_the_plugin_returns_the_cursor_to_the_agent_here() {
+        let mut app = located_app();
+        app.set_location(at("main", Some("main:2")));
+        app.set_focused(true);
+        app.handle_key(Key::Down);
+        assert_eq!(selected(&app), Some("/own"));
+
+        app.set_focused(false);
+        assert_eq!(selected(&app), Some("/shared-b"));
+        app.set_focused(true);
+        assert_eq!(selected(&app), Some("/shared-b"));
+    }
+
+    #[test]
+    fn focused_cursor_keeps_its_agent_across_refresh_and_moves() {
+        let mut app = located_app();
+        app.set_location(at("main", Some("main:2")));
+        app.handle_key(Key::Up);
+        assert!(app.focused());
+
+        app.set_location(at("wt", Some("wt:0")));
+        app.apply_list_result(Some(0), located_feed().as_bytes(), b"");
+        assert_eq!(selected(&app), Some("/shared-a"));
     }
 }
