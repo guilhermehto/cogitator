@@ -1,12 +1,15 @@
 package ui
 
 import (
+	"image/color"
+	"math"
 	"slices"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/lucasb-eyer/go-colorful"
 
 	"github.com/guilhermehto/cogitator/internal/agents"
 	"github.com/guilhermehto/cogitator/internal/settings"
@@ -125,9 +128,15 @@ func TestPreviewKeepsStylingAndDropsOtherControlSequences(t *testing.T) {
 			want:     []string{"\x1b[1;2;31ma" + ansi.ResetStyle + "\x1b[2;31mb" + ansi.ResetStyle},
 		},
 		{
-			name:     "pane background dropped, foreground kept",
+			name:     "pane background dropped, foreground kept muted",
 			captured: "\x1b[38;2;136;192;208m\x1b[48;2;46;52;64mtext\x1b[39m\x1b[48;2;46;52;64m pad\x1b[41m!",
-			want:     []string{"\x1b[2;38;2;136;192;208mtext" + ansi.ResetStyle + "\x1b[2m pad!" + ansi.ResetStyle},
+			want:     []string{"\x1b[2;38;2;160;187;195mtext" + ansi.ResetStyle + "\x1b[2m pad!" + ansi.ResetStyle},
+		},
+		{
+			name:     "a colour carried through a later SGR is muted once",
+			captured: "\x1b[38;2;136;192;208ma\x1b[1mb\x1b[3mc",
+			want: []string{"\x1b[2;38;2;160;187;195ma" + ansi.ResetStyle + "\x1b[1;2;38;2;160;187;195mb" +
+				ansi.ResetStyle + "\x1b[1;2;3;38;2;160;187;195mc" + ansi.ResetStyle},
 		},
 		{
 			name:     "text stays faint through a reset, captured faint and normal intensity",
@@ -141,6 +150,29 @@ func TestPreviewKeepsStylingAndDropsOtherControlSequences(t *testing.T) {
 				t.Errorf("body = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestMutedColorKeepsThemeColoursAndHalvesFixedChroma(t *testing.T) {
+	for _, c := range []color.Color{nil, ansi.Red, ansi.BrightCyan, ansi.IndexedColor(9)} {
+		if got := mutedColor(c); got != c {
+			t.Errorf("mutedColor(%v) = %v, want the theme colour kept", c, got)
+		}
+	}
+
+	grey := ansi.RGBColor{R: 128, G: 128, B: 128}
+	if got := mutedColor(grey); got != grey {
+		t.Errorf("mutedColor(grey) = %v, want it unchanged", got)
+	}
+
+	for _, c := range []color.Color{ansi.IndexedColor(196), ansi.RGBColor{R: 215, G: 119, B: 87}} {
+		before, _ := colorful.MakeColor(c)
+		after, _ := colorful.MakeColor(mutedColor(c))
+		l0, c0, h0 := before.OkLch()
+		l1, c1, h1 := after.OkLch()
+		if math.Abs(l1-l0) > 0.01 || math.Abs(c1-c0*previewChroma) > 0.01 || math.Abs(h1-h0) > 2 {
+			t.Errorf("mutedColor(%v) = lch(%.3f %.3f %.1f), want lch(%.3f %.3f %.1f)", c, l1, c1, h1, l0, c0*previewChroma, h0)
+		}
 	}
 }
 

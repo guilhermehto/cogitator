@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"image/color"
 	"strings"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/cellbuf"
+	"github.com/lucasb-eyer/go-colorful"
 
 	"github.com/guilhermehto/cogitator/internal/agents"
 	"github.com/guilhermehto/cogitator/internal/mux"
@@ -21,6 +23,8 @@ const (
 	// agentSplitMinWidth is the narrowest width that still fits a readable
 	// list beside the preview; narrower hosts show the list alone.
 	agentSplitMinWidth = 100
+	// previewChroma is the share of a captured colour's chroma the preview keeps.
+	previewChroma = 0.5
 )
 
 type (
@@ -251,12 +255,13 @@ func tailLines(text string, n int) []string {
 // break) and stands alone when the preview resets it at the line end.
 // Background colours are dropped: zellij paints the pane background on every
 // cell, which would turn the preview into a solid block. Every cell is drawn
-// faint so the preview never reads as the live pane.
+// faint and in muted colours so the preview never reads as the live pane.
 func displayText(text string) string {
 	var out strings.Builder
 	parser := ansi.NewParser()
 	var state byte
 	var pen, written cellbuf.Style
+	shown := previewStyle(pen)
 
 	for len(text) > 0 {
 		seq, width, n, newState := ansi.DecodeSequence(text, state, parser)
@@ -266,13 +271,11 @@ func displayText(text string) string {
 		switch {
 		case isSGR(seq, parser):
 			cellbuf.ReadStyle(parser.Params(), &pen)
-			pen.Bg = nil
+			shown = previewStyle(pen)
 		case seq == "\n":
 			out.WriteString(seq)
 			written = cellbuf.Style{}
 		case width > 0:
-			shown := pen
-			shown.Faint(true)
 			if !shown.Equal(&written) {
 				out.WriteString(styleChange(written, shown))
 				written = shown
@@ -282,6 +285,39 @@ func displayText(text string) string {
 	}
 
 	return out.String()
+}
+
+// previewStyle is the captured pen as the preview draws it: faint, with no
+// background and a muted foreground.
+func previewStyle(pen cellbuf.Style) cellbuf.Style {
+	pen.Bg = nil
+	pen.Fg = mutedColor(pen.Fg)
+	pen.Faint(true)
+
+	return pen
+}
+
+// mutedColor scales the chroma of a colour with a fixed RGB value by
+// previewChroma and keeps its lightness and hue. The 16 theme colours are kept:
+// the terminal theme sets their RGB value, so only faint mutes them.
+func mutedColor(c color.Color) color.Color {
+	switch c := c.(type) {
+	case nil, ansi.BasicColor:
+		return c
+	case ansi.IndexedColor:
+		if c < 16 {
+			return c
+		}
+	}
+
+	fixed, ok := colorful.MakeColor(c)
+	if !ok {
+		return c
+	}
+	l, chroma, h := fixed.OkLch()
+	r, g, b := colorful.OkLch(l, chroma*previewChroma, h).Clamped().RGB255()
+
+	return ansi.RGBColor{R: r, G: g, B: b}
 }
 
 // styleChange returns the SGR that turns the written styling into pen.
