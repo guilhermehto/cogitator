@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 
 	"github.com/guilhermehto/cogitator/internal/agents"
 	"github.com/guilhermehto/cogitator/internal/settings"
@@ -125,22 +127,63 @@ func TestAgentListShowsFullClaudeCodeHarnessAtPopupWidth(t *testing.T) {
 	}
 }
 
-func TestAgentListShowsTitleAndHarnessOnWideRowsOnly(t *testing.T) {
+func TestAgentListShowsHarnessOnWideRowsOnly(t *testing.T) {
 	a := worktreeAgent("/a", "/r/api", "main", agents.GroupIdle, state.AttnInactive, settings.StateRunning)
-	a.Title = "Fix flaky test"
 	l := newAgentList()
 	l.SetAgents([]agents.Agent{a})
 
 	wide, narrow := l.View(agentListNow, 100, 40), l.View(agentListNow, 50, 40)
 
-	if !strings.Contains(wide, "Fix flaky test") || !strings.Contains(wide, "opencode") {
-		t.Fatalf("wide row missing title or harness:\n%s", wide)
+	if !strings.Contains(wide, "opencode") {
+		t.Fatalf("wide row missing harness:\n%s", wide)
 	}
-	if strings.Contains(narrow, "Fix flaky test") || strings.Contains(narrow, "opencode") {
+	if strings.Contains(narrow, "opencode") {
 		t.Fatalf("narrow row should keep only status, name and age:\n%s", narrow)
 	}
 	if !strings.Contains(narrow, "api·main") || !strings.Contains(narrow, "5m") {
 		t.Fatalf("narrow row missing name or age:\n%s", narrow)
+	}
+}
+
+func TestAgentListPutsTabLabelAndTitleUnderTheName(t *testing.T) {
+	a := worktreeAgent("/a", "/r/api", "main", agents.GroupIdle, state.AttnInactive, settings.StateRunning)
+	a.Tab = "LEX-123"
+	a.Title = "Fix flaky test"
+	l := newAgentList()
+	l.SetAgents([]agents.Agent{a})
+
+	lines := strings.Split(ansi.Strip(l.View(agentListNow, 50, 40)), "\n")
+
+	if len(lines) != 3 {
+		t.Fatalf("want header and a two-line row, got:\n%s", strings.Join(lines, "\n"))
+	}
+	if name := lines[1]; !strings.HasPrefix(name, glyphInactive+" api·main ") || !strings.HasSuffix(name, " 5m") {
+		t.Fatalf("first line = %q, want status, name and age", name)
+	}
+	if detail := strings.TrimRight(lines[2], " "); detail != "  LEX-123  Fix flaky test" {
+		t.Fatalf("second line = %q, want tab label and title under the name", detail)
+	}
+}
+
+func TestAgentListCursorBandCoversBothRowLines(t *testing.T) {
+	r := lipgloss.DefaultRenderer()
+	orig := r.ColorProfile()
+	r.SetColorProfile(termenv.ANSI256)
+	defer r.SetColorProfile(orig)
+
+	l := newAgentList()
+	l.SetAgents(agentsInEveryGroup()[:2])
+	open, _, _ := strings.Cut(lipgloss.NewStyle().Background(wtSelectedBg).Render("\x00"), "\x00")
+
+	lines := strings.Split(l.View(agentListNow, 50, 40), "\n")
+
+	for _, i := range []int{1, 2} {
+		if !strings.HasPrefix(lines[i], open) {
+			t.Fatalf("cursor row line %d lacks the selection band: %q", i, lines[i])
+		}
+	}
+	if strings.Contains(strings.Join(lines[3:], "\n"), open) {
+		t.Fatalf("band leaked past the cursor row:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
@@ -265,17 +308,21 @@ func TestAgentListSeenTargetsCursorAgent(t *testing.T) {
 	}
 }
 
-func TestAgentListWindowKeepsCursorVisible(t *testing.T) {
+func TestAgentListWindowKeepsWholeCursorRowVisible(t *testing.T) {
+	list := agentsInEveryGroup()
+	list[3].Tab = "notes"
 	l := newAgentList()
-	l.SetAgents(agentsInEveryGroup())
+	l.SetAgents(list)
 	typeKeys(&l, "G")
 
-	view := l.View(agentListNow, 100, 4)
+	for _, height := range []int{2, 4} {
+		view := l.View(agentListNow, 100, height)
 
-	if got := len(strings.Split(view, "\n")); got != 4 {
-		t.Fatalf("view has %d lines, want 4", got)
-	}
-	if !strings.Contains(view, "docs·main") {
-		t.Fatalf("cursor row scrolled out of view:\n%s", view)
+		if got := len(strings.Split(view, "\n")); got != height {
+			t.Fatalf("height %d: view has %d lines", height, got)
+		}
+		if !strings.Contains(view, "scratch stray") || !strings.Contains(view, "notes") {
+			t.Fatalf("height %d: cursor row not wholly in view:\n%s", height, view)
+		}
 	}
 }

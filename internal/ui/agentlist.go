@@ -20,9 +20,12 @@ import (
 
 const (
 	agentHarnessWidth = 11
-	// agentDetailMinWidth is the narrowest row that still fits the session
-	// title and harness; narrower rows keep only status, name and age.
+	// agentDetailMinWidth is the narrowest row that still fits the harness;
+	// narrower rows keep only status, name and age on their first line.
 	agentDetailMinWidth = 80
+	// agentRowLines is how many lines an agent row takes: the name, then the
+	// tab label and session title under it.
+	agentRowLines = 2
 )
 
 // agentHomeDir is read once so row labels can abbreviate it to "~".
@@ -283,7 +286,7 @@ func (l agentList) View(now time.Time, width, height int) string {
 			if a.ID == l.cursorID {
 				cursorLine = len(lines)
 			}
-			lines = append(lines, renderAgentRow(now, a, a.ID == l.cursorID, width))
+			lines = append(lines, renderAgentRow(now, a, a.ID == l.cursorID, width)...)
 		}
 	}
 
@@ -298,40 +301,47 @@ func (l agentList) View(now time.Time, width, height int) string {
 	return strings.Join(windowLines(lines, cursorLine, height), "\n")
 }
 
+// windowLines keeps the cursor row, which starts at cursorLine, whole and
+// near the middle of the height lines it returns.
 func windowLines(lines []string, cursorLine, height int) []string {
 	if height <= 0 || len(lines) <= height {
 		return lines
 	}
 
-	start := min(max(cursorLine-height/2, 0), len(lines)-height)
+	cursorEnd := cursorLine + agentRowLines - 1
+	start := min(max(cursorEnd-height/2, 0), len(lines)-height, cursorLine)
 
 	return lines[start : start+height]
 }
 
-// renderAgentRow lays out status, name and (when wide enough) the muted
-// session title on the left, harness and age on the right, like a Repos row.
-func renderAgentRow(now time.Time, a agents.Agent, selected bool, width int) string {
-	left := agentStatusCell(a) + agentStyledName(a)
+// renderAgentRow lays out an agent on agentRowLines lines: status and name on
+// the first, with harness (when wide enough) and age on the right like a Repos
+// row, then the tab label and muted session title under the name.
+func renderAgentRow(now time.Time, a agents.Agent, selected bool, width int) []string {
+	status := agentStatusCell(a)
+	left := status + agentStyledTarget(a)
 	right := dimStyle.Render(formatRelative(now, a.LastActivity))
 
 	if width >= agentDetailMinWidth {
-		if a.Title != "" && a.Title != a.Tab {
-			left += "  " + wtPathStyle.Render(a.Title)
-		}
 		right = fitCell(agentColor(a.Harness).Render(a.Harness), agentHarnessWidth) + " " + alignRight(right, 4)
 	}
 
-	row := left + "  " + right
+	name := left + "  " + right
+	detail := strings.Repeat(" ", ansi.StringWidth(status)) + agentStyledDetail(a)
 	if width > 0 {
 		gap := width - ansi.StringWidth(right) - 2
-		row = fitCell(left, max(gap, 0)) + "  " + right
+		name = fitCell(left, max(gap, 0)) + "  " + right
+		detail = fitCell(detail, width)
 	}
 
+	lines := []string{name, detail}
 	if selected {
-		return highlightSelectedRow(row)
+		for i := range lines {
+			lines[i] = highlightSelectedRow(lines[i])
+		}
 	}
 
-	return row
+	return lines
 }
 
 // agentStatusCell renders the same status glyph the Repos and Workspaces
@@ -340,31 +350,52 @@ func agentStatusCell(a agents.Agent) string {
 	return worktreeStatusCell(settings.Row{State: a.State, Attention: a.Attention})
 }
 
-// agentStyledName is agentName with the repo or workspace muted so the branch
-// or session reads first, led by the agent's tab label when it has one;
-// stopped agents are dimmed as in the Repos tab.
+// agentStyledName is agentName styled: agentStyledTarget led by the agent's
+// tab label when it has one.
 func agentStyledName(a agents.Agent) string {
-	lead := lipgloss.NewStyle()
-	if a.State == settings.StateStopped {
-		lead = wtStoppedStyle
+	target := agentStyledTarget(a)
+	if a.Tab == "" {
+		return target
 	}
+	return agentLeadStyle(a).Render(a.Tab) + dimStyle.Render(agentTabSeparator) + target
+}
 
-	var name string
+// agentStyledTarget names what the agent works in, with the repo or workspace
+// muted so the branch or session reads first.
+func agentStyledTarget(a agents.Agent) string {
+	lead := agentLeadStyle(a)
+
 	switch {
 	case a.Kind == agents.KindWorkspace:
-		name = wtRepoStyle.UnsetBold().Render(a.Workspace) + dimStyle.Render("/") + lead.Render(a.SessionName)
+		return wtRepoStyle.UnsetBold().Render(a.Workspace) + dimStyle.Render("/") + lead.Render(a.SessionName)
 	case a.Kind == agents.KindStray:
-		name = lead.Render(abbreviateHome(a.Dir)) + " " + recentStyle.Render("stray")
+		return lead.Render(abbreviateHome(a.Dir)) + " " + recentStyle.Render("stray")
 	case a.Branch == "":
-		name = lead.Render(abbreviateHome(a.Dir))
+		return lead.Render(abbreviateHome(a.Dir))
 	default:
-		name = wtRepoStyle.UnsetBold().Render(filepath.Base(a.Repo)) + dimStyle.Render("·") + lead.Render(a.Branch)
+		return wtRepoStyle.UnsetBold().Render(filepath.Base(a.Repo)) + dimStyle.Render("·") + lead.Render(a.Branch)
 	}
+}
 
-	if a.Tab == "" {
-		return name
+// agentStyledDetail is the line under an agent's name: its tab label, then
+// its session title muted unless the label already is the title.
+func agentStyledDetail(a agents.Agent) string {
+	var parts []string
+	if a.Tab != "" {
+		parts = append(parts, agentLeadStyle(a).Render(a.Tab))
 	}
-	return lead.Render(a.Tab) + dimStyle.Render(agentTabSeparator) + name
+	if a.Title != "" && a.Title != a.Tab {
+		parts = append(parts, wtPathStyle.Render(a.Title))
+	}
+	return strings.Join(parts, "  ")
+}
+
+// agentLeadStyle dims a stopped agent's own text, as the Repos tab does.
+func agentLeadStyle(a agents.Agent) lipgloss.Style {
+	if a.State == settings.StateStopped {
+		return wtStoppedStyle
+	}
+	return lipgloss.NewStyle()
 }
 
 func alignRight(s string, width int) string {
@@ -380,7 +411,8 @@ func fitCell(s string, width int) string {
 // agentTabSeparator sits between an agent's tab label and its name.
 const agentTabSeparator = " · "
 
-// agentName is the plain-text label rows display and the filter matches on.
+// agentName is the one-line plain-text label of an agent: the filter matches
+// on it, and prompts and the session palette show it.
 func agentName(a agents.Agent) string {
 	var name string
 	switch {
