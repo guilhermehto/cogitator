@@ -111,9 +111,11 @@ them the same way. On a popup at least 100 columns wide, the right half shows a 
 the highlighted agent's pane: its status, harness, session title and the last lines of output,
 refreshed every second. The output keeps the pane's text colours and attributes but drops
 background colours, so zellij's painted pane background does not turn the preview into a solid
-block. The output is drawn faint, and colours with a fixed RGB value lose half their saturation,
-so the preview never reads as the live pane. The 16 theme colours keep their theme value. On
-zellij the colours come from `dump-screen --ansi`, which needs zellij 0.44.0 or later.
+block. The output is drawn faint and its colours lose half their saturation, so the preview never
+reads as the live pane. At startup cogitator asks the terminal for its 16 theme colours (OSC 4),
+so theme colours are muted from your theme's own values; if the terminal does not report them,
+theme colours are only drawn faint. On zellij the colours come from `dump-screen --ansi`, which
+needs zellij 0.44.0 or later.
 
 Rows lead with the name you gave the agent's window, e.g. `LEX-123 · ~/notes stray`, here, in the
 TUI's Agents tab and in the zellij sidebar. Names tmux or zellij generated (automatic rename,

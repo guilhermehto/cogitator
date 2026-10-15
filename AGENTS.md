@@ -12,6 +12,7 @@
 - `internal/agents/`, `agentfeed/` — cross-harness agent model, `@cog_*` tmux badge diffs, focus/seen decisions; the feed that `pick`/`next` read from the running TUI.
 - `internal/tmuxinstall/` — `cogitator tmux install|uninstall`: owned tmux.conf + one `source-file` line.
 - `internal/git/`, `harness/`, `tmuxctl/`, `pathnorm/` — git ops, harness registry, tmux control, canonical paths.
+- `internal/termpalette/` — OSC 4 query for the terminal's 16 theme colours (the Agents preview mutes them).
 - `internal/config/`, `logging/` — timing/threshold defaults, logging.
 - `docs/` — VitePress site (self-contained npm package; `npm run dev|build` inside `docs/`), deployed to GitHub Pages by `.github/workflows/docs.yml`. `make demo` copies `tui.png` into `docs/public/`.
 

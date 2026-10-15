@@ -14,6 +14,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/agents"
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
+	"github.com/guilhermehto/cogitator/internal/termpalette"
 	"github.com/guilhermehto/cogitator/internal/tmuxctl"
 )
 
@@ -153,25 +154,47 @@ func TestPreviewKeepsStylingAndDropsOtherControlSequences(t *testing.T) {
 	}
 }
 
-func TestMutedColorKeepsThemeColoursAndHalvesFixedChroma(t *testing.T) {
-	for _, c := range []color.Color{nil, ansi.Red, ansi.BrightCyan, ansi.IndexedColor(9)} {
-		if got := mutedColor(c); got != c {
-			t.Errorf("mutedColor(%v) = %v, want the theme colour kept", c, got)
-		}
+func TestMutedColorHalvesChromaAndKeepsLightnessAndHue(t *testing.T) {
+	nord := termpalette.Palette{4: ansi.RGBColor{R: 0x81, G: 0xa1, B: 0xc1}, 12: ansi.RGBColor{R: 0x88, G: 0xc0, B: 0xd0}}
+	tests := []struct {
+		name   string
+		in     color.Color
+		source color.Color
+	}{
+		{name: "256-colour palette entry", in: ansi.IndexedColor(196), source: ansi.IndexedColor(196)},
+		{name: "truecolour", in: ansi.RGBColor{R: 215, G: 119, B: 87}, source: ansi.RGBColor{R: 215, G: 119, B: 87}},
+		{name: "theme colour the terminal reported", in: ansi.Blue, source: nord[4]},
+		{name: "theme colour set by 256-colour index", in: ansi.IndexedColor(12), source: nord[12]},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before, _ := colorful.MakeColor(tt.source)
+			after, _ := colorful.MakeColor(mutedColor(tt.in, nord))
+			l0, c0, h0 := before.OkLch()
+			l1, c1, h1 := after.OkLch()
+			if math.Abs(l1-l0) > 0.01 || math.Abs(c1-c0*previewChroma) > 0.01 || math.Abs(h1-h0) > 2 {
+				t.Errorf("muted = lch(%.3f %.3f %.1f), want lch(%.3f %.3f %.1f)", l1, c1, h1, l0, c0*previewChroma, h0)
+			}
+		})
+	}
+}
 
+func TestPreviewDrawsReportedThemeColoursMuted(t *testing.T) {
+	theme := termpalette.Palette{4: ansi.RGBColor{R: 0x81, G: 0xa1, B: 0xc1}}
+
+	got := displayText("\x1b[34mblue\x1b[31mred", theme)
+
+	if want := "\x1b[2;38;2;144;159;175mblue" + ansi.ResetStyle + "\x1b[2;31mred"; got != want {
+		t.Errorf("displayText = %q, want %q", got, want)
+	}
+}
+
+func TestMutedColorKeepsUnreportedThemeColoursAndGreys(t *testing.T) {
+	theme := termpalette.Palette{4: ansi.RGBColor{R: 0x81, G: 0xa1, B: 0xc1}}
 	grey := ansi.RGBColor{R: 128, G: 128, B: 128}
-	if got := mutedColor(grey); got != grey {
-		t.Errorf("mutedColor(grey) = %v, want it unchanged", got)
-	}
-
-	for _, c := range []color.Color{ansi.IndexedColor(196), ansi.RGBColor{R: 215, G: 119, B: 87}} {
-		before, _ := colorful.MakeColor(c)
-		after, _ := colorful.MakeColor(mutedColor(c))
-		l0, c0, h0 := before.OkLch()
-		l1, c1, h1 := after.OkLch()
-		if math.Abs(l1-l0) > 0.01 || math.Abs(c1-c0*previewChroma) > 0.01 || math.Abs(h1-h0) > 2 {
-			t.Errorf("mutedColor(%v) = lch(%.3f %.3f %.1f), want lch(%.3f %.3f %.1f)", c, l1, c1, h1, l0, c0*previewChroma, h0)
+	for _, c := range []color.Color{nil, ansi.Red, ansi.BrightCyan, ansi.IndexedColor(9), grey} {
+		if got := mutedColor(c, theme); got != c {
+			t.Errorf("mutedColor(%v) = %v, want it kept", c, got)
 		}
 	}
 }

@@ -239,6 +239,7 @@ func RunPick(cfg *config.Config, logger *slog.Logger, client string) error {
 	}
 
 	m := newPickModel(agentfeed.NewClient(), client, time.Now)
+	m.preview.theme = queryTheme(logger)
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		logger.Error("pick failed", "err", err)
 

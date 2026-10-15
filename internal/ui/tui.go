@@ -110,6 +110,8 @@ func RunTUI(cfg *config.Config, logger *slog.Logger, bellEnabled, debug bool) er
 		m.attachBadges(m.mux)
 	}
 
+	m.agentPreview.theme = queryTheme(logger)
+
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	badges, hasBadges := m.mux.(badgeBackend)
 	if hasBadges {

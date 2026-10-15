@@ -2,6 +2,8 @@ package ui
 
 import (
 	"image/color"
+	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/guilhermehto/cogitator/internal/agents"
 	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/state"
+	"github.com/guilhermehto/cogitator/internal/termpalette"
 )
 
 const (
@@ -25,6 +28,10 @@ const (
 	agentSplitMinWidth = 100
 	// previewChroma is the share of a captured colour's chroma the preview keeps.
 	previewChroma = 0.5
+	// paletteQueryTimeout bounds the startup wait for the terminal's theme
+	// colours. Multiplexers answer at once; it only runs out on a terminal
+	// that ignores the device attributes query.
+	paletteQueryTimeout = time.Second
 )
 
 type (
@@ -50,6 +57,8 @@ type agentPreview struct {
 	agentID  string
 	text     string
 	err      string
+	// theme holds the terminal's theme colours, so the preview can mute them.
+	theme termpalette.Palette
 }
 
 // Follow schedules a capture when the cursor settled on another agent.
@@ -159,7 +168,7 @@ func (p agentPreview) View(a agents.Agent, now time.Time, width, height int) str
 	case p.err != "":
 		lines = append(lines, dimStyle.Render(p.err))
 	default:
-		lines = append(lines, tailLines(p.text, max(height-len(lines), 0))...)
+		lines = append(lines, tailLines(p.text, max(height-len(lines), 0), p.theme)...)
 	}
 
 	for i, line := range lines {
@@ -231,12 +240,12 @@ func paneTarget(a agents.Agent) string {
 
 // tailLines returns the last n non-trailing-blank lines of captured text,
 // sanitized by displayText.
-func tailLines(text string, n int) []string {
+func tailLines(text string, n int, theme termpalette.Palette) []string {
 	if n <= 0 {
 		return nil
 	}
 
-	lines := strings.Split(displayText(text), "\n")
+	lines := strings.Split(displayText(text, theme), "\n")
 	for len(lines) > 0 && strings.TrimSpace(ansi.Strip(lines[len(lines)-1])) == "" {
 		lines = lines[:len(lines)-1]
 	}
@@ -256,12 +265,12 @@ func tailLines(text string, n int) []string {
 // Background colours are dropped: zellij paints the pane background on every
 // cell, which would turn the preview into a solid block. Every cell is drawn
 // faint and in muted colours so the preview never reads as the live pane.
-func displayText(text string) string {
+func displayText(text string, theme termpalette.Palette) string {
 	var out strings.Builder
 	parser := ansi.NewParser()
 	var state byte
 	var pen, written cellbuf.Style
-	shown := previewStyle(pen)
+	shown := previewStyle(pen, theme)
 
 	for len(text) > 0 {
 		seq, width, n, newState := ansi.DecodeSequence(text, state, parser)
@@ -271,7 +280,7 @@ func displayText(text string) string {
 		switch {
 		case isSGR(seq, parser):
 			cellbuf.ReadStyle(parser.Params(), &pen)
-			shown = previewStyle(pen)
+			shown = previewStyle(pen, theme)
 		case seq == "\n":
 			out.WriteString(seq)
 			written = cellbuf.Style{}
@@ -289,35 +298,60 @@ func displayText(text string) string {
 
 // previewStyle is the captured pen as the preview draws it: faint, with no
 // background and a muted foreground.
-func previewStyle(pen cellbuf.Style) cellbuf.Style {
+func previewStyle(pen cellbuf.Style, theme termpalette.Palette) cellbuf.Style {
 	pen.Bg = nil
-	pen.Fg = mutedColor(pen.Fg)
+	pen.Fg = mutedColor(pen.Fg, theme)
 	pen.Faint(true)
 
 	return pen
 }
 
-// mutedColor scales the chroma of a colour with a fixed RGB value by
-// previewChroma and keeps its lightness and hue. The 16 theme colours are kept:
-// the terminal theme sets their RGB value, so only faint mutes them.
-func mutedColor(c color.Color) color.Color {
-	switch c := c.(type) {
-	case nil, ansi.BasicColor:
-		return c
-	case ansi.IndexedColor:
-		if c < 16 {
+// mutedColor scales the chroma of c by previewChroma and keeps its lightness
+// and hue. A theme colour is muted from its RGB value in theme; one the
+// terminal did not report is kept, so only faint mutes it.
+func mutedColor(c color.Color, theme termpalette.Palette) color.Color {
+	if c == nil {
+		return nil
+	}
+	if i, ok := themeIndex(c); ok {
+		if theme[i] == nil {
 			return c
 		}
+		c = theme[i]
 	}
 
-	fixed, ok := colorful.MakeColor(c)
+	rgb, ok := colorful.MakeColor(c)
 	if !ok {
 		return c
 	}
-	l, chroma, h := fixed.OkLch()
+	l, chroma, h := rgb.OkLch()
 	r, g, b := colorful.OkLch(l, chroma*previewChroma, h).Clamped().RGB255()
 
 	return ansi.RGBColor{R: r, G: g, B: b}
+}
+
+// themeIndex returns the theme palette index of c, if c is one of the 16
+// theme colours.
+func themeIndex(c color.Color) (int, bool) {
+	switch c := c.(type) {
+	case ansi.BasicColor:
+		return int(c), c < 16
+	case ansi.IndexedColor:
+		return int(c), c < 16
+	}
+
+	return 0, false
+}
+
+// queryTheme reads the terminal's theme colours for the preview. Without
+// them the preview keeps theme colours as they are.
+func queryTheme(logger *slog.Logger) termpalette.Palette {
+	theme, err := termpalette.Query(os.Stdin, os.Stdout, paletteQueryTimeout)
+	if err != nil {
+		logger.Debug("terminal theme colours unavailable", "err", err)
+	}
+
+	return theme
 }
 
 // styleChange returns the SGR that turns the written styling into pen.
