@@ -40,6 +40,10 @@ type hookOverlay struct {
 	// lastActivity is the time of the most recent hook event for this session.
 	lastActivity time.Time
 
+	// endedAt is the time the session left its process: a SessionEnd hook, or
+	// another session claiming its pane. Zero when it has not ended.
+	endedAt time.Time
+
 	// paneID is the multiplexer pane the latest stamped hook ran in.
 	paneID string
 }
@@ -230,8 +234,12 @@ func (p *Provider) handleHookFrame(raw []byte, sink provider.Sink) {
 
 	p.mu.Lock()
 	ov := p.overlays[sessionID]
-	ov.lastActivity = now
 	ov.paneID = cmp.Or(ev.PaneID, ov.paneID)
+	if ev.EventName == "SessionEnd" {
+		ov.endedAt = now
+	} else {
+		ov.lastActivity = now
+	}
 
 	switch ev.EventName {
 	case "SessionStart":
@@ -270,7 +278,8 @@ func (p *Provider) handleHookFrame(raw []byte, sink provider.Sink) {
 
 	case "Stop", "SessionEnd":
 		// Teardown: clear busy→idle. The row is NOT removed; the transcript
-		// persists on disk and a subsequent poll will keep the session alive.
+		// persists on disk and a subsequent poll will keep the session listed,
+		// as recent rather than live once SessionEnd has ended it.
 		ov.statusType = "idle"
 		ov.hasPermission = false
 		ov.hasQuestion = false
@@ -318,9 +327,43 @@ func (p *Provider) handleHookFrame(raw []byte, sink provider.Sink) {
 	}
 
 	sess := p.sessions[sessionID]
+
+	// A SessionEnd frame can arrive after its successor's first hook in the
+	// same pane (/clear fires both at once), so only a live session claims it.
+	var displaced []provider.SessionUpdate
+	if ev.EventName != "SessionEnd" {
+		displaced = p.endDisplacedLocked(sessionID, ev.PaneID, now)
+	}
 	p.mu.Unlock()
 
 	sink.ApplyUpdate(p.mergeToUpdate(sess, ov, now))
+	for _, u := range displaced {
+		sink.ApplyUpdate(u)
+	}
+}
+
+// endDisplacedLocked ends every session other than owner last seen in paneID
+// and returns their updates. A pane runs one session, so the others have left
+// it: /clear replaced them, or a reused pane id now runs a new process. Their
+// pane is cleared so later hooks from owner do not end them again. Must be
+// called with p.mu held.
+func (p *Provider) endDisplacedLocked(owner, paneID string, now time.Time) []provider.SessionUpdate {
+	if paneID == "" {
+		return nil
+	}
+
+	var updates []provider.SessionUpdate
+	for id, ov := range p.overlays {
+		if id == owner || ov.paneID != paneID {
+			continue
+		}
+
+		ov.endedAt = now
+		ov.paneID = ""
+		p.overlays[id] = ov
+		updates = append(updates, p.mergeToUpdate(p.sessions[id], ov, now))
+	}
+	return updates
 }
 
 // sessionIDForDir returns the session ID whose Dir matches dir (canonical
@@ -340,12 +383,17 @@ func (p *Provider) sessionIDForDir(dir string) string {
 // and its hook overlay. The hook overlay's statusType/hasPermission take
 // precedence over the poll-derived defaults.
 func (p *Provider) mergeToUpdate(s Session, ov hookOverlay, now time.Time) provider.SessionUpdate {
-	src := "recent"
-	if p.recencyWindow > 0 && now.Sub(s.LastActivity) <= p.recencyWindow {
-		src = "live"
+	// Use the more recent of poll and hook lastActivity.
+	lastActivity := s.LastActivity
+	if ov.lastActivity.After(lastActivity) {
+		lastActivity = ov.lastActivity
 	}
-	// If a hook has fired recently, the session is live regardless of mtime.
-	if !ov.lastActivity.IsZero() && p.recencyWindow > 0 && now.Sub(ov.lastActivity) <= p.recencyWindow {
+	// An end is not activity: a session that ended after its last activity is
+	// over, however recently it ended.
+	ended := !ov.endedAt.IsZero() && !ov.endedAt.Before(lastActivity)
+
+	src := "recent"
+	if !ended && p.recencyWindow > 0 && now.Sub(lastActivity) <= p.recencyWindow {
 		src = "live"
 	}
 
@@ -373,12 +421,6 @@ func (p *Provider) mergeToUpdate(s Session, ov hookOverlay, now time.Time) provi
 	// it and let Classify fall back to inactive.
 	if statusType == "busy" && src != "live" {
 		statusType = ""
-	}
-
-	// Use the more recent of poll and hook lastActivity.
-	lastActivity := s.LastActivity
-	if ov.lastActivity.After(lastActivity) {
-		lastActivity = ov.lastActivity
 	}
 
 	return provider.SessionUpdate{

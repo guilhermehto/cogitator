@@ -544,6 +544,115 @@ func TestProvider_SessionEnd_IdleRowSurvivesPoll(t *testing.T) {
 	_ = u2
 }
 
+// paneHook is a hook frame for sessionID stamped with the pane it ran in.
+func paneHook(event, sessionID, paneID string) []byte {
+	return []byte(`{"hook_event_name":"` + event + `","session_id":"` + sessionID + `","cwd":"/tmp/test","cogitator_pane_id":"` + paneID + `"}`)
+}
+
+// requireSource fails t unless the latest update for sessionID has source want.
+func requireSource(t *testing.T, sink *hookSink, sessionID, want string) {
+	t.Helper()
+	u, ok := sink.latestForSession(sessionID)
+	if !ok {
+		t.Fatalf("no update for session %q", sessionID)
+	}
+	if u.Source != want {
+		t.Errorf("session %q Source = %q, want %q", sessionID, u.Source, want)
+	}
+}
+
+func TestProvider_SessionEndIsNotLive(t *testing.T) {
+	sessionID := "aaaabbbb-cccc-dddd-eeee-000000000045"
+	transcriptAt := time.Now().Add(-1 * time.Minute)
+	home := buildFixtureHome(t, sessionID, transcriptAt)
+
+	p := claudecode.NewProvider(home, 10*time.Second, 30*time.Minute, nil)
+	sink := &hookSink{}
+	diskSessions, err := claudecode.ReadSessionsForTest(home)
+	if err != nil {
+		t.Fatalf("ReadSessionsForTest: %v", err)
+	}
+	p.PollOnceForTest(sink, diskSessions)
+
+	p.HandleHookFrameForTest(paneHook("SessionEnd", sessionID, "%1"), sink)
+
+	requireSource(t, sink, sessionID, "recent")
+	u, _ := sink.latestForSession(sessionID)
+	if !u.LastActivity.Equal(transcriptAt.UTC()) {
+		t.Errorf("LastActivity = %v, want the transcript's %v: an end is not activity", u.LastActivity, transcriptAt)
+	}
+
+	p.PollOnceForTest(sink, diskSessions)
+
+	requireSource(t, sink, sessionID, "recent")
+}
+
+func TestProvider_ResumedSessionIsLiveAgain(t *testing.T) {
+	sessionID := "aaaabbbb-cccc-dddd-eeee-000000000046"
+	p := claudecode.NewProvider("", 10*time.Second, 30*time.Minute, nil)
+	sink := &hookSink{}
+
+	p.HandleHookFrameForTest(paneHook("SessionEnd", sessionID, "%1"), sink)
+	p.HandleHookFrameForTest(paneHook("SessionStart", sessionID, "%2"), sink)
+
+	requireSource(t, sink, sessionID, "live")
+}
+
+// TestProvider_NewSessionInPaneEndsPrevious covers /clear (alias /new) when
+// the old session's SessionEnd is lost, and a reused pane id: the pane's new
+// session must not leave the old one live on the same pane.
+func TestProvider_NewSessionInPaneEndsPrevious(t *testing.T) {
+	oldID := "aaaabbbb-cccc-dddd-eeee-000000000401"
+	newID := "aaaabbbb-cccc-dddd-eeee-000000000402"
+	p := claudecode.NewProvider("", 10*time.Second, 30*time.Minute, nil)
+	sink := &hookSink{}
+
+	p.HandleHookFrameForTest(paneHook("SessionStart", oldID, "dev:terminal_0"), sink)
+	p.HandleHookFrameForTest(paneHook("SessionStart", newID, "dev:terminal_0"), sink)
+
+	requireSource(t, sink, oldID, "recent")
+	requireSource(t, sink, newID, "live")
+}
+
+func TestProvider_LateSessionEndKeepsSuccessorLive(t *testing.T) {
+	oldID := "aaaabbbb-cccc-dddd-eeee-000000000403"
+	newID := "aaaabbbb-cccc-dddd-eeee-000000000404"
+	p := claudecode.NewProvider("", 10*time.Second, 30*time.Minute, nil)
+	sink := &hookSink{}
+
+	p.HandleHookFrameForTest(paneHook("SessionStart", oldID, "%1"), sink)
+	p.HandleHookFrameForTest(paneHook("SessionStart", newID, "%1"), sink)
+	p.HandleHookFrameForTest(paneHook("SessionEnd", oldID, "%1"), sink)
+
+	requireSource(t, sink, oldID, "recent")
+	requireSource(t, sink, newID, "live")
+}
+
+func TestProvider_SessionsNotSharingAPaneStayLive(t *testing.T) {
+	cases := []struct {
+		name         string
+		paneA, paneB string
+	}{
+		{name: "different panes", paneA: "%1", paneB: "%2"},
+		{name: "no multiplexer", paneA: "", paneB: ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			idA := "aaaabbbb-cccc-dddd-eeee-000000000405"
+			idB := "aaaabbbb-cccc-dddd-eeee-000000000406"
+			p := claudecode.NewProvider("", 10*time.Second, 30*time.Minute, nil)
+			sink := &hookSink{}
+
+			p.HandleHookFrameForTest(paneHook("SessionStart", idA, tc.paneA), sink)
+			p.HandleHookFrameForTest(paneHook("UserPromptSubmit", idB, tc.paneB), sink)
+
+			requireSource(t, sink, idA, "live")
+			requireSource(t, sink, idB, "live")
+		})
+	}
+}
+
 // TestProvider_CanonicalDirSeeding verifies that a hook-seeded session
 // canonicalizes the CWD via pathnorm.Canonical before storing it in Dir,
 // so that a subsequent CWD-fallback lookup reconciles correctly.

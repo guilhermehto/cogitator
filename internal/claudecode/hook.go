@@ -71,7 +71,7 @@ func ListenHooks(ctx context.Context, handler func(raw []byte), logger *slog.Log
 // UserPromptSubmit, PreToolUse, PostToolUse → busy/active (Claude is generating)
 // SessionStart → idle (session opened/resumed; parked at the prompt, not generating)
 // Stop → idle (teardown: clear busy→idle, NOT row removal)
-// SessionEnd → idle (teardown: transcript persists; poll would resurrect a removed row)
+// SessionEnd → idle and ended (teardown: transcript persists; poll would resurrect a removed row)
 // Notification with notification_type=permission_prompt → permission
 // PermissionRequest → permission
 type HookEvent struct {
