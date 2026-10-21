@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
@@ -69,14 +70,25 @@ func TestHeaderShowsAllThreeTabs(t *testing.T) {
 	}
 }
 
-func TestAgentsViewListsDoneAgentInTheAgentsSection(t *testing.T) {
+func TestAgentsViewListsDoneAgentInTheDoneSection(t *testing.T) {
 	m := agentsTabModel(t, &fakeMux{available: true}, &recordingViewMarker{})
 	m.view = viewAgents
 
 	out := m.View()
 
-	if !strings.Contains(out, "Agents · 1") || strings.Contains(out, "Needs you") {
-		t.Fatalf("agents view should list the done agent under Agents only:\n%s", out)
+	if !strings.Contains(out, "Done · 1") || strings.Contains(out, "Needs you") {
+		t.Fatalf("agents view should list the done agent under Done only:\n%s", out)
+	}
+}
+
+func TestAgentsViewTitlesThePaneAgentsOnce(t *testing.T) {
+	m := agentsTabModel(t, &fakeMux{available: true}, &recordingViewMarker{})
+	m.view = viewAgents
+
+	out := ansi.Strip(m.renderAgentsView(80, 20))
+
+	if got := strings.Count(out, "Agents"); got != 1 {
+		t.Fatalf("pane shows %q %d times, want once:\n%s", "Agents", got, out)
 	}
 }
 

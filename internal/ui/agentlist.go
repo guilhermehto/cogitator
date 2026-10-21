@@ -67,10 +67,38 @@ func newAgentList() agentList {
 	return agentList{filter: input}
 }
 
+type agentSection struct {
+	title string
+	style lipgloss.Style
+}
+
+// agentSections are the agent list's sections in display order, as the
+// zellij sidebar shows them (render_list in zellij-plugin/src/render.rs).
+var agentSections = []agentSection{
+	{"Needs you", attnPermStyle},
+	{"Working", attnActiveStyle.Bold(true)},
+	{"Done", attnFinishedStyle},
+	{"Idle", headerStyle},
+}
+
+// agentSectionOf indexes agentSections; stopped agents sit with idle ones.
+func agentSectionOf(a agents.Agent) int {
+	switch a.Group {
+	case agents.GroupNeedsYou:
+		return 0
+	case agents.GroupWorking:
+		return 1
+	case agents.GroupDone:
+		return 2
+	default:
+		return 3
+	}
+}
+
 // SetAgents lists agents the way the zellij sidebar does (set_agents in
-// zellij-plugin/src/app.rs): those that need you first, then the rest, each
-// part oldest OrderedAt first so whoever has waited longest sits on top, with
-// agents of unknown order closing their part in cogitator's order.
+// zellij-plugin/src/app.rs): section by section, each oldest OrderedAt first
+// so whoever has waited longest sits on top, with agents of unknown order
+// closing their section in cogitator's order.
 func (l *agentList) SetAgents(list []agents.Agent) {
 	l.agents = slices.Clone(list)
 	slices.SortStableFunc(l.agents, func(a, b agents.Agent) int {
@@ -82,13 +110,10 @@ func (l *agentList) SetAgents(list []agents.Agent) {
 	l.settleCursor()
 }
 
-// agentListPart ranks needs-you agents first and, within each section,
-// agents with a known OrderedAt before those without.
+// agentListPart ranks agents by section and, within each section, agents
+// with a known OrderedAt before those without.
 func agentListPart(a agents.Agent) int {
-	part := 0
-	if a.Group != agents.GroupNeedsYou {
-		part = 2
-	}
+	part := 2 * agentSectionOf(a)
 	if a.OrderedAt.IsZero() {
 		part++
 	}
@@ -254,35 +279,29 @@ func (l agentList) selection(intent agentListIntent) agentListResult {
 }
 
 // View renders at most height lines, scrolled so the cursor row stays visible.
-// Like the zellij sidebar, agents that need you get their own section above
-// the rest; SetAgents keeps them at the front of the list.
+// Each non-empty section of agentSections gets a titled block; SetAgents keeps
+// the list in section order, so the cursor moves through them top to bottom.
 func (l agentList) View(now time.Time, width, height int) string {
 	list := l.visible()
-	split := 0
-	for split < len(list) && list[split].Group == agents.GroupNeedsYou {
-		split++
-	}
-	sections := []struct {
-		title string
-		style lipgloss.Style
-		rows  []agents.Agent
-	}{
-		{"Needs you", attnPermStyle, list[:split]},
-		{"Agents", headerStyle, list[split:]},
+	rowsBySection := make([][]agents.Agent, len(agentSections))
+	for _, a := range list {
+		section := agentSectionOf(a)
+		rowsBySection[section] = append(rowsBySection[section], a)
 	}
 
 	var lines []string
 	cursorLine := 0
-	for _, s := range sections {
-		if len(s.rows) == 0 {
+	for i, s := range agentSections {
+		rows := rowsBySection[i]
+		if len(rows) == 0 {
 			continue
 		}
 
 		if len(lines) > 0 {
 			lines = append(lines, "")
 		}
-		lines = append(lines, s.style.Render(s.title)+dimStyle.Render(fmt.Sprintf(" · %d", len(s.rows))))
-		for _, a := range s.rows {
+		lines = append(lines, s.style.Render(s.title)+dimStyle.Render(fmt.Sprintf(" · %d", len(rows))))
+		for _, a := range rows {
 			if a.ID == l.cursorID {
 				cursorLine = len(lines)
 			}

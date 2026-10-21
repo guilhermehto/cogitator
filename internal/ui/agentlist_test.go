@@ -67,7 +67,7 @@ func TestAgentListMatchesSidebarSectionsAndOldestFirstOrder(t *testing.T) {
 	view := ansi.Strip(l.View(agentListNow, 60, 40))
 
 	last := -1
-	for _, want := range []string{"Needs you · 2", "r·ask-old", "r·ask-new", "Agents · 4", "r·stopped", "r·idle", "r·done", "r·unknown"} {
+	for _, want := range []string{"Needs you · 2", "r·ask-old", "r·ask-new", "Working · 1", "r·unknown", "Done · 1", "r·done", "Idle · 2", "r·stopped", "r·idle"} {
 		idx := strings.Index(view, want)
 		if idx < 0 || idx < last {
 			t.Fatalf("%q missing or out of order in:\n%s", want, view)
@@ -220,15 +220,15 @@ func TestAgentListCursorStaysOnAgentAcrossReSort(t *testing.T) {
 	list := agentsInEveryGroup()
 	l.SetAgents(list)
 	typeKeys(&l, "j")
-	if l.cursorID != "/b" {
-		t.Fatalf("cursor = %q, want /b", l.cursorID)
+	if l.cursorID != "/c" {
+		t.Fatalf("cursor = %q, want /c", l.cursorID)
 	}
 
 	reordered := []agents.Agent{list[3], list[1], list[0], list[4], list[2]}
 	l.SetAgents(reordered)
 
-	if l.cursorID != "/b" {
-		t.Fatalf("cursor moved to %q after re-sort, want /b", l.cursorID)
+	if l.cursorID != "/c" {
+		t.Fatalf("cursor moved to %q after re-sort, want /c", l.cursorID)
 	}
 }
 
@@ -260,8 +260,8 @@ func TestAgentListNavigationKeys(t *testing.T) {
 	}
 
 	typeKeys(&l, "j", "j", "k")
-	if l.cursorID != "/b" {
-		t.Fatalf("j j k cursor = %q, want /b", l.cursorID)
+	if l.cursorID != "/c" {
+		t.Fatalf("j j k cursor = %q, want /c", l.cursorID)
 	}
 }
 
@@ -303,8 +303,8 @@ func TestAgentListSeenTargetsCursorAgent(t *testing.T) {
 
 	result := typeKeys(&l, "x")
 
-	if result.intent != agentIntentSeen || result.agentID != "/b" {
-		t.Fatalf("result = %+v, want seen /b", result)
+	if result.intent != agentIntentSeen || result.agentID != "/c" {
+		t.Fatalf("result = %+v, want seen /c", result)
 	}
 }
 
