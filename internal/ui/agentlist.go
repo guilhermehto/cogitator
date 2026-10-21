@@ -23,9 +23,6 @@ const (
 	// agentDetailMinWidth is the narrowest row that still fits the harness;
 	// narrower rows keep only status, name and age on their first line.
 	agentDetailMinWidth = 80
-	// agentRowLines is how many lines an agent row takes: the name, then the
-	// tab label and session title under it.
-	agentRowLines = 2
 )
 
 // agentHomeDir is read once so row labels can abbreviate it to "~".
@@ -292,7 +289,7 @@ func (l agentList) View(now time.Time, width, height int) string {
 	}
 
 	var lines []string
-	cursorLine := 0
+	cursorLine, cursorLines := 0, 0
 	for i, s := range agentSections {
 		rows := rowsBySection[i]
 		if len(rows) == 0 {
@@ -304,10 +301,11 @@ func (l agentList) View(now time.Time, width, height int) string {
 		}
 		lines = append(lines, s.style.Render(s.title)+dimStyle.Render(fmt.Sprintf(" · %d", len(rows))))
 		for _, a := range rows {
+			row := renderAgentRow(now, a, a.ID == l.cursorID, width)
 			if a.ID == l.cursorID {
-				cursorLine = len(lines)
+				cursorLine, cursorLines = len(lines), len(row)
 			}
-			lines = append(lines, renderAgentRow(now, a, a.ID == l.cursorID, width)...)
+			lines = append(lines, row...)
 		}
 	}
 
@@ -319,25 +317,25 @@ func (l agentList) View(now time.Time, width, height int) string {
 		lines = append(lines, l.filter.View())
 	}
 
-	return strings.Join(windowLines(lines, cursorLine, height), "\n")
+	return strings.Join(windowLines(lines, cursorLine, cursorLines, height), "\n")
 }
 
-// windowLines keeps the cursor row, which starts at cursorLine, whole and
-// near the middle of the height lines it returns.
-func windowLines(lines []string, cursorLine, height int) []string {
+// windowLines keeps the cursor row, cursorLines lines from cursorLine, whole
+// and near the middle of the height lines it returns.
+func windowLines(lines []string, cursorLine, cursorLines, height int) []string {
 	if height <= 0 || len(lines) <= height {
 		return lines
 	}
 
-	cursorEnd := cursorLine + agentRowLines - 1
+	cursorEnd := cursorLine + max(cursorLines, 1) - 1
 	start := min(max(cursorEnd-height/2, 0), len(lines)-height, cursorLine)
 
 	return lines[start : start+height]
 }
 
-// renderAgentRow lays out an agent on agentRowLines lines: status and name on
-// the first, with harness (when wide enough) and age on the right like a Repos
-// row, then the tab label and muted session title under the name.
+// renderAgentRow lays out an agent's status and name, with harness (when wide
+// enough) and age on the right like a Repos row, then, on a second line when
+// the agent has them, its tab label and muted session title under the name.
 func renderAgentRow(now time.Time, a agents.Agent, selected bool, width int) []string {
 	status := agentStatusCell(a)
 	left := status + agentStyledTarget(a)
@@ -348,14 +346,18 @@ func renderAgentRow(now time.Time, a agents.Agent, selected bool, width int) []s
 	}
 
 	name := left + "  " + right
-	detail := strings.Repeat(" ", ansi.StringWidth(status)) + agentStyledDetail(a)
+	styledDetail := agentStyledDetail(a)
+	detail := strings.Repeat(" ", ansi.StringWidth(status)) + styledDetail
 	if width > 0 {
 		gap := width - ansi.StringWidth(right) - 2
 		name = fitCell(left, max(gap, 0)) + "  " + right
 		detail = fitCell(detail, width)
 	}
 
-	lines := []string{name, detail}
+	lines := []string{name}
+	if styledDetail != "" {
+		lines = append(lines, detail)
+	}
 	if selected {
 		for i := range lines {
 			lines[i] = highlightSelectedRow(lines[i])

@@ -165,14 +165,30 @@ func TestAgentListPutsTabLabelAndTitleUnderTheName(t *testing.T) {
 	}
 }
 
+func TestAgentListKeepsRowWithoutTabOrTitleToOneLine(t *testing.T) {
+	bare := worktreeAgent("/a", "/r/api", "main", agents.GroupIdle, state.AttnInactive, settings.StateRunning)
+	titled := worktreeAgent("/b", "/r/web", "main", agents.GroupIdle, state.AttnInactive, settings.StateRunning)
+	titled.Title = "Fix flaky test"
+	l := newAgentList()
+	l.SetAgents([]agents.Agent{bare, titled})
+
+	lines := strings.Split(ansi.Strip(l.View(agentListNow, 50, 40)), "\n")
+
+	if len(lines) != 4 || !strings.Contains(lines[1], "api·main") || !strings.Contains(lines[2], "web·main") {
+		t.Fatalf("want header, a one-line row, then a two-line row, got:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
 func TestAgentListCursorBandCoversBothRowLines(t *testing.T) {
 	r := lipgloss.DefaultRenderer()
 	orig := r.ColorProfile()
 	r.SetColorProfile(termenv.ANSI256)
 	defer r.SetColorProfile(orig)
 
+	list := agentsInEveryGroup()[:2]
+	list[0].Title = "Fix auth"
 	l := newAgentList()
-	l.SetAgents(agentsInEveryGroup()[:2])
+	l.SetAgents(list)
 	open, _, _ := strings.Cut(lipgloss.NewStyle().Background(wtSelectedBg).Render("\x00"), "\x00")
 
 	lines := strings.Split(l.View(agentListNow, 50, 40), "\n")
