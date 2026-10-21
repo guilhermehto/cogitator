@@ -405,7 +405,7 @@ func TestSnapshotMsgCoalescedBuildUsesLatestSnap(t *testing.T) {
 func TestDemoRendersWorktreeRoster(t *testing.T) {
 	rows := demoWorktrees(fixedNow)
 	ch := make(chan state.Snapshot, 1)
-	m := newDemoModel(ch, config.Default(), rows)
+	m := newDemoModel(ch, config.Default(), rows, demoAgents(fixedNow))
 	m.snap = state.Snapshot{Sessions: liveSessionsFor(rows), UpdatedAt: fixedNow}
 	m.width, m.height = 120, 40
 
@@ -417,6 +417,20 @@ func TestDemoRendersWorktreeRoster(t *testing.T) {
 	}
 	if strings.Contains(out, "no live or recent sessions") {
 		t.Error("demo must render the worktree roster, not the live-session fallback")
+	}
+}
+
+func TestDemoAgentsTabFillsEverySection(t *testing.T) {
+	m := newDemoModel(make(chan state.Snapshot, 1), config.Default(), demoWorktrees(fixedNow), demoAgents(fixedNow))
+	m.view = viewAgents
+	m.width, m.height = 120, 40
+
+	out := m.View()
+
+	for _, want := range []string{"Needs you · 3", "Working · 2", "Done · 1", "Idle · 3", "checkout/pkce-rollout"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("demo agents tab missing %q:\n%s", want, out)
+		}
 	}
 }
 

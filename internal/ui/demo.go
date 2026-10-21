@@ -2,12 +2,14 @@ package ui
 
 import (
 	"log/slog"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 
+	"github.com/guilhermehto/cogitator/internal/agents"
 	"github.com/guilhermehto/cogitator/internal/config"
 	"github.com/guilhermehto/cogitator/internal/settings"
 	"github.com/guilhermehto/cogitator/internal/state"
@@ -46,7 +48,7 @@ func RunDemo(cfg *config.Config, logger *slog.Logger) error {
 	snaps := make(chan state.Snapshot, 1)
 	snaps <- snap
 
-	m := newDemoModel(snaps, cfg, rows)
+	m := newDemoModel(snaps, cfg, rows, demoAgents(now))
 
 	logger.Info("running demo mode", "worktrees", len(rows))
 
@@ -54,16 +56,64 @@ func RunDemo(cfg *config.Config, logger *slog.Logger) error {
 	return err
 }
 
-// newDemoModel builds the --demo model: the curated rows injected directly,
-// background builds suppressed, and the Repos view selected — the capture
-// showcases the worktree roster, not the (empty) Workspaces view newModel
-// opens on.
-func newDemoModel(snaps <-chan state.Snapshot, cfg *config.Config, rows []settings.Row) model {
+// newDemoModel builds the --demo model: the curated rows and agents injected
+// directly, background builds suppressed, and the Repos view selected — the
+// capture showcases the worktree roster, not the (empty) Workspaces view
+// newModel opens on. The demo has no agent feed, so nothing rebuilds the
+// agents.
+func newDemoModel(snaps <-chan state.Snapshot, cfg *config.Config, rows []settings.Row, roster []agents.Agent) model {
 	m := newModel(snaps, cfg, false, false)
 	m.demo = true
 	m.view = viewSessions
 	m.workspaceRows = rows
+	m.agents = roster
 	return m
+}
+
+// demoAgents returns the Agents tab roster for --demo: the demo worktrees'
+// sessions plus a workspace session, so every section, status glyph and row
+// shape shows.
+func demoAgents(now time.Time) []agents.Agent {
+	mins := func(n int) time.Time { return now.Add(time.Duration(-n) * time.Minute) }
+	hours := func(n int) time.Time { return now.Add(time.Duration(-n) * time.Hour) }
+
+	const cog = "~/src/cogitator"
+	const api = "~/src/api-gateway"
+
+	worktree := func(repo, branch, harness, title string, group agents.Group, attn state.Attention, st settings.RowState, last time.Time) agents.Agent {
+		dir := repo + "/.wt/" + strings.ReplaceAll(branch, "/", "-")
+		return agents.Agent{
+			ID: dir, Dir: dir, Kind: agents.KindWorktree, Repo: repo, Branch: branch,
+			Harness: harness, Title: title, Group: group, Attention: attn, State: st,
+			LastActivity: last, OrderedAt: last,
+		}
+	}
+
+	return []agents.Agent{
+		worktree(cog, "feat/tmux-launcher", "opencode", "Launch worktrees into tmux windows",
+			agents.GroupNeedsYou, state.AttnPermissionPending, settings.StateRunning, mins(0)),
+		worktree(cog, "fix/mdns-race", "codex", "Resolve discovery race on darwin-arm64",
+			agents.GroupNeedsYou, state.AttnQuestionPending, settings.StateRunning, mins(1)),
+		worktree(api, "feat/oauth-pkce", "claude-code", "Implement OAuth2 PKCE flow",
+			agents.GroupNeedsYou, state.AttnErrored, settings.StateRunning, mins(4)),
+		worktree(cog, "main", "opencode", "Watch local opencode instances",
+			agents.GroupWorking, state.AttnActive, settings.StateRunning, mins(6)),
+		{
+			ID: "~/workspaces/checkout/pkce-rollout", Dir: "~/workspaces/checkout/pkce-rollout",
+			Kind: agents.KindWorkspace, Workspace: "checkout", SessionName: "pkce-rollout",
+			Harness: "claude-code", Tab: "LEX-42", Title: "Roll PKCE out across services",
+			Group: agents.GroupWorking, Attention: state.AttnActive, State: settings.StateRunning,
+			LastActivity: mins(9), OrderedAt: mins(9),
+		},
+		worktree(cog, "chore/release", "opencode", "Publish to homebrew tap via goreleaser",
+			agents.GroupDone, state.AttnFinished, settings.StateRunning, mins(2)),
+		worktree(api, "main", "claude-code", "Gateway service baseline",
+			agents.GroupIdle, state.AttnInactive, settings.StateRunning, hours(1)),
+		worktree(cog, "spike/bell-ratelimit", "opencode", "Terminal-bell rate limiter",
+			agents.GroupStopped, "", settings.StateStopped, hours(3)),
+		worktree(api, "fix/rate-limit", "", "",
+			agents.GroupIdle, "", settings.StateUnknown, hours(52)),
+	}
 }
 
 // demoWorktrees returns a curated worktree roster across two repos that
