@@ -1,5 +1,6 @@
 use crate::app::{App, Status};
 use crate::feed::Agent;
+use std::ops::Range;
 
 // Glyphs, colours and widths mirror the TUI's Agents tab (internal/ui) so
 // both surfaces read the same.
@@ -16,8 +17,6 @@ const GLYPH_HERE: &str = "▌";
 const HARNESS_WIDTH: usize = 11;
 const DETAIL_MIN_WIDTH: usize = 80;
 const BAND_BG: u8 = 237;
-/// An agent row is its name, then its tab label and session title.
-const ROW_LINES: usize = 2;
 
 const HARNESS_PALETTE: [u8; 22] = [
     33, 39, 45, 51, 75, 81, 99, 105, 111, 117, 135, 141, 147, 153, 165, 171, 177, 183, 203, 207,
@@ -174,7 +173,7 @@ fn render_list(app: &App, rows: usize, cols: usize, now: i64) -> Vec<String> {
     let band = if app.focused() { selected } else { here };
     // App keeps the list in section order, so each section is one run.
     let mut lines = Vec::new();
-    let mut selected_line = 0;
+    let (mut selected_line, mut selected_lines) = (0, 0);
     for (section, (title, style)) in SECTIONS.into_iter().enumerate() {
         let start = agents.partition_point(|a| a.section() < section);
         let end = agents.partition_point(|a| a.section() <= section);
@@ -189,33 +188,34 @@ fn render_list(app: &App, rows: usize, cols: usize, now: i64) -> Vec<String> {
         let header = vec![span(title, style), span(format!(" · {}", range.len()), DIM)];
         lines.push(paint(&truncate(header, cols), None));
         for i in range {
-            if selected == Some(i) {
-                selected_line = lines.len();
-            }
             let mark = RowMark {
                 band: band == Some(i),
                 here: here == Some(i),
             };
-            lines.extend(agent_row(&agents[i], mark, cols, now, app.home()));
+            let row = agent_row(&agents[i], mark, cols, now, app.home());
+            if selected == Some(i) {
+                (selected_line, selected_lines) = (lines.len(), row.len());
+            }
+            lines.extend(row);
         }
     }
 
-    let offset = scroll_offset(app.scroll.get(), selected_line, rows, lines.len());
+    let selected_rows = selected_line..selected_line + selected_lines;
+    let offset = scroll_offset(app.scroll.get(), selected_rows, rows, lines.len());
     app.scroll.set(offset);
 
     lines.into_iter().skip(offset).take(rows).collect()
 }
 
 // scroll_offset scrolls no further than it takes to show the selected row,
-// which starts at selected_line, whole, or its first line when rows is short.
-fn scroll_offset(current: usize, selected_line: usize, rows: usize, total: usize) -> usize {
+// which spans selected, whole, or its first line when rows is short.
+fn scroll_offset(current: usize, selected: Range<usize>, rows: usize, total: usize) -> usize {
     let mut offset = current.min(total.saturating_sub(rows));
-    if selected_line < offset {
-        offset = selected_line.saturating_sub(1);
+    if selected.start < offset {
+        offset = selected.start.saturating_sub(1);
     }
-    let selected_end = selected_line + ROW_LINES;
-    if selected_end > offset + rows {
-        offset = (selected_end - rows).min(selected_line);
+    if selected.end > offset + rows {
+        offset = (selected.end - rows).min(selected.start);
     }
     offset
 }
@@ -225,17 +225,12 @@ struct RowMark {
     here: bool,
 }
 
-// agent_row lays out an agent on ROW_LINES lines, as the TUI does: status and
-// name with (when wide enough) harness and age on the right, then the tab
-// label and muted session title under the name. A gutter bar marks the agent
-// the user is sitting at on both lines, whichever row carries the band.
-fn agent_row(
-    agent: &Agent,
-    mark: RowMark,
-    cols: usize,
-    now: i64,
-    home: &str,
-) -> [String; ROW_LINES] {
+// agent_row lays out an agent as the TUI does: status and name with (when
+// wide enough) harness and age on the right, then, on a second line when the
+// agent has them, the tab label and muted session title under the name. A
+// gutter bar marks the agent the user is sitting at on every line of its row,
+// whichever row carries the band.
+fn agent_row(agent: &Agent, mark: RowMark, cols: usize, now: i64, home: &str) -> Vec<String> {
     let age = agent
         .last_activity_secs()
         .map(|ts| relative_time(now - ts))
@@ -248,7 +243,9 @@ fn agent_row(
     ];
     let mut left = vec![gutter(mark.here), status];
     left.extend(styled_target(agent, home));
-    detail.extend(styled_detail(agent));
+    let detail_text = styled_detail(agent);
+    let has_detail = !detail_text.is_empty();
+    detail.extend(detail_text);
     let mut right = vec![span(age.clone(), DIM)];
 
     if cols >= DETAIL_MIN_WIDTH {
@@ -263,10 +260,11 @@ fn agent_row(
     name.extend(right);
 
     let bg = mark.band.then_some(BAND_BG);
-    [
-        paint(&truncate(name, cols), bg),
-        paint(&pad(truncate(detail, cols), cols), bg),
-    ]
+    let mut row = vec![paint(&truncate(name, cols), bg)];
+    if has_detail {
+        row.push(paint(&pad(truncate(detail, cols), cols), bg));
+    }
+    row
 }
 
 fn gutter(here: bool) -> Span {
@@ -570,26 +568,32 @@ mod tests {
             .map(|l| l.split("  ").next().unwrap_or_default().to_string())
             .collect();
         assert_eq!(
-            lines[..17],
+            lines[..12],
             [
                 "Needs you · 1",
                 " · /x/ask",
                 "",
-                "",
                 "Working · 1",
                 " · /x/busy",
-                "",
                 "",
                 "Done · 1",
                 " · /x/done",
                 "",
-                "",
                 "Idle · 2",
                 " · /x/stopped",
-                "",
-                " · /x/idle",
-                ""
+                " · /x/idle"
             ]
+        );
+    }
+
+    #[test]
+    fn row_without_tab_or_title_keeps_to_one_line() {
+        let app = app_from(
+            r#"{"version":1,"agents":[{"id":"/a","dir":"/a"},{"id":"/b","dir":"/b","title":"fix it"}]}"#,
+        );
+        assert_eq!(
+            plain_lines(&render(&app, 5, 40, NOW))[..4],
+            ["Idle · 2", " · /a", " · /b", "   fix it"]
         );
     }
 
@@ -699,7 +703,7 @@ mod tests {
 
     fn two_tabs_at_second() -> App {
         let mut app = app_from(
-            r#"{"version":1,"agents":[{"id":"/a","dir":"/a","window_id":"s:1"},{"id":"/b","dir":"/b","window_id":"s:2"}]}"#,
+            r#"{"version":1,"agents":[{"id":"/a","dir":"/a","title":"a","window_id":"s:1"},{"id":"/b","dir":"/b","title":"b","window_id":"s:2"}]}"#,
         );
         sits_at(&mut app, "s:2");
         app
@@ -758,8 +762,12 @@ mod tests {
         sits_at(&mut app, "s:4");
         let lines = plain_lines(&render(&app, 4, 40, NOW));
         assert_eq!(
-            lines[1..3],
-            [format!("{GLYPH_HERE}· /d"), GLYPH_HERE.to_string()]
+            lines[..3],
+            [
+                " · /b".to_string(),
+                " · /c".to_string(),
+                format!("{GLYPH_HERE}· /d")
+            ]
         );
     }
 
@@ -862,11 +870,11 @@ mod tests {
         app.set_notice("focus failed");
         assert_eq!(
             plain_lines(&render(&app, 4, 40, NOW)),
-            ["Idle · 3", " · /a", "", "focus failed"]
+            ["Idle · 3", " · /a", " · /b", "focus failed"]
         );
         assert_eq!(
             plain_lines(&render(&app, 6, 40, NOW)),
-            ["Idle · 3", " · /a", "", " · /b", "", "focus failed"]
+            ["Idle · 3", " · /a", " · /b", " · /c", "", "focus failed"]
         );
     }
 
