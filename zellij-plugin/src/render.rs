@@ -5,6 +5,7 @@ use crate::feed::Agent;
 // both surfaces read the same.
 const GLYPH_ACTIVE: &str = "\u{f0765}";
 const GLYPH_INACTIVE: &str = "\u{f0766}";
+const GLYPH_STOPPED: &str = "\u{f0667}";
 const GLYPH_QUESTION: &str = "\u{f0625}";
 const GLYPH_PERMISSION: &str = "\u{f033e}";
 const GLYPH_ERROR: &str = "\u{f0026}";
@@ -279,7 +280,7 @@ fn gutter(here: bool) -> Span {
 fn status_cell(agent: &Agent) -> Span {
     let (glyph, style) = match agent.state.as_str() {
         "running" => attention_glyph(&agent.attention),
-        "stopped" => (GLYPH_INACTIVE, DIM),
+        "stopped" => (GLYPH_STOPPED, DIM),
         "missing" => (GLYPH_MISSING, MISSING),
         "unknown" => ("?", UNKNOWN),
         _ => ("·", DIM),
@@ -640,7 +641,7 @@ mod tests {
         let app = one_agent(r#""kind":"worktree","repo":"r","branch":"b","state":"stopped""#);
         let row = &row_colours(&app, 40);
         assert!(
-            row.contains(&format!("38;5;240m{GLYPH_INACTIVE} ")),
+            row.contains(&format!("38;5;240m{GLYPH_STOPPED} ")),
             "{row:?}"
         );
         assert!(row.contains("38;5;240mb"), "{row:?}");

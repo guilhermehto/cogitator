@@ -207,6 +207,29 @@ func TestAgentListMutesRepoAndDimsItForStoppedAgents(t *testing.T) {
 	}
 }
 
+func TestAgentListTellsStoppedAgentsFromIdleOnesByGlyph(t *testing.T) {
+	idle := worktreeAgent("/i", "/src/api", "main", agents.GroupIdle, state.AttnInactive, settings.StateRunning)
+	stopped := worktreeAgent("/s", "/src/docs", "main", agents.GroupStopped, state.AttnInactive, settings.StateStopped)
+	l := newAgentList()
+	l.SetAgents([]agents.Agent{idle, stopped})
+
+	rows := map[string]string{}
+	for _, line := range strings.Split(ansi.Strip(l.View(agentListNow, 60, 40)), "\n") {
+		for _, name := range []string{"api·main", "docs·main"} {
+			if strings.Contains(line, name) {
+				rows[name] = line
+			}
+		}
+	}
+
+	if !strings.HasPrefix(rows["api·main"], glyphInactive) {
+		t.Fatalf("idle row = %q, want the hollow circle", rows["api·main"])
+	}
+	if !strings.HasPrefix(rows["docs·main"], glyphWtStopped) || strings.Contains(rows["docs·main"], glyphInactive) {
+		t.Fatalf("stopped row = %q, want the stop glyph only", rows["docs·main"])
+	}
+}
+
 func TestAgentListShowsTabLabelOnNarrowRowsWithoutRepeatingItAsTitle(t *testing.T) {
 	a := agents.Agent{ID: "/l#s1", Dir: "/l", Kind: agents.KindStray, Harness: "omp", Title: "Fix login", Tab: "Fix login", State: settings.StateRunning}
 	l := newAgentList()

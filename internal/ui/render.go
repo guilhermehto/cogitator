@@ -67,7 +67,7 @@ const (
 	glyphFinished   = "\U000f012c" // 󰄬 check — agent finished, awaiting your return
 
 	// Workspace / worktree row glyphs.
-	glyphWtStopped = "\U000f0766" // 󰝦 same as glyphInactive — agent stopped
+	glyphWtStopped = "\U000f0667" // 󰙧 stop circle — agent stopped
 	glyphWtMissing = "\U000f0e7a" // 󰹺 directory absent from disk
 	glyphWtUnknown = "?"          // harness has no LiveStatus, tmux window present
 )
@@ -1071,7 +1071,8 @@ func statusLegend() [][2]string {
 		{attnQuestionStyle.Render(glyphQuestion), "question"},
 		{attnPermStyle.Render(glyphPermission), "permission"},
 		{attnErrStyle.Render(glyphError), "error"},
-		{attnInactiveStyle.Render(glyphInactive), "stopped"},
+		{attnInactiveStyle.Render(glyphInactive), "idle"},
+		{wtStoppedStyle.Render(glyphWtStopped), "stopped"},
 		{recentStyle.Render(glyphRecent), "recent"},
 		{wtMissingStyle.Render(glyphWtMissing), "missing"},
 	}
