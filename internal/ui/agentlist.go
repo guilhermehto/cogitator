@@ -31,6 +31,8 @@ const (
 // agentHomeDir is read once so row labels can abbreviate it to "~".
 var agentHomeDir, _ = os.UserHomeDir()
 
+var agentRepoMutedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("103"))
+
 type agentListIntent int
 
 const (
@@ -383,16 +385,17 @@ func agentStyledName(a agents.Agent) string {
 // muted so the branch or session reads first.
 func agentStyledTarget(a agents.Agent) string {
 	lead := agentLeadStyle(a)
+	repo := agentRepoStyle(a)
 
 	switch {
 	case a.Kind == agents.KindWorkspace:
-		return wtRepoStyle.UnsetBold().Render(a.Workspace) + dimStyle.Render("/") + lead.Render(a.SessionName)
+		return repo.Render(a.Workspace) + dimStyle.Render("/") + lead.Render(a.SessionName)
 	case a.Kind == agents.KindStray:
 		return lead.Render(abbreviateHome(a.Dir)) + " " + recentStyle.Render("stray")
 	case a.Branch == "":
 		return lead.Render(abbreviateHome(a.Dir))
 	default:
-		return wtRepoStyle.UnsetBold().Render(filepath.Base(a.Repo)) + dimStyle.Render("·") + lead.Render(a.Branch)
+		return repo.Render(filepath.Base(a.Repo)) + dimStyle.Render("·") + lead.Render(a.Branch)
 	}
 }
 
@@ -415,6 +418,15 @@ func agentLeadStyle(a agents.Agent) lipgloss.Style {
 		return wtStoppedStyle
 	}
 	return lipgloss.NewStyle()
+}
+
+// agentRepoStyle is agentLeadStyle for the repo or workspace beside the
+// branch or session, which is muted even while the agent runs.
+func agentRepoStyle(a agents.Agent) lipgloss.Style {
+	if a.State == settings.StateStopped {
+		return wtStoppedStyle
+	}
+	return agentRepoMutedStyle
 }
 
 func alignRight(s string, width int) string {

@@ -61,7 +61,7 @@ const PLAIN: Style = Style {
 const DIM: Style = Style::fg(240);
 const HEADER: Style = Style::fg(244).bold();
 const RECENT: Style = Style::fg(244).italic();
-const REPO: Style = Style::fg(63);
+const REPO: Style = Style::fg(103);
 const PATH: Style = Style::fg(240).italic();
 const HINT: Style = Style::fg(214).italic();
 const HINT_KEY: Style = Style::fg(111).bold();
@@ -302,10 +302,11 @@ fn attention_glyph(attention: &str) -> (&'static str, Style) {
 // muted so the branch or session reads first.
 fn styled_target(agent: &Agent, home: &str) -> Line {
     let lead = lead_style(agent);
+    let repo = repo_style(agent);
 
     match agent.kind.as_str() {
         "workspace" => vec![
-            span(agent.workspace.clone(), REPO),
+            span(agent.workspace.clone(), repo),
             span("/", DIM),
             span(agent.session_name.clone(), lead),
         ],
@@ -316,7 +317,7 @@ fn styled_target(agent: &Agent, home: &str) -> Line {
         ],
         _ if agent.branch.is_empty() => vec![span(abbreviate_home(&agent.dir, home), lead)],
         _ => vec![
-            span(base_name(&agent.repo), REPO),
+            span(base_name(&agent.repo), repo),
             span("·", DIM),
             span(agent.branch.clone(), lead),
         ],
@@ -345,6 +346,16 @@ fn lead_style(agent: &Agent) -> Style {
         DIM
     } else {
         PLAIN
+    }
+}
+
+// repo_style is lead_style for the repo or workspace beside the branch or
+// session, which is muted even while the agent runs.
+fn repo_style(agent: &Agent) -> Style {
+    if agent.state == "stopped" {
+        DIM
+    } else {
+        REPO
     }
 }
 
@@ -633,6 +644,14 @@ mod tests {
             "{row:?}"
         );
         assert!(row.contains("38;5;240mb"), "{row:?}");
+        assert!(row.contains("38;5;240mr"), "{row:?}");
+    }
+
+    #[test]
+    fn running_agents_mute_the_repo() {
+        let app = one_agent(r#""kind":"worktree","repo":"r","branch":"b","state":"running""#);
+        let row = &row_colours(&app, 40);
+        assert!(row.contains("38;5;103mr"), "{row:?}");
     }
 
     #[test]

@@ -187,6 +187,26 @@ func TestAgentListCursorBandCoversBothRowLines(t *testing.T) {
 	}
 }
 
+func TestAgentListMutesRepoAndDimsItForStoppedAgents(t *testing.T) {
+	r := lipgloss.DefaultRenderer()
+	orig := r.ColorProfile()
+	r.SetColorProfile(termenv.ANSI256)
+	defer r.SetColorProfile(orig)
+
+	running := worktreeAgent("/r", "/src/api", "main", agents.GroupIdle, state.AttnInactive, settings.StateRunning)
+	stopped := worktreeAgent("/s", "/src/docs", "main", agents.GroupStopped, state.AttnInactive, settings.StateStopped)
+	l := newAgentList()
+	l.SetAgents([]agents.Agent{running, stopped})
+
+	view := l.View(agentListNow, 60, 40)
+
+	for _, want := range []string{"38;5;103mapi", "38;5;240mdocs"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view missing %q:\n%q", want, view)
+		}
+	}
+}
+
 func TestAgentListShowsTabLabelOnNarrowRowsWithoutRepeatingItAsTitle(t *testing.T) {
 	a := agents.Agent{ID: "/l#s1", Dir: "/l", Kind: agents.KindStray, Harness: "omp", Title: "Fix login", Tab: "Fix login", State: settings.StateRunning}
 	l := newAgentList()
