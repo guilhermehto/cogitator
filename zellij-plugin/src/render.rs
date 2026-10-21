@@ -467,7 +467,10 @@ pub fn relative_time(elapsed_secs: i64) -> String {
     if elapsed_secs < 3600 {
         return format!("{}m", elapsed_secs / 60);
     }
-    format!("{}h", elapsed_secs / 3600)
+    if elapsed_secs < 48 * 3600 {
+        return format!("{}h", elapsed_secs / 3600);
+    }
+    format!("{}d", elapsed_secs / (24 * 3600))
 }
 
 #[cfg(test)]
@@ -860,6 +863,8 @@ mod tests {
         assert_eq!(relative_time(59), "now");
         assert_eq!(relative_time(300), "5m");
         assert_eq!(relative_time(3 * 3600 + 10), "3h");
-        assert_eq!(relative_time(361 * 3600), "361h");
+        assert_eq!(relative_time(47 * 3600), "47h");
+        assert_eq!(relative_time(48 * 3600), "2d");
+        assert_eq!(relative_time(361 * 3600), "15d");
     }
 }

@@ -179,7 +179,10 @@ func formatRelative(now, t time.Time) string {
 	if d < time.Hour {
 		return fmt.Sprintf("%dm", int(d/time.Minute))
 	}
-	return fmt.Sprintf("%dh", int(d/time.Hour))
+	if d < 48*time.Hour {
+		return fmt.Sprintf("%dh", int(d/time.Hour))
+	}
+	return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
 }
 
 func styledStatus(s string) string {

@@ -88,6 +88,9 @@ func TestFormatRelativeBoundaries(t *testing.T) {
 		{"59m just under an hour", now.Add(-59 * time.Minute), "59m"},
 		{"exactly 60m flips to 1h", now.Add(-60 * time.Minute), "1h"},
 		{"24h", now.Add(-24 * time.Hour), "24h"},
+		{"47h stays in hours", now.Add(-47 * time.Hour), "47h"},
+		{"exactly 48h flips to 2d", now.Add(-48 * time.Hour), "2d"},
+		{"136h rounds down to 5d", now.Add(-136 * time.Hour), "5d"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
