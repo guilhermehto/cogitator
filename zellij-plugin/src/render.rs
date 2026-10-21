@@ -76,6 +76,14 @@ const MISSING: Style = Style::fg(196).italic();
 const UNKNOWN: Style = Style::fg(226);
 const HERE: Style = Style::fg(111);
 
+/// Section titles, indexed by Agent::section, as the TUI's agentSections.
+const SECTIONS: [(&str, Style); 4] = [
+    ("Needs you", PERMISSION),
+    ("Working", ACTIVE.bold()),
+    ("Done", FINISHED),
+    ("Idle", HEADER),
+];
+
 struct Span {
     text: String,
     style: Style,
@@ -163,16 +171,13 @@ fn render_list(app: &App, rows: usize, cols: usize, now: i64) -> Vec<String> {
     // The band shows where keys act while the plugin has focus, and where the
     // user is otherwise; App keeps the cursor on that agent while unfocused.
     let band = if app.focused() { selected } else { here };
-    // App keeps agents that need the user at the front of the list.
-    let split = agents.iter().take_while(|a| a.needs_you()).count();
-    let sections = [
-        ("Needs you", PERMISSION, 0..split),
-        ("Agents", HEADER, split..agents.len()),
-    ];
-
+    // App keeps the list in section order, so each section is one run.
     let mut lines = Vec::new();
     let mut selected_line = 0;
-    for (title, style, range) in sections {
+    for (section, (title, style)) in SECTIONS.into_iter().enumerate() {
+        let start = agents.partition_point(|a| a.section() < section);
+        let end = agents.partition_point(|a| a.section() <= section);
+        let range = start..end;
         if range.is_empty() {
             continue;
         }
@@ -535,12 +540,14 @@ mod tests {
     }
 
     #[test]
-    fn needs_you_section_sits_above_the_rest() {
+    fn sections_run_needs_you_working_done_then_idle() {
         let app = app_from(
             r#"{"version":1,"agents":[
-                {"id":"/x/newer","dir":"/x/newer","group":"done","ordered_at":"2025-12-31T23:00:00Z"},
+                {"id":"/x/done","dir":"/x/done","group":"done","ordered_at":"2025-12-31T23:00:00Z"},
                 {"id":"/x/ask","dir":"/x/ask","group":"needs_you","ordered_at":"2025-12-31T23:30:00Z"},
-                {"id":"/x/older","dir":"/x/older","group":"idle","ordered_at":"2025-12-31T22:00:00Z"}
+                {"id":"/x/stopped","dir":"/x/stopped","group":"stopped","ordered_at":"2025-12-31T21:00:00Z"},
+                {"id":"/x/idle","dir":"/x/idle","group":"idle","ordered_at":"2025-12-31T22:00:00Z"},
+                {"id":"/x/busy","dir":"/x/busy","group":"working","ordered_at":"2025-12-31T23:10:00Z"}
             ]}"#,
         );
         let lines: Vec<String> = plain_lines(&render(&app, 20, 40, NOW))
@@ -548,27 +555,35 @@ mod tests {
             .map(|l| l.split("  ").next().unwrap_or_default().to_string())
             .collect();
         assert_eq!(
-            lines[..9],
+            lines[..17],
             [
                 "Needs you · 1",
                 " · /x/ask",
                 "",
                 "",
-                "Agents · 2",
-                " · /x/older",
+                "Working · 1",
+                " · /x/busy",
                 "",
-                " · /x/newer",
+                "",
+                "Done · 1",
+                " · /x/done",
+                "",
+                "",
+                "Idle · 2",
+                " · /x/stopped",
+                "",
+                " · /x/idle",
                 ""
             ]
         );
     }
 
     #[test]
-    fn needs_you_section_is_omitted_when_nobody_waits() {
+    fn empty_sections_are_omitted() {
         let app = simple_app(&["/a"]);
         assert_eq!(
             plain_lines(&render(&app, 4, 40, NOW))[..2],
-            ["Agents · 1", " · /a"]
+            ["Idle · 1", " · /a"]
         );
     }
 
@@ -760,7 +775,7 @@ mod tests {
             app.handle_key(Key::Up);
         }
         let lines = plain_lines(&render(&app, 4, 40, NOW));
-        assert_eq!(lines[..3], ["Agents · 5", " · /a", "   a"]);
+        assert_eq!(lines[..3], ["Idle · 5", " · /a", "   a"]);
     }
 
     #[test]
@@ -824,11 +839,11 @@ mod tests {
         app.set_notice("focus failed");
         assert_eq!(
             plain_lines(&render(&app, 4, 40, NOW)),
-            ["Agents · 3", " · /a", "", "focus failed"]
+            ["Idle · 3", " · /a", "", "focus failed"]
         );
         assert_eq!(
             plain_lines(&render(&app, 6, 40, NOW)),
-            ["Agents · 3", " · /a", "", " · /b", "", "focus failed"]
+            ["Idle · 3", " · /a", "", " · /b", "", "focus failed"]
         );
     }
 

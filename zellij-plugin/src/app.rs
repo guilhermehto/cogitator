@@ -198,15 +198,15 @@ impl App {
         false
     }
 
-    /// Agents that need the user come first, then the rest; each part runs
-    /// oldest ordered_at first, so whoever has waited longest sits on top and
-    /// a working agent keeps its place until it stops. Agents without a
-    /// timestamp close their part in cogitator's order.
+    /// Agents run section by section, each oldest ordered_at first, so
+    /// whoever has waited longest sits on top and a working agent keeps its
+    /// place until it stops. Agents without a timestamp close their section
+    /// in cogitator's order.
     /// The TUI's agentList.SetAgents (internal/ui/agentlist.go) mirrors this.
     fn set_agents(&mut self, mut agents: Vec<Agent>) {
         agents.sort_by_cached_key(|a| {
             let secs = a.ordered_at_secs();
-            (!a.needs_you(), secs.is_none(), secs)
+            (a.section(), secs.is_none(), secs)
         });
         let prev_index = self.selected_index();
         let still_present = self
@@ -338,6 +338,19 @@ pub(crate) mod tests {
         let mut app = App::new();
         app.apply_list_result(Some(0), json.as_bytes(), b"");
         assert_eq!(ids(&app), vec!["/old-ask", "/new-ask", "/old-idle"]);
+    }
+
+    #[test]
+    fn orders_working_then_done_then_idle_and_stopped() {
+        let json = r#"{"version":1,"agents":[
+            {"id":"/stopped","group":"stopped","ordered_at":"2026-01-01T07:00:00Z"},
+            {"id":"/idle","group":"idle","ordered_at":"2026-01-01T08:00:00Z"},
+            {"id":"/done","group":"done","ordered_at":"2026-01-01T09:00:00Z"},
+            {"id":"/working","group":"working","ordered_at":"2026-01-01T10:00:00Z"}
+        ]}"#;
+        let mut app = App::new();
+        app.apply_list_result(Some(0), json.as_bytes(), b"");
+        assert_eq!(ids(&app), vec!["/working", "/done", "/stopped", "/idle"]);
     }
 
     #[test]

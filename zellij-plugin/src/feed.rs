@@ -36,10 +36,15 @@ impl Agent {
         parse_rfc3339(&self.ordered_at)
     }
 
-    /// cogitator owns the attention rules; its group says whether the agent
-    /// is blocked on the user.
-    pub fn needs_you(&self) -> bool {
-        self.group == "needs_you"
+    /// cogitator owns the attention rules; its group places the agent in a
+    /// section: needs you, working, done, then idle, which holds the rest.
+    pub fn section(&self) -> usize {
+        match self.group.as_str() {
+            "needs_you" => 0,
+            "working" => 1,
+            "done" => 2,
+            _ => 3,
+        }
     }
 }
 
