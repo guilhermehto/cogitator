@@ -70,6 +70,28 @@ func TestHeaderShowsAllThreeTabs(t *testing.T) {
 	}
 }
 
+func TestHeaderCountsAgentsBySectionOnTheAgentsTab(t *testing.T) {
+	sum := headerSummary{live: 3, agentsBySection: []int{1, 2, 0, 1}}
+
+	agentsTab := ansi.Strip(renderHeader(120, viewAgents, sum))
+	reposTab := ansi.Strip(renderHeader(120, viewSessions, sum))
+
+	if !strings.Contains(agentsTab, "1 needs you · 2 working · 1 idle · ") || strings.Contains(agentsTab, "live") {
+		t.Fatalf("agents tab header should count agents by section: %s", agentsTab)
+	}
+	if !strings.Contains(reposTab, "3 live") {
+		t.Fatalf("repos tab header should keep the live tally: %s", reposTab)
+	}
+}
+
+func TestHeaderSaysNoAgentsOnAnEmptyAgentsTab(t *testing.T) {
+	header := ansi.Strip(renderHeader(120, viewAgents, headerSummary{agentsBySection: []int{0, 0, 0, 0}}))
+
+	if !strings.Contains(header, "no agents · ") {
+		t.Fatalf("header = %s, want no agents", header)
+	}
+}
+
 func TestAgentsViewListsDoneAgentInTheDoneSection(t *testing.T) {
 	m := agentsTabModel(t, &fakeMux{available: true}, &recordingViewMarker{})
 	m.view = viewAgents

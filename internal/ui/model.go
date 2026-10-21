@@ -3087,10 +3087,11 @@ func (m model) View() string {
 	}
 
 	header := renderHeader(m.width, m.view, headerSummary{
-		live:         live,
-		recent:       recent,
-		recentWindow: cfg.RecentWindow,
-		updatedAt:    m.snap.UpdatedAt,
+		live:            live,
+		recent:          recent,
+		recentWindow:    cfg.RecentWindow,
+		updatedAt:       m.snap.UpdatedAt,
+		agentsBySection: agentSectionCounts(m.agents),
 	})
 
 	// The unreachable footer is gated behind --debug because transient

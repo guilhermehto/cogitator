@@ -94,6 +94,15 @@ func agentSectionOf(a agents.Agent) int {
 	}
 }
 
+func agentSectionCounts(list []agents.Agent) []int {
+	counts := make([]int, len(agentSections))
+	for _, a := range list {
+		counts[agentSectionOf(a)]++
+	}
+
+	return counts
+}
+
 // SetAgents lists agents the way the zellij sidebar does (set_agents in
 // zellij-plugin/src/app.rs): section by section, each oldest OrderedAt first
 // so whoever has waited longest sits on top, with agents of unknown order

@@ -5,6 +5,7 @@ package ui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,16 +52,19 @@ func viewLabel(v viewMode) string {
 	return ""
 }
 
-// headerSummary is the live-session tally shown on the right of the header.
+// headerSummary is the tally shown on the right of the header.
 type headerSummary struct {
 	live, recent int
 	recentWindow time.Duration
 	updatedAt    time.Time
+	// agentsBySection counts agents per agentSections entry; the Agents tab
+	// shows it in place of the live/recent tally.
+	agentsBySection []int
 }
 
 // renderHeader draws the top line: brand and view tabs on the left (so Tab's
-// effect is visible), the live/recent tally right-aligned. The tally is
-// dropped when the terminal is too narrow to hold both.
+// effect is visible), the tally right-aligned. The tally is dropped when the
+// terminal is too narrow to hold both.
 func renderHeader(width int, active viewMode, sum headerSummary) string {
 	tabs := make([]string, 0, len(viewTabs))
 	for _, t := range viewTabs {
@@ -72,18 +76,46 @@ func renderHeader(width int, active viewMode, sum headerSummary) string {
 	}
 	left := titleStyle.Render("cogitator") + " " + strings.Join(tabs, " ")
 
-	liveGlyph := attnInactiveStyle.Render(glyphInactive)
-	if sum.live > 0 {
-		liveGlyph = attnActiveStyle.Render(glyphActive)
+	right := sessionTally(sum)
+	if active == viewAgents {
+		right = agentTally(sum)
 	}
-	right := liveGlyph + dimStyle.Render(fmt.Sprintf(" %d live · %d recent (≤%dm) · %s ",
-		sum.live, sum.recent, int(sum.recentWindow.Minutes()), sum.updatedAt.Format("15:04:05")))
 
 	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
 		return ansi.Truncate(left, width, "")
 	}
 	return left + strings.Repeat(" ", gap) + right
+}
+
+func sessionTally(sum headerSummary) string {
+	liveGlyph := attnInactiveStyle.Render(glyphInactive)
+	if sum.live > 0 {
+		liveGlyph = attnActiveStyle.Render(glyphActive)
+	}
+
+	return liveGlyph + dimStyle.Render(fmt.Sprintf(" %d live · %d recent (≤%dm) · %s ",
+		sum.live, sum.recent, int(sum.recentWindow.Minutes()), sum.updatedAt.Format("15:04:05")))
+}
+
+// agentTally counts agents in each non-empty section, coloured as the
+// section titles are.
+func agentTally(sum headerSummary) string {
+	var parts []string
+	for i, count := range sum.agentsBySection {
+		if count == 0 {
+			continue
+		}
+
+		section := agentSections[i]
+		parts = append(parts, section.style.Render(strconv.Itoa(count))+dimStyle.Render(" "+strings.ToLower(section.title)))
+	}
+
+	if len(parts) == 0 {
+		parts = append(parts, dimStyle.Render("no agents"))
+	}
+
+	return strings.Join(parts, dimStyle.Render(" · ")) + dimStyle.Render(" · "+sum.updatedAt.Format("15:04:05")+" ")
 }
 
 // keyHint is one "key action" pair in the hint bar.
