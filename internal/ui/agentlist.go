@@ -108,6 +108,7 @@ func agentSectionCounts(list []agents.Agent) []int {
 // so whoever has waited longest sits on top, with agents of unknown order
 // closing their section in cogitator's order.
 func (l *agentList) SetAgents(list []agents.Agent) {
+	previous := l.visible()
 	l.agents = slices.Clone(list)
 	slices.SortStableFunc(l.agents, func(a, b agents.Agent) int {
 		if c := cmp.Compare(agentListPart(a), agentListPart(b)); c != 0 {
@@ -115,7 +116,39 @@ func (l *agentList) SetAgents(list []agents.Agent) {
 		}
 		return a.OrderedAt.Compare(b.OrderedAt)
 	})
+	l.followNeighbour(previous)
 	l.settleCursor()
+}
+
+// followNeighbour moves a cursor whose agent left the list to the nearest
+// remaining agent above it in previous, else below it, so killing or
+// dismissing an agent leaves the user where they were.
+func (l *agentList) followNeighbour(previous []agents.Agent) {
+	list := l.visible()
+	if l.cursorIndex(list) >= 0 {
+		return
+	}
+
+	at := l.cursorIndex(previous)
+	if at < 0 {
+		return
+	}
+
+	remaining := make(map[string]bool, len(list))
+	for _, a := range list {
+		remaining[a.ID] = true
+	}
+
+	nearestFirst := slices.Clone(previous[:at])
+	slices.Reverse(nearestFirst)
+	nearestFirst = append(nearestFirst, previous[at+1:]...)
+	for _, a := range nearestFirst {
+		if remaining[a.ID] {
+			l.cursorID = a.ID
+
+			return
+		}
+	}
 }
 
 // agentListPart ranks agents by section and, within each section, agents

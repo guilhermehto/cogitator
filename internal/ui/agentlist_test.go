@@ -291,7 +291,7 @@ func TestAgentListCursorStaysOnAgentAcrossReSort(t *testing.T) {
 	}
 }
 
-func TestAgentListCursorFallsBackWhenAgentDisappears(t *testing.T) {
+func TestAgentListCursorMovesToTheAgentAboveWhenItsAgentDisappears(t *testing.T) {
 	l := newAgentList()
 	list := agentsInEveryGroup()
 	l.SetAgents(list)
@@ -299,8 +299,20 @@ func TestAgentListCursorFallsBackWhenAgentDisappears(t *testing.T) {
 
 	l.SetAgents(list[:2])
 
-	if l.cursorID != "/a" {
-		t.Fatalf("cursor = %q, want first row /a", l.cursorID)
+	if l.cursorID != "/b" {
+		t.Fatalf("cursor = %q, want /b, the nearest remaining row above /e", l.cursorID)
+	}
+}
+
+func TestAgentListCursorMovesToTheAgentBelowWhenTheFirstAgentDisappears(t *testing.T) {
+	l := newAgentList()
+	list := agentsInEveryGroup()
+	l.SetAgents(list)
+
+	l.SetAgents(list[1:])
+
+	if l.cursorID != "/c" {
+		t.Fatalf("cursor = %q, want /c, the row below /a", l.cursorID)
 	}
 }
 
