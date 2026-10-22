@@ -519,9 +519,9 @@ type model struct {
 	// selfPaneID is cogitator's own multiplexer pane, used to refuse killing
 	// the window the TUI runs in. Empty outside a multiplexer.
 	selfPaneID string
-	// dismissedAgents maps agent ID to when the user dismissed it with 'K';
-	// agents.Build hides those until they run again. Session-scoped.
-	dismissedAgents map[string]time.Time
+	// dismissedAgents maps agent ID to its dismissal with 'K'; agents.Build
+	// hides those until they run again. Session-scoped.
+	dismissedAgents map[string]agents.Dismissal
 	// launchMode is the resolved tmux launch mode (window vs session) read from
 	// workspace config. Refreshed on each buildWorkspaceRows so config edits
 	// take effect without a restart. The zero value never drives a real launch —

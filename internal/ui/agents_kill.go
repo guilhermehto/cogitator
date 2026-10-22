@@ -95,14 +95,14 @@ func (m *model) applyAgentKilled(msg agentKilledMsg) tea.Cmd {
 }
 
 // dismissAgent marks agent seen and hides it from the agent list until it
-// gets a multiplexer window or new activity.
+// gets a new multiplexer window or new activity.
 func (m *model) dismissAgent(agent agents.Agent) {
 	m.markAgentSeen(agent)
 	if m.dismissedAgents == nil {
-		m.dismissedAgents = map[string]time.Time{}
+		m.dismissedAgents = map[string]agents.Dismissal{}
 	}
 
-	m.dismissedAgents[agent.ID] = time.Now()
+	m.dismissedAgents[agent.ID] = agents.NewDismissal(time.Now(), m.panes)
 	m.refreshAgents()
 }
 

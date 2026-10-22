@@ -199,7 +199,9 @@ func TestBuildHidesDismissedAgentUntilItRunsAgain(t *testing.T) {
 	rowsActiveAgo := func(age time.Duration) []settings.Row {
 		return []settings.Row{row("/w/a", settings.StateStopped, state.AttnFinished, age)}
 	}
-	dismissedA := map[string]time.Time{"/w/a": dismissedAt}
+	dismissedA := map[string]Dismissal{"/w/a": NewDismissal(dismissedAt, nil)}
+	otherTab := []mux.Pane{{PaneID: "%2", WindowID: "@2", SessionID: "$1", Cwd: "/w/a", CogDir: "/w/a", Command: "zsh"}}
+	dismissedBesideOtherTab := map[string]Dismissal{"/w/a": NewDismissal(dismissedAt, otherTab)}
 
 	tests := []struct {
 		name string
@@ -209,6 +211,7 @@ func TestBuildHidesDismissedAgentUntilItRunsAgain(t *testing.T) {
 		{"hides dismissed agent", Input{Rows: rowsActiveAgo(5 * time.Minute), Dismissed: dismissedA}, nil},
 		{"shows dismissed agent with new activity", Input{Rows: rowsActiveAgo(30 * time.Second), Dismissed: dismissedA}, []string{"/w/a"}},
 		{"shows dismissed agent that has a tmux window again", Input{Rows: rowsActiveAgo(5 * time.Minute), Panes: windowAt, Dismissed: dismissedA}, []string{"/w/a"}},
+		{"hides dismissed agent on a window listed when it was dismissed", Input{Rows: rowsActiveAgo(5 * time.Minute), Panes: otherTab, Dismissed: dismissedBesideOtherTab}, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

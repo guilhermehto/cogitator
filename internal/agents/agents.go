@@ -92,11 +92,31 @@ type Input struct {
 	Now           time.Time
 	RecentWindow  time.Duration
 	// Dismissed maps agent ID to when the user dismissed it. A dismissed agent
-	// stays hidden until it has a tmux window or activity after that time.
-	Dismissed map[string]time.Time
+	// stays hidden until it has activity after that time or a window opened
+	// since.
+	Dismissed map[string]Dismissal
 	// Previous is the list the last Build returned. Working agents keep their
 	// OrderedAt from it.
 	Previous []Agent
+}
+
+// Dismissal records when the user dismissed an agent and the windows listed
+// then. An agent that lost its own window can still join one of those, such
+// as another tab in its directory, without running again; only a window
+// opened since counts as it running again.
+type Dismissal struct {
+	At      time.Time
+	Windows map[string]bool
+}
+
+// NewDismissal dismisses an agent at at, while panes are listed.
+func NewDismissal(at time.Time, panes []mux.Pane) Dismissal {
+	windows := make(map[string]bool, len(panes))
+	for _, p := range panes {
+		windows[p.WindowID] = true
+	}
+
+	return Dismissal{At: at, Windows: windows}
 }
 
 // Build returns every agent worth surfacing, ordered by urgency.
@@ -320,9 +340,12 @@ func blockedOnUser(attn state.Attention) bool {
 }
 
 func dismissed(a Agent, in Input) bool {
-	at, ok := in.Dismissed[a.ID]
+	d, ok := in.Dismissed[a.ID]
+	if !ok || a.LastActivity.After(d.At) {
+		return false
+	}
 
-	return ok && a.WindowID == "" && !a.LastActivity.After(at)
+	return a.WindowID == "" || d.Windows[a.WindowID]
 }
 
 // strayAgents returns one agent per directory with live sessions that no

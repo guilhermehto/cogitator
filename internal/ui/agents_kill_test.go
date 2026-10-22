@@ -55,6 +55,25 @@ func TestAgentsKillConfirmedClosesWindowAndDismissesAgent(t *testing.T) {
 	}
 }
 
+func TestAgentsKilledAgentStaysHiddenBesideAnotherTabInItsDir(t *testing.T) {
+	tmux := &fakeMux{available: true}
+	m := windowedAgentModel(t, tmux)
+	otherTab := mux.Pane{PaneID: "%5", WindowID: "@5", SessionID: "$1", Cwd: m.agents[0].Dir, CogDir: m.agents[0].Dir, Command: "zsh"}
+	m.panes = append(m.panes, otherTab)
+	m.refreshAgents()
+
+	m, _ = pressKey(t, m, "K")
+	m, cmd := pressKey(t, m, "y")
+	updated, _ := m.Update(cmd())
+	m = updated.(model)
+
+	m.panes = []mux.Pane{otherTab}
+	m.refreshAgents()
+	if len(m.agents) != 0 {
+		t.Fatalf("killed agent came back on the other tab in its dir: %v", m.agents)
+	}
+}
+
 func TestAgentsKillCancelledByAnyOtherKey(t *testing.T) {
 	tmux := &fakeMux{available: true}
 	m := windowedAgentModel(t, tmux)
