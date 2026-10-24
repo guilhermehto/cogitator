@@ -10,7 +10,7 @@ require (
 	github.com/charmbracelet/x/cellbuf v0.0.15
 	github.com/charmbracelet/x/term v0.2.2
 	github.com/hashicorp/mdns v1.0.7
-	github.com/lucasb-eyer/go-colorful v1.4.0
+	github.com/lucasb-eyer/go-colorful v1.4.1
 	github.com/muesli/cancelreader v0.2.2
 	github.com/muesli/termenv v0.16.0
 )
