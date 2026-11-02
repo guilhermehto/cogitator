@@ -45,6 +45,7 @@ pub struct App {
     floating: bool,
     focused: bool,
     here: Option<Location>,
+    g_pending: bool,
     pub(crate) scroll: Cell<usize>,
 }
 
@@ -59,6 +60,7 @@ impl Default for App {
             floating: false,
             focused: false,
             here: None,
+            g_pending: false,
             scroll: Cell::new(0),
         }
     }
@@ -229,6 +231,7 @@ impl App {
         // Keys reach the plugin only while it has focus.
         self.set_focused(true);
         self.notice = None;
+        let g_pending = std::mem::take(&mut self.g_pending);
         match key {
             Key::Down | Key::Char('j') => {
                 self.move_selection(1);
@@ -236,6 +239,18 @@ impl App {
             }
             Key::Up | Key::Char('k') => {
                 self.move_selection(-1);
+                None
+            }
+            Key::Char('G') => {
+                self.select(self.agents.len().checked_sub(1));
+                None
+            }
+            Key::Char('g') => {
+                if g_pending {
+                    self.select(Some(0));
+                } else {
+                    self.g_pending = true;
+                }
                 None
             }
             Key::Enter => self
@@ -256,7 +271,13 @@ impl App {
         let cur = self.selected_index().unwrap_or(0) as isize;
         let max = self.agents.len() as isize - 1;
         let next = (cur + delta).clamp(0, max) as usize;
-        self.selected = Some(self.agents[next].id.clone());
+        self.select(Some(next));
+    }
+
+    fn select(&mut self, index: Option<usize>) {
+        if let Some(agent) = index.and_then(|i| self.agents.get(i)) {
+            self.selected = Some(agent.id.clone());
+        }
     }
 }
 
@@ -364,6 +385,28 @@ pub(crate) mod tests {
         assert_eq!(selected(&app), Some("/b"));
         app.handle_key(Key::Char('k'));
         assert_eq!(selected(&app), Some("/a"));
+    }
+
+    #[test]
+    fn capital_g_jumps_to_the_last_agent_and_gg_to_the_first() {
+        let mut app = app_with(&["/a", "/b", "/c"]);
+        app.handle_key(Key::Char('G'));
+        assert_eq!(selected(&app), Some("/c"));
+
+        app.handle_key(Key::Char('g'));
+        assert_eq!(selected(&app), Some("/c"));
+        app.handle_key(Key::Char('g'));
+        assert_eq!(selected(&app), Some("/a"));
+    }
+
+    #[test]
+    fn another_key_between_the_gs_cancels_the_jump() {
+        let mut app = app_with(&["/a", "/b", "/c"]);
+        app.handle_key(Key::Char('G'));
+        app.handle_key(Key::Char('g'));
+        app.handle_key(Key::Char('k'));
+        app.handle_key(Key::Char('g'));
+        assert_eq!(selected(&app), Some("/b"));
     }
 
     #[test]
