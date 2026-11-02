@@ -24,7 +24,8 @@ const HARNESS_PALETTE: [u8; 22] = [
 ];
 
 const HINTS: [(&str, &str); 3] = [("enter", "jump"), ("r", "refresh"), ("/", "filter")];
-const SEARCH_HINTS: [(&str, &str); 2] = [("enter", "jump"), ("esc", "clear")];
+const FILTER_HINTS: [(&str, &str); 2] = [("enter", "jump"), ("esc", "clear")];
+const FINDER_HINTS: [(&str, &str); 2] = [("enter", "jump"), ("esc", "cancel")];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Style {
@@ -154,6 +155,7 @@ fn bottom_lines(app: &App, rows: usize) -> Vec<Line> {
 fn query_line(kind: SearchKind, query: &str) -> Line {
     let (prompt, placeholder) = match kind {
         SearchKind::Filter => ("/ ", "filter"),
+        SearchKind::Finder => ("❯ ", "go to agent"),
     };
 
     let mut line = vec![
@@ -170,8 +172,10 @@ fn query_line(kind: SearchKind, query: &str) -> Line {
 /// A floating plugin hides on q; a docked sidebar hands focus back to the
 /// pane on its right instead, since hiding a docked pane loses its place.
 fn footer(app: &App) -> Line {
-    if app.search().is_some() {
-        return hint_line(&SEARCH_HINTS);
+    match app.search() {
+        Some((SearchKind::Filter, _)) => return hint_line(&FILTER_HINTS),
+        Some((SearchKind::Finder, _)) => return hint_line(&FINDER_HINTS),
+        None => {}
     }
 
     let dismiss = if app.floating() {
@@ -234,7 +238,15 @@ fn render_list(app: &App, rows: usize, cols: usize, now: i64) -> Vec<String> {
     let band = if app.focused() { selected } else { here };
     let mut lines = Vec::new();
     let (mut selected_line, mut selected_lines) = (0, 0);
-    for block in sections(agents, &visible) {
+    let blocks = match app.search() {
+        Some((SearchKind::Finder, _)) => vec![Block {
+            title: "Matches",
+            style: HEADER,
+            rows: &visible,
+        }],
+        _ => sections(agents, &visible),
+    };
+    for block in blocks {
         if !lines.is_empty() {
             lines.push(String::new());
         }
@@ -899,6 +911,37 @@ mod tests {
         let mut app = sectioned_app();
         type_keys(&mut app, "/zzz");
         assert_eq!(plain_lines(&render(&app, 4, 40, NOW))[0], "no match");
+    }
+
+    #[test]
+    fn finder_lists_matches_best_first_across_sections() {
+        let mut app = app_from(
+            r#"{"version":1,"agents":[
+                {"id":"/x/fob-bar","dir":"/x/fob-bar","group":"needs_you"},
+                {"id":"/x/bar","dir":"/x/bar","group":"idle"}
+            ]}"#,
+        );
+        app.handle_key(Key::Ctrl('p'));
+        type_keys(&mut app, "bar");
+        assert_eq!(
+            plain_lines(&render(&app, 6, 40, NOW)),
+            [
+                "Matches · 2",
+                " · /x/bar",
+                " · /x/fob-bar",
+                "",
+                "❯ bar",
+                "enter jump  esc cancel"
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_finder_shows_its_placeholder() {
+        let mut app = sectioned_app();
+        app.handle_key(Key::Ctrl('p'));
+        let lines = plain_lines(&render(&app, 8, 40, NOW));
+        assert_eq!(lines[6], "❯  go to agent");
     }
 
     #[test]

@@ -35,12 +35,17 @@ pub enum SearchKind {
     /// `/` narrows the list in place, keeping its sections, as the TUI's
     /// Agents filter does.
     Filter,
+    /// ctrl+p ranks matches best first across sections, as the TUI's
+    /// go-to-agent palette does.
+    Finder,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Search {
     kind: SearchKind,
     query: String,
+    /// The agent the cursor sat on when the search opened.
+    origin: Option<String>,
 }
 
 /// Where the plugin instance sits: its zellij session and, once known, the
@@ -302,6 +307,10 @@ impl App {
                 self.open_search(SearchKind::Filter);
                 None
             }
+            Key::Ctrl('p') => {
+                self.open_search(SearchKind::Finder);
+                None
+            }
             Key::Enter => self.focus_selected(),
             Key::Char('r') => Some(Effect::Refresh),
             Key::Esc | Key::Char('q') => Some(Effect::Dismiss),
@@ -330,18 +339,35 @@ impl App {
         self.search = Some(Search {
             kind,
             query: String::new(),
+            origin: self.selected.clone(),
         });
     }
 
+    /// Closing a finder returns the cursor to where it sat before, as esc on
+    /// the TUI's palette leaves the list cursor alone.
     fn close_search(&mut self) {
-        if self.search.take().is_some() {
-            self.settle_cursor();
+        let Some(search) = self.search.take() else {
+            return;
+        };
+
+        if search.kind == SearchKind::Finder {
+            self.selected = search.origin;
         }
+        self.settle_cursor();
     }
 
+    /// A filter keeps the cursor on its agent while it still matches; a
+    /// finder moves it to the best match whenever the query changes.
     fn edit_query(&mut self, edit: impl FnOnce(&mut String)) {
-        if let Some(search) = self.search.as_mut() {
-            edit(&mut search.query);
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+
+        let before = search.query.clone();
+        edit(&mut search.query);
+        if search.kind == SearchKind::Finder && search.query != before {
+            self.select(self.visible().first().copied());
+        } else {
             self.settle_cursor();
         }
     }
@@ -625,6 +651,64 @@ pub(crate) mod tests {
         app.set_focused(false);
         assert_eq!(app.search(), None);
         assert_eq!(visible_ids(&app).len(), 2);
+    }
+
+    #[test]
+    fn ctrl_p_opens_a_finder_that_ranks_the_best_match_first() {
+        let mut app = app_with(&["/a/b/c", "/x/abc"]);
+        app.handle_key(Key::Ctrl('p'));
+        assert_eq!(app.search(), Some((SearchKind::Finder, "")));
+        assert_eq!(visible_ids(&app), ["/a/b/c", "/x/abc"]);
+
+        type_keys(&mut app, "abc");
+        assert_eq!(visible_ids(&app), ["/x/abc", "/a/b/c"]);
+        assert_eq!(selected(&app), Some("/x/abc"));
+    }
+
+    #[test]
+    fn finder_opens_on_the_cursor_and_keeps_it_until_the_query_changes() {
+        let mut app = app_with(&["/a", "/b"]);
+        app.handle_key(Key::Down);
+        app.handle_key(Key::Ctrl('p'));
+        app.handle_key(Key::Backspace);
+        assert_eq!(selected(&app), Some("/b"));
+
+        type_keys(&mut app, "/");
+        assert_eq!(selected(&app), Some("/a"));
+    }
+
+    #[test]
+    fn finder_moves_with_ctrl_n_and_ctrl_p() {
+        let mut app = app_with(&["/a", "/b"]);
+        app.handle_key(Key::Ctrl('p'));
+        app.handle_key(Key::Ctrl('n'));
+        assert_eq!(selected(&app), Some("/b"));
+        app.handle_key(Key::Ctrl('p'));
+        assert_eq!(selected(&app), Some("/a"));
+        assert_eq!(app.search(), Some((SearchKind::Finder, "")));
+    }
+
+    #[test]
+    fn enter_focuses_the_finder_choice() {
+        let mut app = app_with(&["/a/b/c", "/x/abc"]);
+        app.handle_key(Key::Ctrl('p'));
+        type_keys(&mut app, "abc");
+        assert_eq!(
+            app.handle_key(Key::Enter),
+            Some(Effect::Focus {
+                agent_id: "/x/abc".into()
+            })
+        );
+    }
+
+    #[test]
+    fn esc_closes_the_finder_and_returns_the_cursor() {
+        let mut app = app_with(&["/a/b/c", "/x/abc"]);
+        app.handle_key(Key::Ctrl('p'));
+        type_keys(&mut app, "abc");
+        assert_eq!(app.handle_key(Key::Esc), None);
+        assert_eq!(app.search(), None);
+        assert_eq!(selected(&app), Some("/a/b/c"));
     }
 
     #[test]
