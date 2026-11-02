@@ -1,5 +1,5 @@
-use crate::app::{App, Status};
-use crate::feed::Agent;
+use crate::app::{App, SearchKind, Status};
+use crate::feed::{abbreviate_home, base_name, Agent};
 use std::ops::Range;
 
 // Glyphs, colours and widths mirror the TUI's Agents tab (internal/ui) so
@@ -23,13 +23,15 @@ const HARNESS_PALETTE: [u8; 22] = [
     213, 219,
 ];
 
-const HINTS: [(&str, &str); 2] = [("enter", "jump"), ("r", "refresh")];
+const HINTS: [(&str, &str); 3] = [("enter", "jump"), ("r", "refresh"), ("/", "filter")];
+const SEARCH_HINTS: [(&str, &str); 2] = [("enter", "jump"), ("esc", "clear")];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Style {
     fg: Option<u8>,
     bold: bool,
     italic: bool,
+    reverse: bool,
 }
 
 impl Style {
@@ -38,6 +40,7 @@ impl Style {
             fg: Some(colour),
             bold: false,
             italic: false,
+            reverse: false,
         }
     }
 
@@ -51,12 +54,20 @@ impl Style {
             ..self
         }
     }
+
+    const fn reverse(self) -> Self {
+        Style {
+            reverse: true,
+            ..self
+        }
+    }
 }
 
 const PLAIN: Style = Style {
     fg: None,
     bold: false,
     italic: false,
+    reverse: false,
 };
 const DIM: Style = Style::fg(240);
 const HEADER: Style = Style::fg(244).bold();
@@ -75,6 +86,7 @@ const ACTIVE: Style = Style::fg(82);
 const MISSING: Style = Style::fg(196).italic();
 const UNKNOWN: Style = Style::fg(226);
 const HERE: Style = Style::fg(111);
+const CURSOR: Style = PLAIN.reverse();
 
 /// Section titles, indexed by Agent::section, as the TUI's agentSections.
 const SECTIONS: [(&str, Style); 4] = [
@@ -103,34 +115,78 @@ pub fn render(app: &App, rows: usize, cols: usize, now_unix_secs: i64) -> Vec<St
         return Vec::new();
     }
 
-    let bottom = match app.notice() {
-        Some(notice) => Some(vec![span(notice, HINT)]),
-        None if rows > 2 => Some(footer(app.floating())),
-        None => None,
-    };
-    let Some(bottom) = bottom else {
+    let bottom = bottom_lines(app, rows);
+    if bottom.is_empty() {
         return render_body(app, rows, cols, now_unix_secs);
+    }
+
+    let body_rows = rows - bottom.len();
+    let mut lines = render_body(app, body_rows, cols, now_unix_secs);
+    lines.resize(body_rows, String::new());
+    lines.extend(
+        bottom
+            .into_iter()
+            .map(|line| paint(&truncate(line, cols), None)),
+    );
+    lines
+}
+
+/// The lines pinned under the list: the open search's query, then a notice
+/// or, while the list keeps two rows, the key hints. A view too short for
+/// all of them keeps the last.
+fn bottom_lines(app: &App, rows: usize) -> Vec<Line> {
+    let mut bottom = Vec::new();
+    if let Some((kind, query)) = app.search() {
+        bottom.push(query_line(kind, query));
+    }
+    match app.notice() {
+        Some(notice) => bottom.push(vec![span(notice, HINT)]),
+        None if rows > bottom.len() + 2 => bottom.push(footer(app)),
+        None => {}
+    }
+
+    let overflow = bottom.len().saturating_sub(rows);
+    bottom.split_off(overflow)
+}
+
+/// The query sits after its prompt with a block cursor, and a placeholder
+/// names the search until the user types.
+fn query_line(kind: SearchKind, query: &str) -> Line {
+    let (prompt, placeholder) = match kind {
+        SearchKind::Filter => ("/ ", "filter"),
     };
 
-    let mut lines = render_body(app, rows - 1, cols, now_unix_secs);
-    lines.resize(rows - 1, String::new());
-    lines.push(paint(&truncate(bottom, cols), None));
-    lines
+    let mut line = vec![
+        span(prompt, HINT_KEY),
+        span(query, PLAIN),
+        span(" ", CURSOR),
+    ];
+    if query.is_empty() {
+        line.push(span(placeholder, DIM));
+    }
+    line
 }
 
 /// A floating plugin hides on q; a docked sidebar hands focus back to the
 /// pane on its right instead, since hiding a docked pane loses its place.
-fn footer(floating: bool) -> Line {
-    let dismiss = if floating {
+fn footer(app: &App) -> Line {
+    if app.search().is_some() {
+        return hint_line(&SEARCH_HINTS);
+    }
+
+    let dismiss = if app.floating() {
         ("q", "hide")
     } else {
         ("q", "back")
     };
+    hint_line(&[&HINTS[..], &[dismiss]].concat())
+}
 
+fn hint_line(hints: &[(&str, &str)]) -> Line {
     let mut line = Vec::new();
-    for (i, (key, desc)) in HINTS.iter().chain([&dismiss]).enumerate() {
+    for (i, (key, desc)) in hints.iter().enumerate() {
         if i > 0 {
-            line.push(span("   ", PLAIN));
+            line.push(span("  ", PLAIN));
         }
         line.push(span(*key, HINT_KEY));
         line.push(span(format!(" {desc}"), DIM));
@@ -166,28 +222,26 @@ fn render_list(app: &App, rows: usize, cols: usize, now: i64) -> Vec<String> {
         )];
     }
 
+    let visible = app.visible();
+    if visible.is_empty() {
+        return vec![paint(&truncate(vec![span("no match", DIM)], cols), None)];
+    }
+
     let selected = app.selected_index();
     let here = app.here_index();
     // The band shows where keys act while the plugin has focus, and where the
     // user is otherwise; App keeps the cursor on that agent while unfocused.
     let band = if app.focused() { selected } else { here };
-    // App keeps the list in section order, so each section is one run.
     let mut lines = Vec::new();
     let (mut selected_line, mut selected_lines) = (0, 0);
-    for (section, (title, style)) in SECTIONS.into_iter().enumerate() {
-        let start = agents.partition_point(|a| a.section() < section);
-        let end = agents.partition_point(|a| a.section() <= section);
-        let range = start..end;
-        if range.is_empty() {
-            continue;
-        }
-
+    for block in sections(agents, &visible) {
         if !lines.is_empty() {
             lines.push(String::new());
         }
-        let header = vec![span(title, style), span(format!(" · {}", range.len()), DIM)];
+        let count = format!(" · {}", block.rows.len());
+        let header = vec![span(block.title, block.style), span(count, DIM)];
         lines.push(paint(&truncate(header, cols), None));
-        for i in range {
+        for &i in block.rows {
             let mark = RowMark {
                 band: band == Some(i),
                 here: here == Some(i),
@@ -205,6 +259,31 @@ fn render_list(app: &App, rows: usize, cols: usize, now: i64) -> Vec<String> {
     app.scroll.set(offset);
 
     lines.into_iter().skip(offset).take(rows).collect()
+}
+
+struct Block<'a> {
+    title: &'static str,
+    style: Style,
+    rows: &'a [usize],
+}
+
+/// Groups the visible agents into their non-empty sections. App keeps the
+/// list in section order, so each section is one run.
+fn sections<'a>(agents: &[Agent], visible: &'a [usize]) -> Vec<Block<'a>> {
+    SECTIONS
+        .into_iter()
+        .enumerate()
+        .map(|(section, (title, style))| {
+            let start = visible.partition_point(|&i| agents[i].section() < section);
+            let end = visible.partition_point(|&i| agents[i].section() <= section);
+            Block {
+                title,
+                style,
+                rows: &visible[start..end],
+            }
+        })
+        .filter(|block| !block.rows.is_empty())
+        .collect()
 }
 
 // scroll_offset scrolls no further than it takes to show the selected row,
@@ -358,31 +437,6 @@ fn repo_style(agent: &Agent) -> Style {
     }
 }
 
-fn base_name(path: &str) -> String {
-    path.trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .unwrap_or_default()
-        .to_string()
-}
-
-fn abbreviate_home(dir: &str, home: &str) -> String {
-    if home.is_empty() {
-        return dir.to_string();
-    }
-    if dir == home {
-        return "~".to_string();
-    }
-
-    match dir
-        .strip_prefix(home)
-        .and_then(|rest| rest.strip_prefix('/'))
-    {
-        Some(rest) => format!("~/{rest}"),
-        None => dir.to_string(),
-    }
-}
-
 fn harness_style(harness: &str) -> Style {
     if harness.is_empty() {
         return Style::fg(141).italic();
@@ -460,6 +514,9 @@ fn sgr_codes(style: Style, bg: Option<u8>) -> Vec<String> {
     }
     if style.italic {
         codes.push("3".to_string());
+    }
+    if style.reverse {
+        codes.push("7".to_string());
     }
     if let Some(fg) = style.fg {
         codes.push(format!("38;5;{fg}"));
@@ -786,11 +843,69 @@ mod tests {
         let mut app = simple_app(&["/a"]);
         let docked = plain_lines(&render(&app, 6, 40, NOW));
         assert_eq!(docked.len(), 6);
-        assert_eq!(docked[5], "enter jump   r refresh   q back");
+        assert_eq!(docked[5], "enter jump  r refresh  / filter  q back");
 
         app.set_floating(true);
         let floating = plain_lines(&render(&app, 6, 40, NOW));
-        assert_eq!(floating[5], "enter jump   r refresh   q hide");
+        assert_eq!(floating[5], "enter jump  r refresh  / filter  q hide");
+    }
+
+    fn type_keys(app: &mut App, keys: &str) {
+        for c in keys.chars() {
+            app.handle_key(Key::Char(c));
+        }
+    }
+
+    fn sectioned_app() -> App {
+        app_from(
+            r#"{"version":1,"agents":[
+                {"id":"/x/ask","dir":"/x/ask","group":"needs_you"},
+                {"id":"/x/busy","dir":"/x/busy","group":"working"},
+                {"id":"/x/bask","dir":"/x/bask","group":"idle"}
+            ]}"#,
+        )
+    }
+
+    #[test]
+    fn filter_keeps_matching_agents_in_their_sections_above_the_query() {
+        let mut app = sectioned_app();
+        type_keys(&mut app, "/sk");
+        assert_eq!(
+            plain_lines(&render(&app, 8, 40, NOW)),
+            [
+                "Needs you · 1",
+                " · /x/ask",
+                "",
+                "Idle · 1",
+                " · /x/bask",
+                "",
+                "/ sk",
+                "enter jump  esc clear"
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_filter_shows_a_cursor_and_placeholder() {
+        let mut app = sectioned_app();
+        app.handle_key(Key::Char('/'));
+        let line = &render(&app, 12, 40, NOW)[10];
+        assert_eq!(plain(line), "/  filter");
+        assert!(line.contains("\x1b[7m \x1b[0m"), "{line:?}");
+    }
+
+    #[test]
+    fn filter_without_matches_says_no_match() {
+        let mut app = sectioned_app();
+        type_keys(&mut app, "/zzz");
+        assert_eq!(plain_lines(&render(&app, 4, 40, NOW))[0], "no match");
+    }
+
+    #[test]
+    fn one_row_view_keeps_the_query_in_sight() {
+        let mut app = sectioned_app();
+        type_keys(&mut app, "/sk");
+        assert_eq!(plain_lines(&render(&app, 1, 40, NOW)), ["/ sk"]);
     }
 
     #[test]

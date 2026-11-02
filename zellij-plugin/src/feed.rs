@@ -46,6 +46,47 @@ impl Agent {
             _ => 3,
         }
     }
+
+    /// The agent's one-line plain label, as cogitator's agentName: the tab
+    /// label, then what the agent works in. Searches match on it.
+    pub fn name(&self, home: &str) -> String {
+        let target = match self.kind.as_str() {
+            "workspace" => format!("{}/{}", self.workspace, self.session_name),
+            "stray" => format!("{} stray", abbreviate_home(&self.dir, home)),
+            _ if self.branch.is_empty() => abbreviate_home(&self.dir, home),
+            _ => format!("{}·{}", base_name(&self.repo), self.branch),
+        };
+
+        if self.tab.is_empty() {
+            return target;
+        }
+        format!("{} · {target}", self.tab)
+    }
+}
+
+pub fn base_name(path: &str) -> String {
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+pub fn abbreviate_home(dir: &str, home: &str) -> String {
+    if home.is_empty() {
+        return dir.to_string();
+    }
+    if dir == home {
+        return "~".to_string();
+    }
+
+    match dir
+        .strip_prefix(home)
+        .and_then(|rest| rest.strip_prefix('/'))
+    {
+        Some(rest) => format!("~/{rest}"),
+        None => dir.to_string(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -258,5 +299,39 @@ mod tests {
         assert_eq!(parse_rfc3339(""), None);
         assert_eq!(parse_rfc3339("2026-01-01 00:00:00"), None);
         assert_eq!(parse_rfc3339("2026-13-01T00:00:00Z"), None);
+    }
+
+    fn agent(kind: &str) -> Agent {
+        Agent {
+            kind: kind.into(),
+            dir: "/home/me/p".into(),
+            repo: "/src/r/".into(),
+            branch: "main".into(),
+            workspace: "w".into(),
+            session_name: "s".into(),
+            ..Agent::default()
+        }
+    }
+
+    #[test]
+    fn name_reads_as_the_row_target() {
+        assert_eq!(agent("worktree").name("/home/me"), "r·main");
+        assert_eq!(agent("workspace").name("/home/me"), "w/s");
+        assert_eq!(agent("stray").name("/home/me"), "~/p stray");
+
+        let unbranched = Agent {
+            branch: String::new(),
+            ..agent("worktree")
+        };
+        assert_eq!(unbranched.name("/home/me"), "~/p");
+    }
+
+    #[test]
+    fn name_leads_with_the_tab_label() {
+        let tabbed = Agent {
+            tab: "LEX-1".into(),
+            ..agent("worktree")
+        };
+        assert_eq!(tabbed.name(""), "LEX-1 · r·main");
     }
 }

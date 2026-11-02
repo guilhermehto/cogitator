@@ -1,4 +1,5 @@
 use crate::feed::{self, Agent, ParseError};
+use crate::fuzzy;
 use std::cell::Cell;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +19,8 @@ pub enum Key {
     Down,
     Enter,
     Esc,
+    Backspace,
+    Ctrl(char),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +28,19 @@ pub enum Effect {
     Focus { agent_id: String },
     Refresh,
     Dismiss,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchKind {
+    /// `/` narrows the list in place, keeping its sections, as the TUI's
+    /// Agents filter does.
+    Filter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Search {
+    kind: SearchKind,
+    query: String,
 }
 
 /// Where the plugin instance sits: its zellij session and, once known, the
@@ -46,6 +62,7 @@ pub struct App {
     focused: bool,
     here: Option<Location>,
     g_pending: bool,
+    search: Option<Search>,
     pub(crate) scroll: Cell<usize>,
 }
 
@@ -61,6 +78,7 @@ impl Default for App {
             focused: false,
             here: None,
             g_pending: false,
+            search: None,
             scroll: Cell::new(0),
         }
     }
@@ -96,6 +114,25 @@ impl App {
         self.agents.iter().position(|a| a.id == id)
     }
 
+    pub fn search(&self) -> Option<(SearchKind, &str)> {
+        self.search.as_ref().map(|s| (s.kind, s.query.as_str()))
+    }
+
+    /// The agents the list shows, as indices into agents in the order shown:
+    /// every agent, or the ones the open search matches.
+    pub fn visible(&self) -> Vec<usize> {
+        let Some(search) = &self.search else {
+            return (0..self.agents.len()).collect();
+        };
+
+        let labels: Vec<String> = self.agents.iter().map(|a| a.name(&self.home)).collect();
+        let mut matches = fuzzy::rank(&search.query, &labels);
+        if search.kind == SearchKind::Filter {
+            matches.sort_unstable();
+        }
+        matches
+    }
+
     pub fn floating(&self) -> bool {
         self.floating
     }
@@ -115,6 +152,9 @@ impl App {
         }
 
         self.focused = focused;
+        if !focused {
+            self.close_search();
+        }
         self.rest_cursor();
         true
     }
@@ -224,6 +264,7 @@ impl App {
                 .min(self.agents.len().saturating_sub(1));
             self.selected = self.agents.get(idx).map(|a| a.id.clone());
         }
+        self.settle_cursor();
         self.rest_cursor();
     }
 
@@ -231,6 +272,10 @@ impl App {
         // Keys reach the plugin only while it has focus.
         self.set_focused(true);
         self.notice = None;
+        if self.search.is_some() {
+            return self.handle_search_key(key);
+        }
+
         let g_pending = std::mem::take(&mut self.g_pending);
         match key {
             Key::Down | Key::Char('j') => {
@@ -242,42 +287,99 @@ impl App {
                 None
             }
             Key::Char('G') => {
-                self.select(self.agents.len().checked_sub(1));
+                self.select(self.visible().last().copied());
                 None
             }
             Key::Char('g') => {
                 if g_pending {
-                    self.select(Some(0));
+                    self.select(self.visible().first().copied());
                 } else {
                     self.g_pending = true;
                 }
                 None
             }
-            Key::Enter => self
-                .selected
-                .clone()
-                .map(|agent_id| Effect::Focus { agent_id }),
+            Key::Char('/') => {
+                self.open_search(SearchKind::Filter);
+                None
+            }
+            Key::Enter => self.focus_selected(),
             Key::Char('r') => Some(Effect::Refresh),
             Key::Esc | Key::Char('q') => Some(Effect::Dismiss),
-            Key::Char(_) => None,
+            Key::Char(_) | Key::Ctrl(_) | Key::Backspace => None,
         }
+    }
+
+    /// While a search is open, printable keys edit its query, so only keys
+    /// that type nothing move the cursor or close the search.
+    fn handle_search_key(&mut self, key: Key) -> Option<Effect> {
+        match key {
+            Key::Enter => return self.focus_selected(),
+            Key::Esc => self.close_search(),
+            Key::Down | Key::Ctrl('n') => self.move_selection(1),
+            Key::Up | Key::Ctrl('p') => self.move_selection(-1),
+            Key::Backspace => self.edit_query(|query| {
+                query.pop();
+            }),
+            Key::Char(c) => self.edit_query(|query| query.push(c)),
+            Key::Ctrl(_) => {}
+        }
+        None
+    }
+
+    fn open_search(&mut self, kind: SearchKind) {
+        self.search = Some(Search {
+            kind,
+            query: String::new(),
+        });
+    }
+
+    fn close_search(&mut self) {
+        if self.search.take().is_some() {
+            self.settle_cursor();
+        }
+    }
+
+    fn edit_query(&mut self, edit: impl FnOnce(&mut String)) {
+        if let Some(search) = self.search.as_mut() {
+            edit(&mut search.query);
+            self.settle_cursor();
+        }
+    }
+
+    fn focus_selected(&self) -> Option<Effect> {
+        self.selected
+            .clone()
+            .map(|agent_id| Effect::Focus { agent_id })
     }
 
     fn move_selection(&mut self, delta: isize) {
-        if self.agents.is_empty() {
+        let visible = self.visible();
+        if visible.is_empty() {
             return;
         }
 
-        let cur = self.selected_index().unwrap_or(0) as isize;
-        let max = self.agents.len() as isize - 1;
+        let cur = self.selected_position(&visible).unwrap_or(0) as isize;
+        let max = visible.len() as isize - 1;
         let next = (cur + delta).clamp(0, max) as usize;
-        self.select(Some(next));
+        self.select(Some(visible[next]));
+    }
+
+    /// Keeps the cursor on its agent while the list shows it, else moves it
+    /// to the first agent shown, so keys never act on a hidden agent.
+    fn settle_cursor(&mut self) {
+        let visible = self.visible();
+        if self.selected_position(&visible).is_none() {
+            self.select(visible.first().copied());
+        }
+    }
+
+    fn selected_position(&self, visible: &[usize]) -> Option<usize> {
+        let selected = self.selected_index()?;
+        visible.iter().position(|&i| i == selected)
     }
 
     fn select(&mut self, index: Option<usize>) {
-        if let Some(agent) = index.and_then(|i| self.agents.get(i)) {
-            self.selected = Some(agent.id.clone());
-        }
+        self.selected = index.map(|i| self.agents[i].id.clone());
     }
 }
 
@@ -407,6 +509,122 @@ pub(crate) mod tests {
         app.handle_key(Key::Char('k'));
         app.handle_key(Key::Char('g'));
         assert_eq!(selected(&app), Some("/b"));
+    }
+
+    fn type_keys(app: &mut App, keys: &str) {
+        for c in keys.chars() {
+            app.handle_key(Key::Char(c));
+        }
+    }
+
+    fn visible_ids(app: &App) -> Vec<&str> {
+        app.visible()
+            .into_iter()
+            .map(|i| app.agents()[i].id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn filter_shows_matching_agents_in_list_order() {
+        let mut app = app_with(&["/alps", "/beta", "/alpha"]);
+        type_keys(&mut app, "/al");
+        assert_eq!(app.search(), Some((SearchKind::Filter, "al")));
+        assert_eq!(visible_ids(&app), ["/alps", "/alpha"]);
+    }
+
+    #[test]
+    fn filter_takes_list_keys_as_query_text() {
+        let mut app = app_with(&["/a"]);
+        app.handle_key(Key::Char('/'));
+        for c in "qjkgGr/".chars() {
+            assert_eq!(app.handle_key(Key::Char(c)), None);
+        }
+        assert_eq!(app.search(), Some((SearchKind::Filter, "qjkgGr/")));
+    }
+
+    #[test]
+    fn filter_moves_only_through_matches() {
+        let mut app = app_with(&["/alps", "/beta", "/alpha"]);
+        type_keys(&mut app, "/al");
+        app.handle_key(Key::Down);
+        assert_eq!(selected(&app), Some("/alpha"));
+        app.handle_key(Key::Ctrl('n'));
+        assert_eq!(selected(&app), Some("/alpha"));
+        app.handle_key(Key::Ctrl('p'));
+        assert_eq!(selected(&app), Some("/alps"));
+    }
+
+    #[test]
+    fn typing_keeps_a_matching_cursor_and_moves_a_hidden_one_to_the_first_match() {
+        let mut app = app_with(&["/alps", "/beta", "/alpha"]);
+        app.handle_key(Key::Char('G'));
+        type_keys(&mut app, "/al");
+        assert_eq!(selected(&app), Some("/alpha"));
+
+        type_keys(&mut app, "ps");
+        assert_eq!(selected(&app), Some("/alps"));
+    }
+
+    #[test]
+    fn backspace_widens_the_filter() {
+        let mut app = app_with(&["/alps", "/beta"]);
+        type_keys(&mut app, "/alp");
+        app.handle_key(Key::Backspace);
+        app.handle_key(Key::Backspace);
+        assert_eq!(app.search(), Some((SearchKind::Filter, "a")));
+        assert_eq!(visible_ids(&app), ["/alps", "/beta"]);
+    }
+
+    #[test]
+    fn esc_clears_the_filter_and_keeps_the_cursor() {
+        let mut app = app_with(&["/alps", "/beta", "/alpha"]);
+        type_keys(&mut app, "/alpha");
+        assert_eq!(app.handle_key(Key::Esc), None);
+        assert_eq!(app.search(), None);
+        assert_eq!(selected(&app), Some("/alpha"));
+        assert_eq!(visible_ids(&app).len(), 3);
+    }
+
+    #[test]
+    fn enter_focuses_the_selected_match() {
+        let mut app = app_with(&["/alps", "/beta"]);
+        type_keys(&mut app, "/be");
+        assert_eq!(
+            app.handle_key(Key::Enter),
+            Some(Effect::Focus {
+                agent_id: "/beta".into()
+            })
+        );
+    }
+
+    #[test]
+    fn filter_without_matches_has_nothing_to_focus() {
+        let mut app = app_with(&["/alps"]);
+        type_keys(&mut app, "/zz");
+        assert_eq!(selected(&app), None);
+        assert_eq!(app.handle_key(Key::Enter), None);
+
+        app.handle_key(Key::Esc);
+        assert_eq!(selected(&app), Some("/alps"));
+    }
+
+    #[test]
+    fn refresh_keeps_the_filter_and_moves_a_cursor_whose_agent_left() {
+        let mut app = app_with(&["/alps", "/beta", "/alpha"]);
+        type_keys(&mut app, "/al");
+        app.handle_key(Key::Down);
+        app.apply_list_result(Some(0), feed_json(&["/alps", "/beta"]).as_bytes(), b"");
+        assert_eq!(app.search(), Some((SearchKind::Filter, "al")));
+        assert_eq!(selected(&app), Some("/alps"));
+    }
+
+    #[test]
+    fn leaving_the_plugin_closes_the_filter() {
+        let mut app = app_with(&["/alps", "/beta"]);
+        type_keys(&mut app, "/be");
+        app.set_focused(false);
+        assert_eq!(app.search(), None);
+        assert_eq!(visible_ids(&app).len(), 2);
     }
 
     #[test]

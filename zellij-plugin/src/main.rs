@@ -1,5 +1,6 @@
 mod app;
 mod feed;
+mod fuzzy;
 mod render;
 
 use app::{App, Effect, Key, Location};
@@ -284,6 +285,12 @@ fn call(kind: &str) -> BTreeMap<String, String> {
 }
 
 fn map_key(key: &KeyWithModifier) -> Option<Key> {
+    if key.has_only_modifiers(&[KeyModifier::Ctrl]) {
+        return match key.bare_key {
+            BareKey::Char(c) => Some(Key::Ctrl(c)),
+            _ => None,
+        };
+    }
     if !key.has_no_modifiers() {
         return None;
     }
@@ -294,6 +301,7 @@ fn map_key(key: &KeyWithModifier) -> Option<Key> {
         BareKey::Down => Some(Key::Down),
         BareKey::Enter => Some(Key::Enter),
         BareKey::Esc => Some(Key::Esc),
+        BareKey::Backspace => Some(Key::Backspace),
         _ => None,
     }
 }
