@@ -406,8 +406,87 @@ func TestBuildDropsAnUnreportedSiblingWhenNoPaneIsFree(t *testing.T) {
 	}
 
 	got := build(Input{Live: live, Panes: siblingPanes()[:1]})
-	if !equal(ids(got), []string{"/w/a#reported"}) || got[0].WindowID != "dev:0" {
-		t.Fatalf("agents = %+v, want only /w/a#reported on tab dev:0", got)
+	if !equal(ids(got), []string{"/w/a"}) || got[0].SessionID != "reported" || got[0].WindowID != "dev:0" {
+		t.Fatalf("agents = %+v, want only the reported session as /w/a on tab dev:0", got)
+	}
+}
+
+func TestBuildShowsOneAgentPerTabLedByTheSessionThatMattersMost(t *testing.T) {
+	panes := []mux.Pane{
+		{PaneID: "dev:terminal_1", WindowID: "dev:0", SessionID: "dev", Cwd: "/w/a", Command: "omp", CogDir: "/w/a"},
+		{PaneID: "dev:terminal_2", WindowID: "dev:0", SessionID: "dev", Cwd: "/w/a", Command: "omp", CogDir: "/w/a"},
+	}
+	working := siblingView("working", 2*time.Hour, state.AttnActive, "dev:terminal_1")
+	working.LastActivity = ago(time.Hour)
+	done := siblingView("done", time.Hour, state.AttnFinished, "dev:terminal_2")
+	asking := siblingView("asking", time.Hour, state.AttnQuestionPending, "dev:terminal_2")
+	idle := siblingView("idle", 2*time.Hour, state.AttnInactive, "dev:terminal_1")
+	idle.LastActivity = ago(time.Hour)
+
+	cases := map[string]struct {
+		live []state.SessionView
+		want string
+	}{
+		"a working session over a newer finished one": {[]state.SessionView{working, done}, "working"},
+		"a session needing you over a working one":    {[]state.SessionView{working, asking}, "asking"},
+		"the newest session when none works":          {[]state.SessionView{idle, done}, "done"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := build(Input{Live: tc.live, Panes: panes})
+			if !equal(ids(got), []string{"/w/a"}) || got[0].SessionID != tc.want || got[0].Sibling() {
+				t.Fatalf("agents = %+v, want one /w/a agent led by %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// /fork-split opens the fork beside its parent, in the directory the parent
+// had cd'd to, which is under the workspace session's directory.
+func TestBuildShowsAForkInASubdirectoryAsItsWorkspaceSession(t *testing.T) {
+	workspaces := []workspace.WorkspaceStatus{{
+		Workspace: workspace.Workspace{Name: "pi-cci"},
+		Sessions: []workspace.SessionStatus{{
+			Session: workspace.Session{Name: "mycl-584", Dir: "/ws/mycl-584"},
+			State:   settings.StateRunning, SessionID: "parent", Attention: state.AttnInactive, LastActivity: ago(16 * time.Minute),
+		}},
+	}}
+	panes := []mux.Pane{
+		{PaneID: "pi:terminal_2", WindowID: "pi:0", SessionID: "pi", Cwd: "/ws/mycl-584", Command: "claude", CogDir: "/ws/mycl-584"},
+		{PaneID: "pi:terminal_3", WindowID: "pi:0", SessionID: "pi", Cwd: "/ws/mycl-584/server", Command: "claude", CogDir: "/ws/mycl-584/server"},
+	}
+	parent := state.SessionView{
+		SessionID: "parent", Directory: "/ws/mycl-584", Source: state.SourceLive, Provider: "claude-code",
+		Attention: state.AttnInactive, Created: ago(time.Hour), LastActivity: ago(16 * time.Minute), PaneID: "pi:terminal_2",
+	}
+	fork := state.SessionView{
+		SessionID: "fork", Directory: "/ws/mycl-584/server", Source: state.SourceLive, Provider: "claude-code",
+		Attention: state.AttnActive, Created: ago(16 * time.Minute), LastActivity: ago(time.Second), PaneID: "pi:terminal_3",
+	}
+
+	cases := map[string][]state.SessionView{
+		"beside its parent":     {parent, fork},
+		"after its parent left": {fork},
+	}
+	for name, live := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := build(Input{Workspaces: workspaces, Live: live, Panes: panes, WorkspaceRoot: "/ws"})
+			if len(got) != 1 || got[0].ID != "/ws/mycl-584" || got[0].SessionID != "fork" || got[0].Group != GroupWorking || got[0].PaneID != "pi:terminal_3" {
+				t.Fatalf("agents = %+v, want the working fork as /ws/mycl-584 on its own pane", got)
+			}
+		})
+	}
+}
+
+// opencode reports no pane, so only a pane in its own directory places it.
+func TestBuildKeepsAnUnreportedSessionInASubdirectoryApart(t *testing.T) {
+	rows := []settings.Row{row("/w/a", settings.StateStopped, "", 90*time.Minute)}
+	live := []state.SessionView{{SessionID: "x", Directory: "/w/a/docs", Source: state.SourceLive, Provider: "opencode", LastActivity: ago(time.Minute)}}
+	panes := []mux.Pane{{PaneID: "%1", WindowID: "@1", SessionID: "$1", Cwd: "/w/a/docs", Command: "opencode"}}
+
+	got := build(Input{Rows: rows, Live: live, Panes: panes})
+	if !equal(ids(got), []string{"/w/a/docs"}) || got[0].Kind != KindStray || got[0].PaneID != "%1" {
+		t.Fatalf("agents = %+v, want the /w/a/docs stray on its pane", got)
 	}
 }
 

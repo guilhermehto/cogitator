@@ -122,10 +122,11 @@ func NewDismissal(at time.Time, panes []mux.Pane) Dismissal {
 // Build returns every agent worth surfacing, ordered by urgency.
 func Build(in Input) []Agent {
 	panes := indexPanes(in.Panes)
-	live, elsewhere := liveByDir(in.Live, panes)
-	out, managedDirs := managedAgents(in, panes, live, elsewhere)
+	managed := managedDirs(in)
+	live, elsewhere := liveByDir(in.Live, panes, managed)
+	out := managedAgents(in, panes, live, elsewhere)
 
-	for _, base := range strayAgents(in, live, managedDirs) {
+	for _, base := range strayAgents(in, live, managed) {
 		for _, a := range panes.sessionAgents(base, live[base.Dir], panes.byCwd[base.Dir]) {
 			if a.WindowID == "" {
 				continue
@@ -218,16 +219,36 @@ func indexOf(list []Agent, id string) int {
 	return -1
 }
 
-func managedAgents(in Input, panes paneIndex, live map[string][]state.SessionView, elsewhere map[string]bool) (agents []Agent, managedDirs map[string]bool) {
-	managedDirs = map[string]bool{}
+// managedDirs holds the canonical directory of every Repos row and workspace
+// session.
+func managedDirs(in Input) map[string]bool {
+	dirs := map[string]bool{}
+	for _, row := range in.Rows {
+		dirs[canonical(row.Worktree)] = true
+	}
+
+	for _, ws := range in.Workspaces {
+		for _, sess := range ws.Sessions {
+			if sess.Session.Dir != "" {
+				dirs[canonical(sess.Session.Dir)] = true
+			}
+		}
+	}
+	return dirs
+}
+
+func managedAgents(in Input, panes paneIndex, live map[string][]state.SessionView, elsewhere map[string]bool) []Agent {
+	var agents []Agent
 	admit := func(base Agent) {
 		views := live[base.Dir]
-		// Merge describes a row by its newest session in any multiplexer;
-		// when that one runs elsewhere, the row stands for a session here.
-		if elsewhere[base.SessionID] {
-			if len(views) == 0 {
-				return
-			}
+		if len(views) == 0 && elsewhere[base.SessionID] {
+			return
+		}
+		// Merge describes a row by its newest session in any multiplexer, but
+		// only in the row's own directory. When that session runs elsewhere,
+		// or the lone session here runs under the row's directory, the row
+		// stands for the session here.
+		if len(views) == 1 && (elsewhere[base.SessionID] || canonical(views[0].Directory) != base.Dir) {
 			base = sessionAgent(base, views[0])
 		}
 		for _, a := range panes.sessionAgents(base, views, panes.byCogDir[base.Dir]) {
@@ -240,7 +261,6 @@ func managedAgents(in Input, panes paneIndex, live map[string][]state.SessionVie
 
 	for _, row := range in.Rows {
 		dir := canonical(row.Worktree)
-		managedDirs[dir] = true
 		if row.SessionID == "" && row.LastActivity.IsZero() {
 			continue
 		}
@@ -266,7 +286,6 @@ func managedAgents(in Input, panes paneIndex, live map[string][]state.SessionVie
 				continue
 			}
 			dir := canonical(sess.Session.Dir)
-			managedDirs[dir] = true
 			admit(Agent{
 				ID:           dir,
 				Dir:          dir,
@@ -284,26 +303,35 @@ func managedAgents(in Input, panes paneIndex, live map[string][]state.SessionVie
 			})
 		}
 	}
-	return agents, managedDirs
+	return agents
 }
 
 // liveByDir groups the live sessions of this multiplexer by canonical
 // directory, oldest first so sessions sharing a directory keep a stable order.
 // A session whose hook reported a pane this multiplexer does not list runs in
 // another multiplexer, or its pane closed; it is left out, and elsewhere holds
-// its id.
-func liveByDir(views []state.SessionView, panes paneIndex) (dirs map[string][]state.SessionView, elsewhere map[string]bool) {
+// its id. A session on a listed pane joins the managed directory it runs
+// under, as a fork opened where its parent had cd'd to does; the others are
+// placed by the panes of their own directory, so they keep it.
+func liveByDir(views []state.SessionView, panes paneIndex, managed map[string]bool) (dirs map[string][]state.SessionView, elsewhere map[string]bool) {
 	dirs = map[string][]state.SessionView{}
 	elsewhere = map[string]bool{}
 	for _, sv := range views {
 		if sv.Source != state.SourceLive || sv.Directory == "" {
 			continue
 		}
-		if _, listed := panes.byID[sv.PaneID]; sv.PaneID != "" && !listed {
+
+		_, listed := panes.byID[sv.PaneID]
+		reported := sv.PaneID != ""
+		if reported && !listed {
 			elsewhere[sv.SessionID] = true
 			continue
 		}
+
 		dir := canonical(sv.Directory)
+		if reported {
+			dir = managedDirHolding(dir, managed)
+		}
 		dirs[dir] = append(dirs[dir], sv)
 	}
 
@@ -316,6 +344,18 @@ func liveByDir(views []state.SessionView, panes paneIndex) (dirs map[string][]st
 		})
 	}
 	return dirs, elsewhere
+}
+
+// managedDirHolding returns the deepest managed directory at or above dir, or
+// dir when none holds it.
+func managedDirHolding(dir string, managed map[string]bool) string {
+	holder := ""
+	for m := range managed {
+		if len(m) > len(holder) && settings.PathUnderRoot(m, dir) {
+			holder = m
+		}
+	}
+	return cmp.Or(holder, dir)
 }
 
 // stopUnlessInFlight stops a "running" agent that has neither a live session
@@ -499,12 +539,12 @@ func indexPanes(panes []mux.Pane) paneIndex {
 
 // sessionAgents returns base joined onto the pane its session's hook
 // reported, else the best of candidates; when several live sessions share
-// its directory, one agent per session. Each sibling takes its reported pane,
-// else the best candidate no sibling holds yet, so every pane stays reachable
-// even before a hook lands. A pane runs one agent, so a sibling left without
-// a free pane runs outside this multiplexer and is dropped. The reported pane
-// wins because a pane's cwd is its shell's, which need not be where the agent
-// runs.
+// its directory, one agent per tab. Each session takes its reported pane,
+// else the best candidate no other session holds yet, so every pane stays
+// reachable even before a hook lands. A pane runs one agent, so a session
+// left without a free pane runs outside this multiplexer and is dropped. The
+// reported pane wins because a pane's cwd is its shell's, which need not be
+// where the agent runs.
 func (ix paneIndex) sessionAgents(base Agent, views []state.SessionView, candidates []mux.Pane) []Agent {
 	if len(views) < 2 {
 		if len(views) == 0 || !ix.joinReported(&base, views[0].PaneID) {
@@ -517,7 +557,6 @@ func (ix paneIndex) sessionAgents(base Agent, views []state.SessionView, candida
 	taken := map[string]bool{}
 	for i, sv := range views {
 		out[i] = sessionAgent(base, sv)
-		out[i].ID = base.Dir + "#" + sv.SessionID
 		if ix.joinReported(&out[i], sv.PaneID) {
 			taken[sv.PaneID] = true
 		}
@@ -529,10 +568,57 @@ func (ix paneIndex) sessionAgents(base Agent, views []state.SessionView, candida
 			continue
 		}
 		taken[a.PaneID] = true
-		a.Tab = cmp.Or(a.Tab, a.Title, ix.tabNumber(a.PaneID))
 		placed = append(placed, a)
 	}
-	return placed
+
+	leads := leadPerTab(placed)
+	if len(leads) < 2 {
+		return leads
+	}
+	for i := range leads {
+		leads[i].ID = base.Dir + "#" + leads[i].SessionID
+		leads[i].Tab = cmp.Or(leads[i].Tab, leads[i].Title, ix.tabNumber(leads[i].PaneID))
+	}
+	return leads
+}
+
+// leadPerTab keeps one agent per tab, as a tab mostly runs one agent at a
+// time: a fork works beside the parent it left idle. The lead is a session
+// that needs the user, else one that works, else the most recently active.
+// A done session that does not lead stays hidden once the lead is seen.
+func leadPerTab(placed []Agent) []Agent {
+	var leads []Agent
+	leadAt := map[string]int{}
+	for _, a := range placed {
+		i, seen := leadAt[a.WindowID]
+		if !seen {
+			leadAt[a.WindowID] = len(leads)
+			leads = append(leads, a)
+			continue
+		}
+		if leadsTab(a, leads[i]) {
+			leads[i] = a
+		}
+	}
+	return leads
+}
+
+func leadsTab(a, b Agent) bool {
+	if tabRank(a) != tabRank(b) {
+		return tabRank(a) < tabRank(b)
+	}
+	return a.LastActivity.After(b.LastActivity)
+}
+
+func tabRank(a Agent) int {
+	switch groupOf(a) {
+	case GroupNeedsYou:
+		return 0
+	case GroupWorking:
+		return 1
+	default:
+		return 2
+	}
 }
 
 // joinReported joins a onto the pane a hook reported, if it still exists.
