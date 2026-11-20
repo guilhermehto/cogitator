@@ -2,6 +2,7 @@ package zellijctl
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/guilhermehto/cogitator/internal/mux"
 	"github.com/guilhermehto/cogitator/internal/pathnorm"
@@ -171,6 +173,25 @@ func canonicalTempDir(t *testing.T) (raw, canonical string) {
 		t.Fatal(err)
 	}
 	return raw, c
+}
+
+func TestExecRunner_GivesUpOnACommandThatNeverAnswers(t *testing.T) {
+	hung := execRunner{binary: "sleep", timeout: 50 * time.Millisecond}
+
+	answered := make(chan error, 1)
+	go func() {
+		_, err := hung.Run("30")
+		answered <- err
+	}()
+
+	select {
+	case err := <-answered:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Run error = %v, want a deadline error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run still waits on a command that never answers")
+	}
 }
 
 func TestSplitAddress_RoundTripsSessionNamesWithColons(t *testing.T) {

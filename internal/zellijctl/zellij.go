@@ -9,6 +9,7 @@ package zellijctl
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,11 +43,25 @@ type RunnerFunc func(args ...string) (string, error)
 // Run implements Runner.
 func (f RunnerFunc) Run(args ...string) (string, error) { return f(args...) }
 
-type execRunner struct{}
+// commandTimeout bounds one zellij call. A client asking a session whose
+// server died mid-request never returns, and a pane listing that never
+// returns holds back every later one.
+const commandTimeout = 5 * time.Second
+
+type execRunner struct {
+	binary  string
+	timeout time.Duration
+}
 
 // Run executes zellij with the given arguments and returns stdout.
-func (execRunner) Run(args ...string) (string, error) {
-	out, err := exec.Command("zellij", args...).Output()
+func (r execRunner) Run(args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, r.binary, args...).Output()
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("zellij %s: no answer after %s: %w", strings.Join(args, " "), r.timeout, ctx.Err())
+	}
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
@@ -58,7 +73,7 @@ func (execRunner) Run(args ...string) (string, error) {
 }
 
 // DefaultRunner is the Runner used by a Backend with no Runner set.
-var DefaultRunner Runner = execRunner{}
+var DefaultRunner Runner = execRunner{binary: "zellij", timeout: commandTimeout}
 
 const paneIDPrefix = "terminal_"
 
